@@ -13,6 +13,7 @@
 #include <linux/clk-provider.h>
 #include <linux/i2c.h>
 #include <linux/bcd.h>
+#include <linux/delay.h>
 #include <linux/rtc.h>
 
 #define HYM8563_CTL1		0x00
@@ -441,10 +442,16 @@ static irqreturn_t hym8563_irq(int irq, void *dev_id)
 
 static int hym8563_init_device(struct i2c_client *client)
 {
-	int ret;
+	int ret, i;
 
 	/* Clear stop flag if present */
-	ret = i2c_smbus_write_byte_data(client, HYM8563_CTL1, 0);
+	for (i = 0; i < 3; i++) {
+		ret = i2c_smbus_write_byte_data(client, HYM8563_CTL1, 0);
+		if (ret == 0)
+			break;
+		msleep(20);
+	}
+
 	if (ret < 0)
 		return ret;
 
