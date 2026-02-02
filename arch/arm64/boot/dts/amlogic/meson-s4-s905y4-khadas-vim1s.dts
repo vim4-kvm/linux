@@ -338,3 +338,15 @@
 &uart_b {
 	status = "okay";
 };
+
+&usb {
+	status = "okay";
+};
+
+&usb2_phy0 {
+	status = "okay";
+};
+
+&usb2_phy1 {
+	status = "okay";
+};
