@@ -75,13 +75,30 @@ static const struct regmap_config khadas_mcu_regmap_config = {
 	.cache_type	= REGCACHE_MAPLE,
 };
 
+static const struct khadas_mcu_fan_pdata khadas_mcu_fan_pdata = {
+	.fan_reg	= KHADAS_MCU_CMD_FAN_STATUS_CTRL_REG,
+	.max_level	= 3,
+};
+
 static const struct mfd_cell khadas_mcu_fan_cells[] = {
 	/* VIM1/2 Rev13+ and VIM3 only */
-	MFD_CELL_NAME("khadas-mcu-fan-ctrl"),
+	{
+		.name = "khadas-mcu-fan-ctrl",
+		.platform_data = &khadas_mcu_fan_pdata,
+		.pdata_size    = sizeof(khadas_mcu_fan_pdata),
+	},
 };
 
 static const struct mfd_cell khadas_mcu_cells[] = {
 	MFD_CELL_NAME("khadas-mcu-user-mem"),
+};
+
+static const struct khadas_mcu_data khadas_mcu_data = {
+	.regmap_config	= &khadas_mcu_regmap_config,
+	.cells		= khadas_mcu_cells,
+	.ncells		= ARRAY_SIZE(khadas_mcu_cells),
+	.fan_cells	= khadas_mcu_fan_cells,
+	.nfan_cells	= ARRAY_SIZE(khadas_mcu_fan_cells),
 };
 
 static bool khadas_mcu_vim4_reg_volatile(struct device *dev, unsigned int reg)
@@ -122,60 +139,56 @@ static const struct regmap_config khadas_mcu_vim4_regmap_config = {
 	.cache_type	= REGCACHE_MAPLE,
 };
 
-static const struct mfd_cell khadas_mcu_vim4_fan_cells[] = {
-	MFD_CELL_NAME("khadas-mcu-vim4-fan"),
+static const struct khadas_mcu_fan_pdata khadas_vim4_fan_pdata = {
+	.fan_reg	= KHADAS_MCU_VIM4_FAN_CTRL_REG,
+	.max_level	= 0x64,
+};
+
+static const struct mfd_cell khadas_mcu_vim4_cells[] = {
+	{
+		.name		= "khadas-mcu-fan-ctrl",
+		.platform_data	= &khadas_vim4_fan_pdata,
+		.pdata_size	= sizeof(khadas_vim4_fan_pdata),
+	},
+};
+
+static const struct khadas_mcu_data khadas_vim4_mcu_data = {
+	.regmap_config	= &khadas_mcu_vim4_regmap_config,
+	.cells		= NULL,
+	.ncells		= 0,
+	.fan_cells	= khadas_mcu_vim4_cells,
+	.nfan_cells	= ARRAY_SIZE(khadas_mcu_vim4_cells),
 };
 
 static int khadas_mcu_probe(struct i2c_client *client)
 {
-	const struct mfd_cell *cells, *fan_cells;
-	const struct regmap_config *regmap_cfg;
 	struct device *dev = &client->dev;
-	int ncells, nfan_cells, ret;
 	struct khadas_mcu *ddata;
-	const void *mcu_variant;
+	int ret;
 
 	ddata = devm_kzalloc(dev, sizeof(*ddata), GFP_KERNEL);
 	if (!ddata)
 		return -ENOMEM;
 
-	mcu_variant = i2c_get_match_data(client);
-	if (!mcu_variant)
-		return -ENODEV;
-
-	switch ((uintptr_t)mcu_variant) {
-	case KHADAS_MCU_GENERIC:
-		regmap_cfg	= &khadas_mcu_regmap_config;
-		cells		= khadas_mcu_cells;
-		ncells		= ARRAY_SIZE(khadas_mcu_cells);
-		fan_cells	= khadas_mcu_fan_cells;
-		nfan_cells	= ARRAY_SIZE(khadas_mcu_fan_cells);
-		break;
-	case KHADAS_MCU_VIM4:
-		regmap_cfg	= &khadas_mcu_vim4_regmap_config;
-		cells		= NULL;
-		ncells		= 0;
-		fan_cells	= khadas_mcu_vim4_fan_cells;
-		nfan_cells	= ARRAY_SIZE(khadas_mcu_vim4_fan_cells);
-		break;
-	default:
-		return -ENODEV;
-	}
+	ddata->data = i2c_get_match_data(client);
+	if (!ddata->data)
+		return -EINVAL;
 
 	i2c_set_clientdata(client, ddata);
 
 	ddata->dev = dev;
 
-	ddata->regmap = devm_regmap_init_i2c(client, regmap_cfg);
+	ddata->regmap = devm_regmap_init_i2c(client,
+					     ddata->data->regmap_config);
 	if (IS_ERR(ddata->regmap)) {
 		ret = PTR_ERR(ddata->regmap);
 		return dev_err_probe(dev, ret, "Failed to allocate register map\n");
 	}
 
-	if (cells && ncells) {
+	if (ddata->data->cells && ddata->data->ncells) {
 		ret = devm_mfd_add_devices(dev, PLATFORM_DEVID_NONE,
-					   cells,
-					   ncells,
+					   ddata->data->cells,
+					   ddata->data->ncells,
 					   NULL, 0, NULL);
 		if (ret)
 			return ret;
@@ -183,8 +196,8 @@ static int khadas_mcu_probe(struct i2c_client *client)
 
 	if (of_property_present(dev->of_node, "#cooling-cells"))
 		return devm_mfd_add_devices(dev, PLATFORM_DEVID_NONE,
-					    fan_cells,
-					    nfan_cells,
+					    ddata->data->fan_cells,
+					    ddata->data->nfan_cells,
 					    NULL, 0, NULL);
 
 	return 0;
@@ -192,8 +205,8 @@ static int khadas_mcu_probe(struct i2c_client *client)
 
 #ifdef CONFIG_OF
 static const struct of_device_id khadas_mcu_of_match[] = {
-	{ .compatible = "khadas,mcu", .data = (void *)KHADAS_MCU_GENERIC },
-	{ .compatible = "khadas,vim4-mcu", .data = (void *)KHADAS_MCU_VIM4 },
+	{ .compatible = "khadas,mcu", .data = &khadas_mcu_data },
+	{ .compatible = "khadas,vim4-mcu", .data = &khadas_vim4_mcu_data },
 	{},
 };
 MODULE_DEVICE_TABLE(of, khadas_mcu_of_match);
