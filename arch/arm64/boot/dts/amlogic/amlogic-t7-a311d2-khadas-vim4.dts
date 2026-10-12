@@ -706,3 +706,7 @@
 		vddio-supply = <&vddao_1v8>;
 	};
 };
+
+&gpu {
+	status = "okay";
+};
