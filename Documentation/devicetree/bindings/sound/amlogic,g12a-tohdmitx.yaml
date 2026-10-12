@@ -25,6 +25,10 @@ properties:
               - amlogic,s4-tohdmitx
               - amlogic,sm1-tohdmitx
           - const: amlogic,g12a-tohdmitx
+      - items:
+          - const: amlogic,t7-tohdmitx
+          - const: amlogic,s4-tohdmitx
+          - const: amlogic,g12a-tohdmitx
 
   reg:
     maxItems: 1
