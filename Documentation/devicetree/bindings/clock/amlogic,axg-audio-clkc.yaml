@@ -17,11 +17,15 @@ description:
 
 properties:
   compatible:
-    enum:
-      - amlogic,axg-audio-clkc
-      - amlogic,g12a-audio-clkc
-      - amlogic,s4-audio-clkc
-      - amlogic,sm1-audio-clkc
+    oneOf:
+      - enum:
+          - amlogic,axg-audio-clkc
+          - amlogic,g12a-audio-clkc
+          - amlogic,s4-audio-clkc
+          - amlogic,sm1-audio-clkc
+      - items:
+          - const: amlogic,t7-audio-clkc
+          - const: amlogic,s4-audio-clkc
 
   '#clock-cells':
     const: 1
