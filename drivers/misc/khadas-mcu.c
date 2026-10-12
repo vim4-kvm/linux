@@ -321,7 +321,8 @@ static int mcu_fan_auto_speed_percent(struct mcu_fan_data *fan_data, int temp)
 
 static int mcu_fan_limit_speed_change(int cur_speed, int target)
 {
-	if (target == 0 || cur_speed == 0)
+	/* Emergency cooling must not wait for the gradual speed ramp. */
+	if (target == 0 || target == 100 || cur_speed == 0)
 		return target;
 	if (target > cur_speed + MCU_FAN_AUTO_SLEW_STEP)
 		return cur_speed + MCU_FAN_AUTO_SLEW_STEP;
@@ -415,7 +416,9 @@ static void fan_work_func(struct work_struct *_work)
 		else
 			temp = fan_data->trig_temp_level0;
 
-		if (temp != -EINVAL) {
+		if (temp < 0 && is_mcu_fan_speed_control_supported()) {
+			mcu_fan_speed_percent_set(fan_data, 100);
+		} else if (temp >= 0) {
 			if (is_mcu_fan_speed_control_supported()) {
 				int speed = mcu_fan_auto_speed_percent(fan_data, temp);
 
@@ -441,7 +444,7 @@ static void fan_work_func(struct work_struct *_work)
 static void khadas_fan_set(struct mcu_fan_data  *fan_data)
 {
 	if (is_mcu_fan_control_supported()) {
-		cancel_delayed_work(&fan_data->work);
+		cancel_delayed_work_sync(&fan_data->work);
 		if (fan_data->enable == MCU_FAN_STATUS_DISABLE) {
 			mcu_fan_level_set(fan_data, 0);
 			return;
@@ -606,6 +609,11 @@ void fan_level_set(struct mcu_data *ug_mcu_data)
 	struct mcu_fan_data *fan_data = &g_mcu_data->fan_data;
 	int temp = -EINVAL;
 
+	/* Changing thresholds must not override manual mode or a disabled fan. */
+	if (fan_data->mode != MCU_FAN_MODE_AUTO ||
+	    fan_data->enable != MCU_FAN_STATUS_ENABLE)
+		return;
+
 	if (ug_mcu_data->board == KHADAS_BOARD_VIM3 ||
 			ug_mcu_data->board == KHADAS_BOARD_VIM4 ||
 			ug_mcu_data->board == KHADAS_BOARD_VIM1S)
@@ -613,7 +621,9 @@ void fan_level_set(struct mcu_data *ug_mcu_data)
 	else
 		temp = fan_data->trig_temp_level0;
 
-	if (temp != -EINVAL) {
+	if (temp < 0 && is_mcu_fan_speed_control_supported()) {
+		mcu_fan_speed_percent_set(fan_data, 100);
+	} else if (temp >= 0) {
 		if (is_mcu_fan_speed_control_supported()) {
 			int speed = mcu_fan_auto_speed_percent(fan_data, temp);
 
