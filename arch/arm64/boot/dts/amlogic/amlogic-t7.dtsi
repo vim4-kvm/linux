@@ -963,6 +963,31 @@
 				status = "disabled";
 			};
 
+			gpu: gpu@400000 {
+				compatible = "amlogic,meson-g12a-mali", "arm,mali-bifrost";
+				reg = <0x0 0x400000 0x0 0x4000>;
+				interrupts = <GIC_SPI 146 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 145 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 144 IRQ_TYPE_LEVEL_HIGH>;
+				interrupt-names = "job", "mmu", "gpu";
+				clocks = <&clkc_periphs CLKID_MALI>,
+					 <&clkc_periphs CLKID_SYS_MALI>;
+				clock-names = "core", "bus";
+				resets = <&reset RESET_MALI_CAPB3>, <&reset RESET_MALI>;
+				power-domains = <&pwrc PWRC_T7_MALI_TOP_ID>;
+				assigned-clocks = <&clkc_periphs CLKID_MALI_0_SEL>,
+						  <&clkc_periphs CLKID_MALI_0>,
+						  <&clkc_periphs CLKID_MALI>;
+				assigned-clock-parents = <&scmi_clk CLKID_FCLK_DIV2P5>,
+							 <0>,
+							 <&clkc_periphs CLKID_MALI_0>;
+				assigned-clock-rates = <0>, <800000000>, <0>;
+				/* The GPU is IO-coherent (ACE-Lite) on T7 */
+				dma-coherent;
+				#cooling-cells = <2>;
+				status = "disabled";
+			};
+
 			eth_phy: mdio-multiplexer@28000 {
 				compatible = "amlogic,g12a-mdio-mux";
 				reg = <0x0 0x28000 0x0 0xa4>;
