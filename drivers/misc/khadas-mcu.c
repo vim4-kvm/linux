@@ -37,6 +37,13 @@
 #define MCU_FAN_SPEED_LOW_V2            0x32
 #define MCU_FAN_SPEED_MID_V2            0x48
 #define MCU_FAN_SPEED_HIGH_V2           0x64
+#define MCU_FAN_AUTO_START_TEMP_DELTA   15
+#define MCU_FAN_AUTO_DAILY_TEMP_DELTA   5
+#define MCU_FAN_AUTO_SPEED_MIN          5
+#define MCU_FAN_AUTO_SPEED_DAILY        25
+#define MCU_FAN_AUTO_SPEED_NOISY        35
+#define MCU_FAN_AUTO_SPEED_MID          70
+#define MCU_FAN_AUTO_SLEW_STEP          5
 
 enum mcu_fan_mode {
 	MCU_FAN_MODE_MANUAL = 0,
@@ -86,6 +93,8 @@ struct mcu_fan_data {
 	enum mcu_fan_status enable;
 	enum mcu_fan_mode mode;
 	enum mcu_fan_level level;
+	bool use_percent;
+	int speed_percent;
 	int	trig_temp_level0;
 	int	trig_temp_level1;
 	int	trig_temp_level2;
@@ -237,6 +246,115 @@ static bool is_mcu_usb_pcie_switch_supported(void) {
 		return 0;
 }
 
+static bool is_mcu_fan_speed_control_supported(void)
+{
+	return g_mcu_data->board == KHADAS_BOARD_VIM4 ||
+		g_mcu_data->board == KHADAS_BOARD_VIM1S;
+}
+
+static u8 mcu_fan_percent_to_speed(int percent)
+{
+	return (percent * MCU_FAN_SPEED_HIGH_V2 + 50) / 100;
+}
+
+static enum mcu_fan_level mcu_fan_speed_to_level(u8 speed)
+{
+	if (speed == MCU_FAN_SPEED_OFF)
+		return MCU_FAN_LEVEL_0;
+	if (speed <= MCU_FAN_SPEED_LOW_V2)
+		return MCU_FAN_LEVEL_1;
+	if (speed <= MCU_FAN_SPEED_MID_V2)
+		return MCU_FAN_LEVEL_2;
+	return MCU_FAN_LEVEL_3;
+}
+
+static int mcu_fan_speed_to_percent(u8 speed)
+{
+	return speed * 100 / MCU_FAN_SPEED_HIGH_V2;
+}
+
+static int mcu_fan_lerp(int value, int in_min, int in_max,
+			int out_min, int out_max)
+{
+	if (in_max <= in_min)
+		return out_max;
+
+	return out_min + (value - in_min) * (out_max - out_min) /
+		(in_max - in_min);
+}
+
+static int mcu_fan_auto_speed_percent(struct mcu_fan_data *fan_data, int temp)
+{
+	int start_temp = fan_data->trig_temp_level0 -
+		MCU_FAN_AUTO_START_TEMP_DELTA;
+	int daily_temp = fan_data->trig_temp_level0 -
+		MCU_FAN_AUTO_DAILY_TEMP_DELTA;
+
+	if (start_temp < 0)
+		start_temp = 0;
+	if (daily_temp <= start_temp)
+		daily_temp = start_temp + 1;
+
+	if (temp < start_temp)
+		return 0;
+	if (temp < daily_temp)
+		return mcu_fan_lerp(temp, start_temp, daily_temp,
+				MCU_FAN_AUTO_SPEED_MIN,
+				MCU_FAN_AUTO_SPEED_DAILY);
+	if (temp < fan_data->trig_temp_level0)
+		return mcu_fan_lerp(temp, daily_temp,
+				fan_data->trig_temp_level0,
+				MCU_FAN_AUTO_SPEED_DAILY,
+				MCU_FAN_AUTO_SPEED_NOISY);
+	if (temp < fan_data->trig_temp_level1)
+		return mcu_fan_lerp(temp, fan_data->trig_temp_level0,
+				fan_data->trig_temp_level1,
+				MCU_FAN_AUTO_SPEED_NOISY,
+				MCU_FAN_AUTO_SPEED_MID);
+	if (temp < fan_data->trig_temp_level2)
+		return mcu_fan_lerp(temp, fan_data->trig_temp_level1,
+				fan_data->trig_temp_level2,
+				MCU_FAN_AUTO_SPEED_MID, 100);
+
+	return 100;
+}
+
+static int mcu_fan_limit_speed_change(int cur_speed, int target)
+{
+	if (target == 0 || cur_speed == 0)
+		return target;
+	if (target > cur_speed + MCU_FAN_AUTO_SLEW_STEP)
+		return cur_speed + MCU_FAN_AUTO_SLEW_STEP;
+	if (target < cur_speed - MCU_FAN_AUTO_SLEW_STEP)
+		return cur_speed - MCU_FAN_AUTO_SLEW_STEP;
+
+	return target;
+}
+
+static int mcu_fan_speed_percent_set(struct mcu_fan_data *fan_data,
+				     int percent)
+{
+	int ret;
+	u8 data;
+
+	if (!is_mcu_fan_speed_control_supported())
+		return -EOPNOTSUPP;
+
+	data = mcu_fan_percent_to_speed(percent);
+	ret = mcu_i2c_write_regs(g_mcu_data->client,
+			MCU_CMD_FAN_STATUS_CTRL_REGv2,
+			&data, 1);
+	if (ret < 0) {
+		pr_debug("write fan control err\n");
+		return ret;
+	}
+
+	fan_data->speed_percent = percent;
+	fan_data->level = mcu_fan_speed_to_level(data);
+
+	return 0;
+}
+
 static void mcu_fan_level_set(struct mcu_fan_data *fan_data, int level)
 {
 	if (is_mcu_fan_control_supported()) {
@@ -278,6 +396,8 @@ static void mcu_fan_level_set(struct mcu_fan_data *fan_data, int level)
 				return;
 			}
 		}
+
+		fan_data->speed_percent = mcu_fan_speed_to_percent(data);
 	}
 }
 
@@ -296,14 +416,22 @@ static void fan_work_func(struct work_struct *_work)
 			temp = fan_data->trig_temp_level0;
 
 		if (temp != -EINVAL) {
-			if (temp < fan_data->trig_temp_level0)
-				mcu_fan_level_set(fan_data, 0);
-			else if (temp < fan_data->trig_temp_level1)
-				mcu_fan_level_set(fan_data, 1);
-			else if (temp < fan_data->trig_temp_level2)
-				mcu_fan_level_set(fan_data, 2);
-			else
-				mcu_fan_level_set(fan_data, 3);
+			if (is_mcu_fan_speed_control_supported()) {
+				int speed = mcu_fan_auto_speed_percent(fan_data, temp);
+
+				speed = mcu_fan_limit_speed_change(
+						fan_data->speed_percent, speed);
+				mcu_fan_speed_percent_set(fan_data, speed);
+			} else {
+				if (temp < fan_data->trig_temp_level0)
+					mcu_fan_level_set(fan_data, 0);
+				else if (temp < fan_data->trig_temp_level1)
+					mcu_fan_level_set(fan_data, 1);
+				else if (temp < fan_data->trig_temp_level2)
+					mcu_fan_level_set(fan_data, 2);
+				else
+					mcu_fan_level_set(fan_data, 3);
+			}
 		}
 
 		schedule_delayed_work(&fan_data->work, MCU_FAN_LOOP_SECS);
@@ -320,6 +448,11 @@ static void khadas_fan_set(struct mcu_fan_data  *fan_data)
 		}
 		switch (fan_data->mode) {
 		case MCU_FAN_MODE_MANUAL:
+			if (fan_data->use_percent) {
+				mcu_fan_speed_percent_set(fan_data,
+						fan_data->speed_percent);
+				break;
+			}
 			switch (fan_data->level) {
 			case MCU_FAN_LEVEL_0:
 				mcu_fan_level_set(fan_data, 0);
@@ -409,9 +542,41 @@ static ssize_t store_fan_level(struct class *cls, struct class_attribute *attr,
 		return -EINVAL;
 
 	if (level >= 0 && level < 4) {
+		g_mcu_data->fan_data.use_percent = false;
 		g_mcu_data->fan_data.level = level;
 		khadas_fan_set(&g_mcu_data->fan_data);
 	}
+
+	return count;
+}
+
+static ssize_t show_fan_speed(struct class *cls,
+			 struct class_attribute *attr, char *buf)
+{
+	if (!is_mcu_fan_speed_control_supported())
+		return sprintf(buf, "Fan speed: unsupported\n");
+
+	return sprintf(buf, "Fan speed: %d\n",
+			g_mcu_data->fan_data.speed_percent);
+}
+
+static ssize_t store_fan_speed(struct class *cls, struct class_attribute *attr,
+		       const char *buf, size_t count)
+{
+	int speed;
+
+	if (!is_mcu_fan_speed_control_supported())
+		return -EOPNOTSUPP;
+
+	if (kstrtoint(buf, 0, &speed))
+		return -EINVAL;
+
+	if (speed < 0 || speed > 100)
+		return -EINVAL;
+
+	g_mcu_data->fan_data.use_percent = true;
+	g_mcu_data->fan_data.speed_percent = speed;
+	khadas_fan_set(&g_mcu_data->fan_data);
 
 	return count;
 }
@@ -449,14 +614,22 @@ void fan_level_set(struct mcu_data *ug_mcu_data)
 		temp = fan_data->trig_temp_level0;
 
 	if (temp != -EINVAL) {
-		if (temp < ug_mcu_data->fan_data.trig_temp_level0)
-			mcu_fan_level_set(fan_data, 0);
-		else if (temp < ug_mcu_data->fan_data.trig_temp_level1)
-			mcu_fan_level_set(fan_data, 1);
-		else if (temp < ug_mcu_data->fan_data.trig_temp_level2)
-			mcu_fan_level_set(fan_data, 2);
-		else
-			mcu_fan_level_set(fan_data, 3);
+		if (is_mcu_fan_speed_control_supported()) {
+			int speed = mcu_fan_auto_speed_percent(fan_data, temp);
+
+			speed = mcu_fan_limit_speed_change(
+					fan_data->speed_percent, speed);
+			mcu_fan_speed_percent_set(fan_data, speed);
+		} else {
+			if (temp < ug_mcu_data->fan_data.trig_temp_level0)
+				mcu_fan_level_set(fan_data, 0);
+			else if (temp < ug_mcu_data->fan_data.trig_temp_level1)
+				mcu_fan_level_set(fan_data, 1);
+			else if (temp < ug_mcu_data->fan_data.trig_temp_level2)
+				mcu_fan_level_set(fan_data, 2);
+			else
+				mcu_fan_level_set(fan_data, 3);
+		}
 	}
 }
 
@@ -599,6 +772,7 @@ static struct class_attribute fan_class_attrs[] = {
 	__ATTR(enable, 0644, show_fan_enable, store_fan_enable),
 	__ATTR(mode, 0644, show_fan_mode, store_fan_mode),
 	__ATTR(level, 0644, show_fan_level, store_fan_level),
+	__ATTR(speed, 0644, show_fan_speed, store_fan_speed),
 	__ATTR(trigger_temp_low, 0644,
 			show_fan_trigger_low, store_fan_trigger_low),
 	__ATTR(trigger_temp_mid, 0644,
@@ -872,6 +1046,8 @@ static int mcu_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	if (is_mcu_fan_control_supported()) {
 		g_mcu_data->fan_data.mode = MCU_FAN_MODE_AUTO;
 		g_mcu_data->fan_data.level = MCU_FAN_LEVEL_0;
+		g_mcu_data->fan_data.use_percent = false;
+		g_mcu_data->fan_data.speed_percent = 0;
 		g_mcu_data->fan_data.enable = MCU_FAN_STATUS_ENABLE;
 
 		INIT_DELAYED_WORK(&g_mcu_data->fan_data.work, fan_work_func);
