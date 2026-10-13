@@ -66,6 +66,7 @@ properties:
       - enum:
           - amlogic,meson-g12a-vpu # G12A (S905X2, S905Y2, S905D2)
           - amlogic,meson-s4-vpu # S4 (S905Y4)
+          - amlogic,meson-t7-vpu # T7 (A311D2)
 
   reg:
     minItems: 2
@@ -76,9 +77,11 @@ properties:
     maxItems: 5
 
   clocks:
+    minItems: 1
     maxItems: 2
 
   clock-names:
+    minItems: 1
     maxItems: 2
 
   interrupts:
@@ -128,7 +131,9 @@ allOf:
       properties:
         compatible:
           contains:
-            const: amlogic,meson-s4-vpu
+            enum:
+              - amlogic,meson-s4-vpu
+              - amlogic,meson-t7-vpu
     then:
       properties:
         reg:
@@ -145,14 +150,6 @@ allOf:
             - const: clkctrl
             - const: pwrctrl
             - const: sysctrl
-        clocks:
-          items:
-            - description: vpu clock
-            - description: vapb clock
-        clock-names:
-          items:
-            - const: vpu
-            - const: vapb
     else:
       properties:
         reg:
@@ -165,6 +162,36 @@ allOf:
             - const: hhi
         clocks: false
         clock-names: false
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: amlogic,meson-s4-vpu
+    then:
+      properties:
+        clocks:
+          items:
+            - description: vpu clock
+            - description: vapb clock
+        clock-names:
+          items:
+            - const: vpu
+            - const: vapb
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: amlogic,meson-t7-vpu
+    then:
+      properties:
+        clocks:
+          items:
+            - description: VPU interrupt and register clock gate
+        clock-names:
+          items:
+            - const: intr
 
 additionalProperties: false
 
