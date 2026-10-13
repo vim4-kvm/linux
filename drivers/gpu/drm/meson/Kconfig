@@ -23,6 +23,20 @@ config DRM_MESON_DW_HDMI
 	select DRM_DW_HDMI
 	imply DRM_DW_HDMI_I2S_AUDIO
 
+config DRM_MESON_HDMITX21
+	tristate "HDMI 2.1 transmitter support for Amlogic T7"
+	depends on DRM_MESON
+	default y if DRM_MESON
+	select DRM_DISPLAY_CONNECTOR
+	select DRM_DISPLAY_HDMI_AUDIO_HELPER
+	select DRM_DISPLAY_HDMI_HELPER
+	select DRM_DISPLAY_HELPER
+	select HDMI
+	select SND_SOC_HDMI_CODEC if SND_SOC
+	help
+	  Support for the HDMI transmitter of the Amlogic T7 SoC. It is not a
+	  Synopsys DesignWare core.
+
 config DRM_MESON_DW_MIPI_DSI
 	tristate "MIPI DSI Synopsys Controller support for Amlogic Meson Display"
 	depends on DRM_MESON
