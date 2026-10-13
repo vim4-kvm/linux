@@ -31,6 +31,11 @@
 #define  CTRL0_SPDIF_SEL		(0x1 << CTRL0_SPDIF_SEL_SHIFT)
 #define  CTRL0_SPDIF_CLK_SEL		BIT(0)
 
+/* T7: master clock to the HDMI transmitter */
+#define  CTRL0_MCLK_DIV2		BIT(20)
+#define  CTRL0_MCLK_EN			BIT(19)
+#define  CTRL0_MCLK_SEL			GENMASK(17, 16)
+
 #define  CTRL0_I2S_DATA_SHIFT		29
 #define  CTRL0_I2S_CLK_SHIFT		28
 #define  CTRL0_SPDIF_DATA_SHIFT		31
@@ -39,6 +44,8 @@
 struct g12a_tohdmitx_match_data {
 	const struct snd_soc_component_driver *component_drv;
 };
+
+static const struct snd_soc_component_driver t7_tohdmitx_component_drv;
 
 static const char * const g12a_tohdmitx_i2s_mux_texts[] = {
 	"I2S A", "I2S B", "I2S C",
@@ -74,6 +81,11 @@ static int g12a_tohdmitx_i2s_mux_put_enum(struct snd_kcontrol *kcontrol,
 				      FIELD_PREP(CTRL0_I2S_DAT_SEL, mux) |
 				      FIELD_PREP(CTRL0_I2S_LRCLK_SEL, mux) |
 				      FIELD_PREP(CTRL0_I2S_BCLK_SEL, mux));
+
+	/* T7: the master clock follows the selected TDM interface */
+	if (component->driver == &t7_tohdmitx_component_drv)
+		snd_soc_component_update_bits(component, e->reg, CTRL0_MCLK_SEL,
+					      FIELD_PREP(CTRL0_MCLK_SEL, mux));
 
 	snd_soc_dapm_mux_update_power(dapm, kcontrol, mux, e, NULL);
 
@@ -238,6 +250,17 @@ static int g12a_tohdmi_component_probe(struct snd_soc_component *c)
 		     CTRL0_I2S_BLK_CAP_INV | CTRL0_SPDIF_CLK_CAP_INV);
 }
 
+/*
+ * T7: the HDMI transmitter needs the master clock of the I2S source,
+ * divided by 2 (mclk-fs 256 gives 128 fs).
+ */
+static int t7_tohdmi_component_probe(struct snd_soc_component *c)
+{
+	return snd_soc_component_write(c, TOHDMITX_CTRL0,
+		     CTRL0_I2S_BLK_CAP_INV | CTRL0_SPDIF_CLK_CAP_INV |
+		     CTRL0_MCLK_EN | CTRL0_MCLK_DIV2);
+}
+
 static const struct snd_soc_dapm_route g12a_tohdmitx_routes[] = {
 	{ "I2S SRC", "I2S A", "I2S IN A Playback" },
 	{ "I2S SRC", "I2S B", "I2S IN B Playback" },
@@ -282,6 +305,15 @@ static const struct snd_soc_component_driver s4_tohdmitx_component_drv = {
 	.endianness		= 1,
 };
 
+static const struct snd_soc_component_driver t7_tohdmitx_component_drv = {
+	.probe			= t7_tohdmi_component_probe,
+	.dapm_widgets		= s4_tohdmitx_widgets,
+	.num_dapm_widgets	= ARRAY_SIZE(s4_tohdmitx_widgets),
+	.dapm_routes		= s4_tohdmitx_routes,
+	.num_dapm_routes	= ARRAY_SIZE(s4_tohdmitx_routes),
+	.endianness		= 1,
+};
+
 static const struct regmap_config g12a_tohdmitx_regmap_cfg = {
 	.reg_bits	= 32,
 	.val_bits	= 32,
@@ -296,6 +328,10 @@ static const struct g12a_tohdmitx_match_data s4_hdmitx_match_data = {
 	.component_drv	= &s4_tohdmitx_component_drv,
 };
 
+static const struct g12a_tohdmitx_match_data t7_hdmitx_match_data = {
+	.component_drv	= &t7_tohdmitx_component_drv,
+};
+
 static const struct of_device_id g12a_tohdmitx_of_match[] = {
 	{
 		.compatible = "amlogic,g12a-tohdmitx",
@@ -304,6 +340,10 @@ static const struct of_device_id g12a_tohdmitx_of_match[] = {
 	{
 		.compatible = "amlogic,s4-tohdmitx",
 		.data = &s4_hdmitx_match_data,
+	},
+	{
+		.compatible = "amlogic,t7-tohdmitx",
+		.data = &t7_hdmitx_match_data,
 	},
 	{}
 };
