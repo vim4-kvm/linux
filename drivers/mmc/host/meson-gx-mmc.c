@@ -1449,6 +1449,7 @@ static const struct meson_mmc_data meson_t7_data = {
 	.adjust		= SD_EMMC_V3_ADJUST,
 	.irq_sdio_sleep	= CLK_V3_IRQ_SDIO_SLEEP,
 	.has_pipeline_clk = true,
+	.intf3_tuning	= true,
 };
 
 static const struct of_device_id meson_mmc_of_match[] = {
