@@ -163,7 +163,7 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	/* Check if AFBC decoder is required for this buffer */
 	if ((meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM) ||
 	     meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-	     meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) &&
+	     meson_vpu_is_s4_like(priv)) &&
 	    fb->modifier & DRM_FORMAT_MOD_ARM_AFBC(MESON_MOD_AFBC_VALID_BITS))
 		priv->viu.osd1_afbcd = true;
 	else
@@ -184,7 +184,7 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 
 	if (priv->viu.osd1_afbcd) {
 		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-		    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		    meson_vpu_is_s4_like(priv)) {
 			/* This is the internal decoding memory address */
 			priv->viu.osd1_blk1_cfg4 = MESON_G12A_AFBCD_OUT_ADDR;
 			priv->viu.osd1_blk0_cfg[0] |= OSD_ENDIANNESS_BE;
@@ -209,7 +209,7 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 
 	if (priv->viu.osd1_afbcd &&
 	    (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-	     meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))) {
+	     meson_vpu_is_s4_like(priv))) {
 		priv->viu.osd1_blk0_cfg[0] |= OSD_MALI_SRC_EN |
 			priv->afbcd.ops->fmt_to_blk_mode(fb->modifier,
 							  fb->format->format);
@@ -355,7 +355,7 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	priv->viu.osd1_blk0_cfg[4] = ((dest.y2 - 1) << 16) | dest.y1;
 
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	    meson_vpu_is_s4_like(priv)) {
 		priv->viu.osd_blend_din0_scope_h = ((dest.x2 - 1) << 16) | dest.x1;
 		priv->viu.osd_blend_din0_scope_v = ((dest.y2 - 1) << 16) | dest.y1;
 		priv->viu.osb_blend0_size = dst_h << 16 | dst_w;
@@ -376,7 +376,7 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 
 		/* Calculate decoder write stride */
 		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-		    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+		    meson_vpu_is_s4_like(priv))
 			priv->viu.osd1_blk2_cfg4 =
 				meson_g12a_afbcd_line_stride(priv);
 	}
@@ -408,8 +408,8 @@ static void meson_plane_atomic_disable(struct drm_plane *plane,
 
 	/* Disable OSD1 */
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
-		writel_bits_relaxed(VIU_OSD1_POSTBLD_SRC_OSD1, 0,
+	    meson_vpu_is_s4_like(priv))
+		writel_bits_relaxed(VIU_OSD1_POSTBLD_SRC_MASK, 0,
 				    priv->io_base + _REG(OSD1_BLEND_SRC_CTRL));
 	else
 		writel_bits_relaxed(VPP_OSD1_POSTBLEND, 0,
@@ -440,7 +440,7 @@ static bool meson_plane_format_mod_supported(struct drm_plane *plane,
 
 	if (!meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM) &&
 	    !meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) &&
-	    !meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	    !meson_vpu_is_s4_like(priv))
 		return false;
 
 	if (modifier & ~DRM_FORMAT_MOD_ARM_AFBC(MESON_MOD_AFBC_VALID_BITS))
@@ -548,7 +548,7 @@ int meson_plane_create(struct meson_drm *priv)
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM))
 		format_modifiers = format_modifiers_afbc_gxm;
 	else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-		 meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+		 meson_vpu_is_s4_like(priv))
 		format_modifiers = format_modifiers_afbc_g12a;
 
 	ret = drm_universal_plane_init(priv->drm, plane, 0xFF,

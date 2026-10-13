@@ -35,6 +35,13 @@
 
 void meson_vpp_setup_mux(struct meson_drm *priv, unsigned int mux)
 {
+	/*
+	 * T7: [1:0], [3:2] and [5:4] select the encoder of VIU0, VIU1 and
+	 * VIU2 (0 = ENC0, 3 = none). Route VIU0 to ENC0 only.
+	 */
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7))
+		mux = 0x3c;
+
 	writel(mux, priv->io_base + _REG(VPU_VIU_VENC_MUX_CTRL));
 }
 
@@ -57,10 +64,10 @@ static void meson_vpp_write_scaling_filter_coefs(struct meson_drm *priv,
 	int i;
 
 	writel_relaxed(is_horizontal ? VPP_SCALE_HORIZONTAL_COEF : 0,
-			priv->io_base + _REG(VPP_OSD_SCALE_COEF_IDX));
+			priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_SCALE_COEF_IDX)));
 	for (i = 0; i < 33; i++)
 		writel_relaxed(coefs[i],
-				priv->io_base + _REG(VPP_OSD_SCALE_COEF));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_SCALE_COEF)));
 }
 
 static const uint32_t vpp_filter_coefs_bicubic[] = {
@@ -90,6 +97,11 @@ static void meson_vpp_write_vd_scaling_filter_coefs(struct meson_drm *priv,
 
 void meson_vpp_init(struct meson_drm *priv)
 {
+	/* T7: the post-blend runs in RGB, background is RGB black */
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7))
+		writel_relaxed(0, priv->io_base +
+			       _REG(VPP_POST_BLEND_BLEND_DUMMY_DATA));
+
 	/* set dummy data default YUV black */
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXL))
 		writel_relaxed(0x108080, priv->io_base + _REG(VPP_DUMMY_DATA1));
@@ -103,12 +115,12 @@ void meson_vpp_init(struct meson_drm *priv)
 		writel_relaxed(0x42020,
 				priv->io_base + _REG(VPP_DUMMY_DATA));
 	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-		   meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+		   meson_vpu_is_s4_like(priv))
 		writel_relaxed(0xf, priv->io_base + _REG(DOLBY_PATH_CTRL));
 
 	/* Initialize vpu fifo control registers */
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	    meson_vpu_is_s4_like(priv))
 		writel_relaxed(VPP_OFIFO_SIZE_DEFAULT,
 			       priv->io_base + _REG(VPP_OFIFO_SIZE));
 	else
@@ -118,7 +130,7 @@ void meson_vpp_init(struct meson_drm *priv)
 		       priv->io_base + _REG(VPP_HOLD_LINES));
 
 	if (!meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) &&
-	    !meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	    !meson_vpu_is_s4_like(priv)) {
 		/* Turn off preblend */
 		writel_bits_relaxed(VPP_PREBLEND_ENABLE, 0,
 				    priv->io_base + _REG(VPP_MISC));
@@ -140,7 +152,7 @@ void meson_vpp_init(struct meson_drm *priv)
 				priv->io_base + _REG(VPP_BLEND_VD2_H_START_END));
 	}
 
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (meson_vpu_is_s4_like(priv))
 		writel_bits_relaxed(VPP_WATER_MARK_10BIT, 0, priv->io_base + _REG(VPP_MISC));
 
 	/* Disable Scalers */

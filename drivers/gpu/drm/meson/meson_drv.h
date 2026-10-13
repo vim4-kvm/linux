@@ -11,6 +11,8 @@
 #include <linux/of.h>
 #include <linux/regmap.h>
 
+#include "meson_registers.h"
+
 struct drm_crtc;
 struct drm_device;
 struct drm_plane;
@@ -23,6 +25,7 @@ enum vpu_compatible {
 	VPU_COMPATIBLE_GXM  = 2,
 	VPU_COMPATIBLE_G12A = 3,
 	VPU_COMPATIBLE_S4 = 4,
+	VPU_COMPATIBLE_T7 = 5,
 };
 
 enum {
@@ -79,6 +82,8 @@ struct meson_drm {
 		uint32_t osd1_blk1_cfg4;
 		uint32_t osd1_blk2_cfg4;
 		uint32_t osd1_addr;
+		uint32_t osd1_bld_h_scope;
+		uint32_t osd1_bld_v_scope;
 		uint32_t osd1_stride;
 		uint32_t osd1_height;
 		uint32_t osd1_width;
@@ -187,6 +192,22 @@ static inline int meson_vpu_is_compatible(struct meson_drm *priv,
 					  enum vpu_compatible family)
 {
 	return priv->compat == family;
+}
+
+/* T7 shares the S4 register layout and clock control blocks */
+static inline bool meson_vpu_is_s4_like(struct meson_drm *priv)
+{
+	return priv->compat == VPU_COMPATIBLE_S4 ||
+	       priv->compat == VPU_COMPATIBLE_T7;
+}
+
+/* Map a G12 OSD1 free scaler register to its T7 address */
+static inline u32 meson_osd_sc_reg(struct meson_drm *priv, u32 reg)
+{
+	if (priv->compat == VPU_COMPATIBLE_T7)
+		return reg - VPP_OSD_VSC_PHASE_STEP + T7_VPP_OSD_VSC_PHASE_STEP;
+
+	return reg;
 }
 
 #endif /* __MESON_DRV_H */

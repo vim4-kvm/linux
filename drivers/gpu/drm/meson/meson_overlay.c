@@ -515,7 +515,7 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 		 * The newer S4 AFBC decoder needs the source and chroma
 		 * format of decoder output spelled out.
 		 */
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		if (meson_vpu_is_s4_like(priv)) {
 			priv->viu.vd1_afbc_en |= AFBC_DOS_UNCOMP;
 			priv->viu.vd1_afbc_conv_ctrl |= AFBC_CONV_FMT_420;
 		}
@@ -748,7 +748,7 @@ static void meson_overlay_atomic_disable(struct drm_plane *plane,
 	priv->viu.vd1_enabled = false;
 
 	/* Disable VD1 */
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	if (meson_vpu_is_s4_like(priv)) {
 		writel_relaxed(0, priv->io_base + _REG(VD1_BLEND_SRC_CTRL));
 		writel_relaxed(0, priv->io_base + _REG(VD2_BLEND_SRC_CTRL));
 		writel_relaxed(0, priv->io_base + _REG(VD1_IF0_GEN_REG_S4));

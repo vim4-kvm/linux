@@ -168,7 +168,7 @@ static void meson_setup_clk(struct meson_drm *priv, bool enable)
 	if (!priv || !priv->vpu_clk || !priv->vapb_clk)
 		return;
 
-	if (!meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (!meson_vpu_is_s4_like(priv))
 		return;
 
 	if (enable) {
@@ -270,7 +270,7 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 		goto free_drm;
 	}
 
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	if (meson_vpu_is_s4_like(priv)) {
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sysctrl");
 		if (!res) {
 			ret = -EINVAL;
@@ -331,14 +331,28 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 			goto free_drm;
 		}
 
-		priv->vpu_clk = devm_clk_get(&pdev->dev, "vpu");
+		/*
+		 * T7: the VPU interrupt gate also clocks the OSD registers.
+		 * Keep it on through the clock framework.
+		 */
+		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7)) {
+			struct clk *intr_clk;
+
+			intr_clk = devm_clk_get_optional_enabled(&pdev->dev, "intr");
+			if (IS_ERR(intr_clk)) {
+				ret = PTR_ERR(intr_clk);
+				goto free_drm;
+			}
+		}
+
+		priv->vpu_clk = devm_clk_get_optional(&pdev->dev, "vpu");
 		if (IS_ERR(priv->vpu_clk)) {
 			dev_err(&pdev->dev, "vpu clock request failed\n");
 			ret = PTR_ERR(priv->vpu_clk);
 			goto free_drm;
 		}
 
-		priv->vapb_clk = devm_clk_get(&pdev->dev, "vapb");
+		priv->vapb_clk = devm_clk_get_optional(&pdev->dev, "vapb");
 		if (IS_ERR(priv->vapb_clk)) {
 			dev_err(&pdev->dev, "vapb clock request failed\n");
 			ret = PTR_ERR(priv->vapb_clk);
@@ -657,6 +671,11 @@ static struct meson_drm_match_data meson_drm_g12a_data = {
 	.afbcd_ops = &meson_afbcd_g12a_ops,
 };
 
+/* T7: the G12A AFBC decoder reset hits OSD1 itself, no AFBC for now */
+static struct meson_drm_match_data meson_drm_t7_data = {
+	.compat = VPU_COMPATIBLE_T7,
+};
+
 static struct meson_drm_match_data meson_drm_s4_data = {
 	.compat = VPU_COMPATIBLE_S4,
 	.afbcd_ops = &meson_afbcd_s4_ops,
@@ -673,6 +692,8 @@ static const struct of_device_id dt_match[] = {
 	  .data       = (void *)&meson_drm_g12a_data },
 	{ .compatible = "amlogic,meson-s4-vpu",
 	  .data       = (void *)&meson_drm_s4_data },
+	{ .compatible = "amlogic,meson-t7-vpu",
+	  .data       = (void *)&meson_drm_t7_data },
 	{}
 };
 MODULE_DEVICE_TABLE(of, dt_match);
