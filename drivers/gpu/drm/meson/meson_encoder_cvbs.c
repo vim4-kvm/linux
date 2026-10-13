@@ -190,7 +190,7 @@ static void meson_encoder_cvbs_atomic_enable(struct drm_bridge *bridge,
 	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		regmap_write(priv->hhi, HHI_VDAC_CNTL0_G12A, 0x906001);
 		regmap_write(priv->hhi, HHI_VDAC_CNTL1_G12A, 0);
-	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	} else if (meson_vpu_is_s4_like(priv)) {
 		regmap_write(priv->hhi, ANACTRL_VDAC_CTRL0, 0x406802);
 		regmap_write(priv->hhi, ANACTRL_VDAC_CTRL1, 0xc4);
 	}
@@ -207,7 +207,7 @@ static void meson_encoder_cvbs_atomic_disable(struct drm_bridge *bridge,
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		regmap_write(priv->hhi, HHI_VDAC_CNTL0_G12A, 0);
 		regmap_write(priv->hhi, HHI_VDAC_CNTL1_G12A, 0);
-	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	} else if (meson_vpu_is_s4_like(priv)) {
 		regmap_write(priv->hhi, ANACTRL_VDAC_CTRL0, 0);
 		regmap_write(priv->hhi, ANACTRL_VDAC_CTRL1, 0);
 	} else {

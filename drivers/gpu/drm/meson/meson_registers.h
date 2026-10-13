@@ -160,6 +160,9 @@
 #define		VIU_OSD1_POSTBLD_SRC_VD1        (1 << 8)
 #define		VIU_OSD1_POSTBLD_SRC_VD2        (2 << 8)
 #define		VIU_OSD1_POSTBLD_SRC_OSD1       (3 << 8)
+#define		VIU_OSD1_POSTBLD_SRC_OSD1_T7    (4 << 8) /* T7 adds VD3 as source 3 */
+#define		VIU_OSD1_POSTBLD_SRC_MASK       (0xf << 8)
+#define		VIU_OSD1_POSTBLD_EN_T7          BIT(20)
 #define		VIU_OSD1_POSTBLD_SRC_OSD2       (4 << 8)
 #define		VIU_OSD1_OSD_ENABLE             BIT(21)
 #define		VIU_OSD1_CFG_SYN_EN             BIT(31)
@@ -1109,6 +1112,7 @@
 #define ENCT_TST_CLRBAR_WIDTH 0x1c2e
 #define ENCT_TST_VDCNT_STSET 0x1c2f
 #define ENCP_DVI_HSO_BEGIN 0x1c30
+#define VPU_VENC_CTRL 0x1cef
 #define ENCP_DVI_HSO_END 0x1c31
 #define ENCP_DVI_VSO_BLINE_EVN 0x1c32
 #define ENCP_DVI_VSO_BLINE_ODD 0x1c33
@@ -1908,6 +1912,8 @@
 #define VPP_OSD1_IN_SIZE 0x1df1
 #define VPP_GCLK_CTRL2 0x1df2
 #define VD2_PPS_DUMMY_DATA 0x1df4
+/* T7: the OSD1 free scaler registers moved from 0x1dc0 to 0x5a00 */
+#define T7_VPP_OSD_VSC_PHASE_STEP 0x5a00
 #define VPP_OSD1_BLD_H_SCOPE 0x1df5
 #define VPP_OSD1_BLD_V_SCOPE 0x1df6
 #define VPP_OSD2_BLD_H_SCOPE 0x1df7

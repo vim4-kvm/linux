@@ -110,11 +110,11 @@ static void meson_g12a_crtc_atomic_enable(struct drm_crtc *crtc,
 	       crtc_state->mode.vdisplay << 16,
 	       priv->io_base + _REG(VPP_POSTBLEND_H_SIZE));
 
-	writel_relaxed(0 << 16 |
-			(crtc_state->mode.hdisplay - 1),
+	priv->viu.osd1_bld_h_scope = 0 << 16 | (crtc_state->mode.hdisplay - 1);
+	priv->viu.osd1_bld_v_scope = 0 << 16 | (crtc_state->mode.vdisplay - 1);
+	writel_relaxed(priv->viu.osd1_bld_h_scope,
 			priv->io_base + _REG(VPP_OSD1_BLD_H_SCOPE));
-	writel_relaxed(0 << 16 |
-			(crtc_state->mode.vdisplay - 1),
+	writel_relaxed(priv->viu.osd1_bld_v_scope,
 			priv->io_base + _REG(VPP_OSD1_BLD_V_SCOPE));
 	writel_relaxed(crtc_state->mode.hdisplay << 16 |
 			crtc_state->mode.vdisplay,
@@ -288,8 +288,22 @@ static void meson_g12a_crtc_enable_osd1(struct meson_drm *priv)
 	writel_relaxed(priv->viu.osb_blend1_size,
 		       priv->io_base +
 		       _REG(VIU_OSD_BLEND_BLEND1_SIZE));
-	writel_bits_relaxed(3 << 8, 3 << 8,
-			    priv->io_base + _REG(OSD1_BLEND_SRC_CTRL));
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7)) {
+		/*
+		 * T7 does not keep these from the CRTC enable: set them on
+		 * each commit, as the vendor driver does.
+		 */
+		writel_relaxed(VIU_OSD1_POSTBLD_SRC_OSD1_T7 | VIU_OSD1_POSTBLD_EN_T7,
+			       priv->io_base + _REG(OSD1_BLEND_SRC_CTRL));
+		writel_relaxed(priv->viu.osd1_bld_h_scope,
+			       priv->io_base + _REG(VPP_OSD1_BLD_H_SCOPE));
+		writel_relaxed(priv->viu.osd1_bld_v_scope,
+			       priv->io_base + _REG(VPP_OSD1_BLD_V_SCOPE));
+	} else {
+		writel_bits_relaxed(VIU_OSD1_POSTBLD_SRC_MASK,
+				    VIU_OSD1_POSTBLD_SRC_OSD1,
+				    priv->io_base + _REG(OSD1_BLEND_SRC_CTRL));
+	}
 }
 
 static void meson_crtc_enable_vd1(struct meson_drm *priv)
@@ -317,7 +331,7 @@ static void meson_g12a_crtc_enable_vd1(struct meson_drm *priv)
 
 	if (priv->viu.vd1_afbc) {
 		misc = VD1_AXI_SEL_AFBC | AFBC_VD1_SEL;
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+		if (meson_vpu_is_s4_like(priv))
 			misc |= VD1_AFBC0_MEM_SEL;
 	}
 
@@ -360,25 +374,25 @@ void meson_crtc_irq(struct meson_drm *priv)
 		}
 
 		writel_relaxed(priv->viu.osd_sc_ctrl0,
-				priv->io_base + _REG(VPP_OSD_SC_CTRL0));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_SC_CTRL0)));
 		writel_relaxed(priv->viu.osd_sc_i_wh_m1,
-				priv->io_base + _REG(VPP_OSD_SCI_WH_M1));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_SCI_WH_M1)));
 		writel_relaxed(priv->viu.osd_sc_o_h_start_end,
-				priv->io_base + _REG(VPP_OSD_SCO_H_START_END));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_SCO_H_START_END)));
 		writel_relaxed(priv->viu.osd_sc_o_v_start_end,
-				priv->io_base + _REG(VPP_OSD_SCO_V_START_END));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_SCO_V_START_END)));
 		writel_relaxed(priv->viu.osd_sc_v_ini_phase,
-				priv->io_base + _REG(VPP_OSD_VSC_INI_PHASE));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_VSC_INI_PHASE)));
 		writel_relaxed(priv->viu.osd_sc_v_phase_step,
-				priv->io_base + _REG(VPP_OSD_VSC_PHASE_STEP));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_VSC_PHASE_STEP)));
 		writel_relaxed(priv->viu.osd_sc_h_ini_phase,
-				priv->io_base + _REG(VPP_OSD_HSC_INI_PHASE));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_HSC_INI_PHASE)));
 		writel_relaxed(priv->viu.osd_sc_h_phase_step,
-				priv->io_base + _REG(VPP_OSD_HSC_PHASE_STEP));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_HSC_PHASE_STEP)));
 		writel_relaxed(priv->viu.osd_sc_h_ctrl0,
-				priv->io_base + _REG(VPP_OSD_HSC_CTRL0));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_HSC_CTRL0)));
 		writel_relaxed(priv->viu.osd_sc_v_ctrl0,
-				priv->io_base + _REG(VPP_OSD_VSC_CTRL0));
+				priv->io_base + _REG(meson_osd_sc_reg(priv, VPP_OSD_VSC_CTRL0)));
 
 		if (!priv->viu.osd1_afbcd)
 			meson_canvas_config(priv->canvas, priv->canvas_id_osd1,
@@ -387,6 +401,18 @@ void meson_crtc_irq(struct meson_drm *priv)
 					    priv->viu.osd1_height,
 					    MESON_CANVAS_WRAP_NONE,
 					    MESON_CANVAS_BLKMODE_LINEAR, 0);
+
+		/* T7: the OSD1 MIF reads by linear address, not by canvas */
+		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7) &&
+		    !priv->viu.osd1_afbcd) {
+			writel_relaxed(priv->viu.osd1_addr >> 4,
+				       priv->io_base + _REG(VIU_OSD1_BLK1_CFG_W4));
+			writel_bits_relaxed(GENMASK(11, 0),
+					    DIV_ROUND_UP(priv->viu.osd1_stride, 16),
+					    priv->io_base + _REG(VIU_OSD1_BLK2_CFG_W4));
+			writel_bits_relaxed(OSD_MEM_LINEAR_ADDR, OSD_MEM_LINEAR_ADDR,
+					    priv->io_base + _REG(VIU_OSD1_CTRL_STAT));
+		}
 
 		/* Enable OSD1 */
 		if (meson_crtc->enable_osd1)
@@ -452,7 +478,7 @@ void meson_crtc_irq(struct meson_drm *priv)
 				       priv->io_base + meson_crtc->afbc_offset +
 				       _REG(AFBC_VD_CFMT_H));
 			/* Decoder output is lossless: no inverse quantisation */
-			if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+			if (meson_vpu_is_s4_like(priv))
 				writel_relaxed(0, priv->io_base +
 					       meson_crtc->afbc_offset +
 					       _REG(AFBCDEC_IQUANT_ENABLE));
@@ -493,13 +519,13 @@ void meson_crtc_irq(struct meson_drm *priv)
 		}
 
 		/* S4 VD1 must be told the bit depth of the AFBC decoder output */
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+		if (meson_vpu_is_s4_like(priv))
 			writel_bits_relaxed(VD1_IF0_BIT_MODE_MASK,
 					    priv->viu.vd1_afbc && priv->viu.vd1_10bit ?
 					    VD1_IF0_BIT_MODE_10BIT : 0,
 					    priv->io_base + _REG(VD1_IF0_GEN_REG3_S4));
 
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4) &&
+		if (meson_vpu_is_s4_like(priv) &&
 		    !priv->viu.vd1_afbc) {
 			u32 pitches = priv->viu.vd1_stride0;
 			u32 burst = 2;
@@ -526,7 +552,7 @@ void meson_crtc_irq(struct meson_drm *priv)
 				priv->io_base + meson_crtc->vd2_offset +
 				_REG(VD2_IF0_GEN_REG));
 
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		if (meson_vpu_is_s4_like(priv)) {
 			writel_relaxed(priv->viu.vd1_if0_gen_reg2,
 					priv->io_base +
 					_REG(VD1_IF0_GEN_REG2_S4));
@@ -770,11 +796,11 @@ int meson_crtc_create(struct meson_drm *priv)
 	}
 
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	    meson_vpu_is_s4_like(priv)) {
 		meson_crtc->enable_osd1 = meson_g12a_crtc_enable_osd1;
 		meson_crtc->enable_vd1 = meson_g12a_crtc_enable_vd1;
 
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		if (meson_vpu_is_s4_like(priv)) {
 			meson_crtc->viu_offset = MESON_S4_VIU_OFFSET;
 			meson_crtc->vd2_offset = MESON_S4_VD2_OFFSET;
 			meson_crtc->afbc_offset = MESON_S4_AFBC_OFFSET;
