@@ -671,6 +671,11 @@ static struct clk_regmap t7_hdmi_pll_dco = {
 			{ .fw_name = "in0", }
 		},
 		.num_parents = 1,
+		/*
+		 * The display driver programs the HDMI PLL registers
+		 * directly: do not disable it as unused.
+		 */
+		.flags = CLK_IGNORE_UNUSED,
 	},
 };
 
