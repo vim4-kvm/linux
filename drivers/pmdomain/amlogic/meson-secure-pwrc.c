@@ -336,7 +336,8 @@ static const struct meson_secure_pwrc_domain_desc t7_pwrc_domains[] = {
 	TOP_PD(T7_DOS_HEVC,	0, PWRC_T7_NIC3_ID),
 	TOP_PD(T7_DOS_VDEC,	0, PWRC_T7_NIC3_ID),
 	TOP_PD(T7_DOS_WAVE,	0, PWRC_T7_NIC3_ID),
-	SEC_PD(T7_VPU_HDMI,	0),
+	/* VPU domains: the VPU keeps state in all three, keep them on */
+	SEC_PD(T7_VPU_HDMI,	GENPD_FLAG_ALWAYS_ON),
 	SEC_PD(T7_USB_COMB,	0),
 	SEC_PD(T7_PCIE,		0),
 	TOP_PD(T7_GE2D,		0, PWRC_T7_NIC3_ID),
@@ -345,8 +346,8 @@ static const struct meson_secure_pwrc_domain_desc t7_pwrc_domains[] = {
 	/* SRAMB is used as ATF runtime memory, and should be always on */
 	SEC_PD(T7_SRAMB,	GENPD_FLAG_ALWAYS_ON),
 	SEC_PD(T7_HDMIRX,	0),
-	SEC_PD(T7_VI_CLK1,	0),
-	SEC_PD(T7_VI_CLK2,	0),
+	SEC_PD(T7_VI_CLK1,	GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(T7_VI_CLK2,	GENPD_FLAG_ALWAYS_ON),
 	/* ETH is for ethernet online wakeup, and should be always on */
 	SEC_PD(T7_ETH,		GENPD_FLAG_ALWAYS_ON),
 	TOP_PD(T7_ISP,		0, PWRC_T7_MIPI_ISP_ID),
