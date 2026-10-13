@@ -70,7 +70,7 @@ void meson_rdma_setup(struct meson_drm *priv)
 
 static void meson_rdma_trigger(struct meson_drm *priv, u32 trigger)
 {
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	if (meson_vpu_is_s4_like(priv)) {
 		writel_relaxed(trigger, priv->io_base + _REG(RDMA_AUTO_SRC1_SEL));
 		return;
 	}

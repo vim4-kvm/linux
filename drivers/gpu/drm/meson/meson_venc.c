@@ -5,6 +5,7 @@
  * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
  */
 
+#include <linux/arm-smccc.h>
 #include <linux/bitfield.h>
 #include <linux/export.h>
 #include <linux/iopoll.h>
@@ -15,6 +16,10 @@
 #include "meson_registers.h"
 #include "meson_venc.h"
 #include "meson_vpp.h"
+
+/* T7 secure monitor: HDMI TX operations, set encoder index */
+#define MESON_SMC_HDCPTX_IOOPR		0x820000ab
+#define MESON_HDCPTX_CONF_ENC_IDX	9
 
 /**
  * DOC: Video Encoder
@@ -1152,6 +1157,29 @@ static struct meson_hdmi_venc_vic_mode meson_s4_hdmi_venc_vic_modes[] = {
 	{ 0, NULL}, /* sentinel */
 };
 
+/* T7: the S4 modes and 2160p up to 30 Hz (TMDS clock up to 297 MHz) */
+static struct meson_hdmi_venc_vic_mode meson_t7_hdmi_venc_vic_modes[] = {
+	{ 2, &meson_s4_hdmi_encp_mode_480p },
+	{ 3, &meson_s4_hdmi_encp_mode_480p },
+	{ 17, &meson_s4_hdmi_encp_mode_576p },
+	{ 18, &meson_s4_hdmi_encp_mode_576p },
+	{ 4, &meson_s4_hdmi_encp_mode_720p60 },
+	{ 19, &meson_s4_hdmi_encp_mode_720p50 },
+	{ 5, &meson_s4_hdmi_encp_mode_1080i60 },
+	{ 20, &meson_s4_hdmi_encp_mode_1080i50 },
+	{ 32, &meson_hdmi_encp_mode_1080p24 },
+	{ 33, &meson_hdmi_encp_mode_1080p50 },
+	{ 34, &meson_hdmi_encp_mode_1080p30 },
+	{ 31, &meson_hdmi_encp_mode_1080p50 },
+	{ 16, &meson_hdmi_encp_mode_1080p60 },
+	{ 93, &meson_hdmi_encp_mode_2160p24 },
+	{ 94, &meson_hdmi_encp_mode_2160p25 },
+	{ 95, &meson_hdmi_encp_mode_2160p30 },
+	{ 96, &meson_hdmi_encp_mode_2160p25 },
+	{ 97, &meson_hdmi_encp_mode_2160p30 },
+	{ 0, NULL}, /* sentinel */
+};
+
 static signed int to_signed(unsigned int a)
 {
 	if (a <= 7)
@@ -1189,7 +1217,9 @@ bool meson_venc_hdmi_supported_vic(struct meson_drm *priv, int vic)
 {
 	struct meson_hdmi_venc_vic_mode *vmode = meson_hdmi_venc_vic_modes;
 
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7))
+		vmode = meson_t7_hdmi_venc_vic_modes;
+	else if (meson_vpu_is_s4_like(priv))
 		vmode = meson_s4_hdmi_venc_vic_modes;
 
 	while (vmode->vic && vmode->mode) {
@@ -1271,7 +1301,9 @@ static union meson_hdmi_venc_mode *meson_venc_hdmi_get_vic_vmode(struct meson_dr
 {
 	struct meson_hdmi_venc_vic_mode *vmode = meson_hdmi_venc_vic_modes;
 
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7))
+		vmode = meson_t7_hdmi_venc_vic_modes;
+	else if (meson_vpu_is_s4_like(priv))
 		vmode = meson_s4_hdmi_venc_vic_modes;
 
 	while (vmode->vic && vmode->mode) {
@@ -1285,7 +1317,7 @@ static union meson_hdmi_venc_mode *meson_venc_hdmi_get_vic_vmode(struct meson_dr
 
 bool meson_venc_hdmi_venc_repeat(struct meson_drm *priv, int vic)
 {
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (meson_vpu_is_s4_like(priv))
 		return false;
 	/* Repeat VENC pixels for 480/576i/p, 720p50/60 and 1080p50/60 */
 	if (vic == 6 || vic == 7 || /* 480i */
@@ -1340,7 +1372,7 @@ void meson_venc_hdmi_mode_set(struct meson_drm *priv, int vic,
 	u32 reg;
 
 	s4_yuv420 = yuv420_mode &&
-		    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4);
+		    meson_vpu_is_s4_like(priv);
 	if (s4_yuv420)
 		vs_adjust_420 = 1;
 
@@ -1881,6 +1913,33 @@ void meson_venc_hdmi_mode_set(struct meson_drm *priv, int vic,
 		meson_vpp_setup_mux(priv, MESON_VIU_VPP_MUX_ENCP);
 	}
 
+	/*
+	 * T7: bit 0 selects ENC0 for HDMI, VPU_VENC_CTRL selects the ENCP
+	 * timing in ENC0. The component maps stay 0: the VPP sends RGB.
+	 */
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7)) {
+		struct arm_smccc_res res;
+
+		/*
+		 * The secure firmware selects the encoder that feeds the HDMI
+		 * transmitter. The boot loader may leave ENC2: select ENC0.
+		 */
+		arm_smccc_smc(MESON_SMC_HDCPTX_IOOPR, MESON_HDCPTX_CONF_ENC_IDX,
+			      1, 0, 0, 0, 0, 0, &res);
+
+		reg = BIT(0);
+		if (mode->flags & DRM_MODE_FLAG_PHSYNC)
+			reg |= VPU_HDMI_INV_HSYNC;
+		if (mode->flags & DRM_MODE_FLAG_PVSYNC)
+			reg |= VPU_HDMI_INV_VSYNC;
+		writel_relaxed(use_enci ? 0 : 1, priv->io_base + _REG(VPU_VENC_CTRL));
+		writel_relaxed(reg, priv->io_base + _REG(VPU_HDMI_SETTING));
+		priv->venc.hdmi_repeat = hdmi_repeat;
+		priv->venc.venc_repeat = venc_repeat;
+		priv->venc.hdmi_use_enci = use_enci;
+		return;
+	}
+
 	/* Set VPU HDMI setting */
 	/* Select ENCP or ENCI data to HDMI */
 	if (use_enci)
@@ -2325,7 +2384,10 @@ void meson_venc_enable_vsync(struct meson_drm *priv)
 			       priv->io_base + _REG(VENC_INTCTRL));
 	}
 
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	/* T7: the interrupt gate is a clock owned by meson_drv */
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7))
+		;
+	else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
 		regmap_update_bits(priv->clkctrl, CLKCTRL_SYS_CLK_EN0_REG2, BIT(25), BIT(25));
 	else
 		regmap_update_bits(priv->hhi, HHI_GCLK_MPEG2, BIT(25), BIT(25));
@@ -2342,7 +2404,7 @@ void meson_venc_init(struct meson_drm *priv)
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		regmap_write(priv->hhi, HHI_VDAC_CNTL0_G12A, 0);
 		regmap_write(priv->hhi, HHI_VDAC_CNTL1_G12A, 8);
-	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	} else if (meson_vpu_is_s4_like(priv)) {
 		regmap_write(priv->hhi, ANACTRL_VDAC_CTRL0, 0);
 		regmap_write(priv->hhi, ANACTRL_VDAC_CTRL1, 8);
 	} else {
@@ -2354,7 +2416,7 @@ void meson_venc_init(struct meson_drm *priv)
 	writel_relaxed(0xff, priv->io_base + _REG(VENC_VDAC_SETTING));
 
 	/* Disable HDMI PHY */
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (meson_vpu_is_s4_like(priv))
 		regmap_write(priv->hhi, ANACTRL_HDMIPHY_CTRL0, 0);
 	else
 		regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0);

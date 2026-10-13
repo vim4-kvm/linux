@@ -148,7 +148,7 @@ static void meson_encoder_hdmi_set_vclk(struct meson_encoder_hdmi *encoder_hdmi,
 		venc_freq /= 2;
 
 	/* VCLK double pixels for 480p and 576p on S4 */
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (meson_vpu_is_s4_like(priv))
 		if (vic == 2 || vic == 3 || vic == 17 || vic == 18)
 			vclk_freq *= 2;
 
@@ -227,7 +227,7 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 		venc_freq /= 2;
 
 	/* VCLK double pixels for 480p and 576p on S4 */
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (meson_vpu_is_s4_like(priv))
 		if (vic == 2 || vic == 3 || vic == 17 || vic == 18)
 			vclk_freq *= 2;
 
@@ -548,7 +548,7 @@ int meson_encoder_hdmi_probe(struct meson_drm *priv)
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXL) ||
 	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM) ||
 	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	    meson_vpu_is_s4_like(priv)) {
 		drm_connector_attach_hdr_output_metadata_property(meson_encoder_hdmi->connector);
 
 		if (!drm_mode_create_hdmi_colorspace_property(meson_encoder_hdmi->connector,

@@ -122,6 +122,11 @@
 #define CLKCTRL_VIID_CLK_CTRL	0x0d0 /* 0x34 offset in data sheet */
 
 #define CLKCTRL_VID_PLL_CLK_DIV	0x0e4 /* 0x39 offset in data sheet */
+/* T7 */
+#define CLKCTRL_ENC0_HDMI_CLK_CTRL	0x0d4 /* 0x35 */
+#define CLKCTRL_ENC_HDMI_CLK_CTRL	0x0dc /* 0x37 */
+#define CLKCTRL_HDMI_VID_PLL_CLK_DIV	0x204 /* 0x81 */
+#define T7_VID_PLL_CLK_EN		BIT(24)
 #define CLKCTRL_HDMI_CLK_CTRL	0x0e0  /* 0x38 */
 
 /* REG_BASE:  REGISTER_BASE_ADDR = 0xfe008000 */
@@ -162,11 +167,15 @@ static void meson_vid_pll_set(struct meson_drm *priv, unsigned int div)
 {
 	unsigned int shift_val = 0;
 	unsigned int shift_sel = 0;
+	unsigned int reg = CLKCTRL_VID_PLL_CLK_DIV;
+
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7))
+		reg = CLKCTRL_HDMI_VID_PLL_CLK_DIV;
 
 	/* Disable vid_pll output clock */
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
-		regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV, VID_PLL_EN, 0);
-		regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV, VID_PLL_PRESET, 0);
+	if (meson_vpu_is_s4_like(priv)) {
+		regmap_update_bits(priv->clkctrl, reg, VID_PLL_EN, 0);
+		regmap_update_bits(priv->clkctrl, reg, VID_PLL_PRESET, 0);
 	} else {
 		regmap_update_bits(priv->hhi, HHI_VID_PLL_CLK_DIV, VID_PLL_EN, 0);
 		regmap_update_bits(priv->hhi, HHI_VID_PLL_CLK_DIV, VID_PLL_PRESET, 0);
@@ -231,38 +240,41 @@ static void meson_vid_pll_set(struct meson_drm *priv, unsigned int div)
 		break;
 	}
 
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	if (meson_vpu_is_s4_like(priv)) {
 		if (div == VID_PLL_DIV_1) {
 			/* Enable vid_pll bypass to HDMI pll */
-			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+			regmap_update_bits(priv->clkctrl, reg,
 					   VID_PLL_BYPASS, VID_PLL_BYPASS);
 		} else {
 			/* Disable Bypass */
-			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+			regmap_update_bits(priv->clkctrl, reg,
 					   VID_PLL_BYPASS, 0);
 			/* Clear sel */
-			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+			regmap_update_bits(priv->clkctrl, reg,
 					   3 << 16, 0);
-			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+			regmap_update_bits(priv->clkctrl, reg,
 					   VID_PLL_PRESET, 0);
-			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+			regmap_update_bits(priv->clkctrl, reg,
 					   0x7fff, 0);
 
 			/* Setup sel and val */
-			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+			regmap_update_bits(priv->clkctrl, reg,
 					   3 << 16, shift_sel << 16);
-			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+			regmap_update_bits(priv->clkctrl, reg,
 					   VID_PLL_PRESET, VID_PLL_PRESET);
-			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+			regmap_update_bits(priv->clkctrl, reg,
 					   0x7fff, shift_val);
 
-			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+			regmap_update_bits(priv->clkctrl, reg,
 					   VID_PLL_PRESET, 0);
 		}
 
 		/* Enable the vid_pll output clock */
-		regmap_update_bits(priv->clkctrl, CLKCTRL_VID_PLL_CLK_DIV,
+		regmap_update_bits(priv->clkctrl, reg,
 					VID_PLL_EN, VID_PLL_EN);
+		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7))
+			regmap_update_bits(priv->clkctrl, reg,
+					   T7_VID_PLL_CLK_EN, T7_VID_PLL_CLK_EN);
 	} else {
 		if (div == VID_PLL_DIV_1) {
 			/* Enable vid_pll bypass to HDMI pll */
@@ -353,7 +365,7 @@ static void meson_venci_cvbs_clock_config(struct meson_drm *priv)
 		regmap_read_poll_timeout(priv->hhi, HHI_HDMI_PLL_CNTL, val,
 			((val & HDMI_PLL_LOCK_G12A) == HDMI_PLL_LOCK_G12A),
 			10, 0);
-	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	} else if (meson_vpu_is_s4_like(priv)) {
 		regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL0, 0x3b01047b);
 		regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL1, 0x00018000);
 		regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL2, 0x00000000);
@@ -368,7 +380,7 @@ static void meson_venci_cvbs_clock_config(struct meson_drm *priv)
 			((val & HDMI_PLL_LOCK_S4) == HDMI_PLL_LOCK_S4),
 			10, 0);
 	}
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	if (meson_vpu_is_s4_like(priv)) {
 		/* Disable VCLK2 */
 		regmap_update_bits(priv->clkctrl, CLKCTRL_VIID_CLK_CTRL, VCLK2_EN, 0);
 
@@ -898,7 +910,18 @@ static void s4_pll_set_params(struct meson_drm *priv, unsigned int m,
 	regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL1, frac);
 	regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL2, 0x00000000);
 
-	if (m >= 0xf7) {
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7)) {
+		/* PHY at the VCO rate (2160p50/60, 5.94 Gbps): other loop values */
+		if (od1 == 1 && od2 == 1) {
+			regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL3, 0x6a685c00);
+			regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL4, 0x11551293);
+		} else {
+			regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL3, 0x6a68dc00);
+			regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL4, 0x65771290);
+		}
+		regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL5, 0x3927200a);
+		regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL6, 0x56540000);
+	} else if (m >= 0xf7) {
 		if (frac < 0x10000) {
 			regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL3, 0x6a685c00);
 			regmap_write(priv->hhi, ANACTRL_HDMIPLL_CTRL4, 0x11551293);
@@ -966,6 +989,7 @@ static void meson_hdmi_pll_set_params(struct meson_drm *priv, unsigned int m,
 		g12a_pll_set_params(priv, m, frac, od1, od2, od3);
 		break;
 	case VPU_COMPATIBLE_S4:
+	case VPU_COMPATIBLE_T7:
 		s4_pll_set_params(priv, m, frac, od1, od2, od3);
 		break;
 	default:
@@ -1009,7 +1033,7 @@ static unsigned int meson_hdmi_pll_get_frac(struct meson_drm *priv,
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A))
 		frac_max = HDMI_FRAC_MAX_G12A;
 
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (meson_vpu_is_s4_like(priv))
 		frac_max = HDMI_FRAC_MAX_S4;
 
 	/* We can have a perfect match !*/
@@ -1049,7 +1073,7 @@ static bool meson_hdmi_pll_validate_params(struct meson_drm *priv,
 			return false;
 		if (frac >= HDMI_FRAC_MAX_G12A)
 			return false;
-	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	} else if (meson_vpu_is_s4_like(priv)) {
 		/* Empiric supported min/max dividers */
 		if (m < 106 || m > 247)
 			return false;
@@ -1200,7 +1224,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 {
 	unsigned int m = 0, frac = 0, val, fe_sel;
 
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	if (meson_vpu_is_s4_like(priv)) {
 		regmap_update_bits(priv->clkctrl, CLKCTRL_HDMI_CLK_CTRL,
 				CTS_HDMI_SYS_SEL_MASK, 0);
 		regmap_update_bits(priv->clkctrl, CLKCTRL_HDMI_CLK_CTRL,
@@ -1216,6 +1240,13 @@ static void meson_vclk_set(struct meson_drm *priv,
 		regmap_update_bits(priv->hhi, HHI_HDMI_CLK_CNTL,
 				   CTS_HDMI_SYS_EN, CTS_HDMI_SYS_EN);
 	}
+	/* T7: run the VCO at 5.94 GHz as the vendor does, same output rates */
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7) &&
+	    pll_base_freq == 2970000000 && od1 < 4) {
+		pll_base_freq = 5940000000;
+		od1 *= 2;
+	}
+
 	/* Set HDMI PLL rate */
 	if (!od1 && !od2 && !od3) {
 		meson_hdmi_pll_generic_set(priv, pll_base_freq);
@@ -1263,7 +1294,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 
 		meson_hdmi_pll_set_params(priv, m, frac, od1, od2, od3);
 	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-		   meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		   meson_vpu_is_s4_like(priv)) {
 		switch (pll_base_freq) {
 		case 2970000000:
 			m = 0x7b;
@@ -1294,7 +1325,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 	meson_vid_pll_set(priv, vid_pll_div);
 
 	/* Set VCLK div */
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	if (meson_vpu_is_s4_like(priv)) {
 		regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_CTRL,
 				   VCLK_SEL_MASK, 0);
 		regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_DIV,
@@ -1309,7 +1340,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 	/* Set HDMI-TX source */
 	switch (hdmi_tx_div) {
 	case 1:
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		if (meson_vpu_is_s4_like(priv)) {
 			/* enable vclk_div1 gate */
 			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_CTRL,
 					   VCLK_DIV1_EN, VCLK_DIV1_EN);
@@ -1328,7 +1359,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 		}
 		break;
 	case 2:
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		if (meson_vpu_is_s4_like(priv)) {
 			/* enable vclk_div2 gate */
 			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_CTRL,
 					   VCLK_DIV2_EN, VCLK_DIV2_EN);
@@ -1347,7 +1378,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 		}
 		break;
 	case 4:
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		if (meson_vpu_is_s4_like(priv)) {
 			/* enable vclk_div4 gate */
 			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_CTRL,
 					   VCLK_DIV4_EN, VCLK_DIV4_EN);
@@ -1366,7 +1397,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 		}
 		break;
 	case 6:
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		if (meson_vpu_is_s4_like(priv)) {
 			/* enable vclk_div6 gate */
 			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_CTRL,
 					   VCLK_DIV6_EN, VCLK_DIV6_EN);
@@ -1385,7 +1416,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 		}
 		break;
 	case 12:
-		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		if (meson_vpu_is_s4_like(priv)) {
 			/* enable vclk_div12 gate */
 			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_CTRL,
 					   VCLK_DIV12_EN, VCLK_DIV12_EN);
@@ -1404,7 +1435,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 		}
 		break;
 	}
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	if (meson_vpu_is_s4_like(priv))
 		regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_CTRL2,
 				   HDMI_TX_PIXEL_EN, HDMI_TX_PIXEL_EN);
 	else
@@ -1412,7 +1443,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 				   HDMI_TX_PIXEL_EN, HDMI_TX_PIXEL_EN);
 
 	/* Set ENCI/ENCP Source */
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	if (meson_vpu_is_s4_like(priv)) {
 		switch (venc_div) {
 		case 1:
 			/* enable vclk_div1 gate */
@@ -1505,6 +1536,22 @@ static void meson_vclk_set(struct meson_drm *priv,
 				   fe_sel << HDMI_TX_FE_SEL_SHIFT);
 
 		regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_CTRL, VCLK_EN, VCLK_EN);
+
+		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_T7)) {
+			/* ENC0 pixel, fe and pnx dividers: div1 */
+			regmap_update_bits(priv->clkctrl, CLKCTRL_ENC0_HDMI_CLK_CTRL,
+					   GENMASK(27, 16), 0);
+			/* ENC0 encoder clock divider: div1 */
+			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_DIV,
+					   GENMASK(15, 12), 0);
+			/* encoder, fe, pnx and pixel gates */
+			regmap_update_bits(priv->clkctrl, CLKCTRL_VID_CLK_CTRL2,
+					   BIT(10) | BIT(9) | BIT(5) | BIT(3),
+					   BIT(10) | BIT(9) | BIT(5) | BIT(3));
+			/* HDMI pixel, fe and pnx clocks from ENC0 */
+			regmap_write(priv->clkctrl, CLKCTRL_ENC_HDMI_CLK_CTRL,
+				     0x00101010);
+		}
 	} else {
 		switch (venc_div) {
 		case 1:

@@ -426,9 +426,11 @@ void meson_viu_init(struct meson_drm *priv)
 	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXL))
 		meson_viu_load_matrix(priv);
 	else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-		 meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+		 meson_vpu_is_s4_like(priv)) {
+		/* T7: the VPP blends and outputs RGB, keep OSD1 in RGB */
 		meson_viu_set_g12a_osd1_matrix(priv, RGB709_to_YUV709l_coeff,
-					       true);
+					       !meson_vpu_is_compatible(priv,
+								VPU_COMPATIBLE_T7));
 		/* fix green/pink color distortion from vendor u-boot */
 		writel_bits_relaxed(OSD1_HDR2_CTRL_REG_ONLY_MAT |
 				OSD1_HDR2_CTRL_VDIN0_HDR2_TOP_EN, 0,
@@ -442,7 +444,7 @@ void meson_viu_init(struct meson_drm *priv)
 		VIU_OSD_FIFO_LIMITS(2);      /* fifo_lim: 2*16=32 */
 
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4))
+	    meson_vpu_is_s4_like(priv))
 		reg |= (VIU_OSD_BURST_LENGTH_32 | VIU_OSD_HOLD_FIFO_LINES(31));
 	else
 		reg |= (VIU_OSD_BURST_LENGTH_64 | VIU_OSD_HOLD_FIFO_LINES(4));
@@ -462,7 +464,7 @@ void meson_viu_init(struct meson_drm *priv)
 	/* di_mif0_en=0 mif0_to_vpp_en=0 di_mad_en=0 and afbc vd1 set=0*/
 	writel_bits_relaxed(VIU_CTRL0_VD1_AFBC_MASK, 0,
 			    priv->io_base + _REG(VIU_MISC_CTRL0));
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	if (meson_vpu_is_s4_like(priv)) {
 		writel_relaxed(0, priv->io_base + _REG(AFBC_ENABLE_S4));
 		writel_relaxed(0x00FF00C0,
 				priv->io_base + _REG(VD1_IF0_LUMA_FIFO_SIZE_S4));
@@ -477,7 +479,7 @@ void meson_viu_init(struct meson_drm *priv)
 	}
 
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A) ||
-	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_S4)) {
+	    meson_vpu_is_s4_like(priv)) {
 		u32 val = (u32)VIU_OSD_BLEND_REORDER(0, 1) |
 			  (u32)VIU_OSD_BLEND_REORDER(1, 0) |
 			  (u32)VIU_OSD_BLEND_REORDER(2, 0) |
