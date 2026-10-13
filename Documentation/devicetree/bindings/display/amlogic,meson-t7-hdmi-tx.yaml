@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/amlogic,meson-t7-hdmi-tx.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amlogic T7 HDMI 2.1 Transmitter
+
+maintainers:
+  - Igor Pecovnik <igor@armbian.com>
+
+description: |
+  The HDMI transmitter of the Amlogic T7 SoC. It is not a Synopsys DesignWare
+  core. It has a TOP block with 32-bit registers and a COR block with 8-bit
+  registers. The video encoder (VENC) of the VPU feeds it, see
+  amlogic,meson-vpu.yaml. The HDMI PHY registers are in the analog control
+  block, which the VPU node describes.
+
+properties:
+  compatible:
+    const: amlogic,t7-hdmi-tx
+
+  reg:
+    items:
+      - description: TOP registers
+      - description: COR registers
+
+  reg-names:
+    items:
+      - const: top
+      - const: cor
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: APB bus clock
+
+  clock-names:
+    items:
+      - const: pclk
+
+  resets:
+    items:
+      - description: HDMI TX controller reset
+      - description: HDMI TX PHY reset
+
+  reset-names:
+    items:
+      - const: hdmitx
+      - const: phy
+
+  power-domains:
+    maxItems: 1
+
+  "#sound-dai-cells":
+    const: 0
+
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+
+    properties:
+      port@0:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Input from the VPU HDMI-TX port.
+
+      port@1:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Output to the HDMI connector.
+
+    required:
+      - port@0
+      - port@1
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - clock-names
+  - power-domains
+  - ports
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    hdmi-tx@fe300000 {
+        compatible = "amlogic,t7-hdmi-tx";
+        reg = <0xfe300000 0x10000>, <0xfe380000 0x10000>;
+        reg-names = "top", "cor";
+        interrupts = <GIC_SPI 204 IRQ_TYPE_LEVEL_HIGH>;
+        clocks = <&clkc_periphs 194>;
+        clock-names = "pclk";
+        resets = <&reset 29>, <&reset 22>;
+        reset-names = "hdmitx", "phy";
+        power-domains = <&pwrc 14>;
+        #sound-dai-cells = <0>;
+
+        ports {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            port@0 {
+                reg = <0>;
+
+                hdmi_tx_in: endpoint {
+                    remote-endpoint = <&vpu_hdmi_out>;
+                };
+            };
+
+            port@1 {
+                reg = <1>;
+
+                hdmi_tx_out: endpoint {
+                    remote-endpoint = <&hdmi_connector_in>;
+                };
+            };
+        };
+    };
