@@ -229,6 +229,20 @@ config COMMON_CLK_S4_PERIPHERALS
 	  Support for the peripherals clock controller on Amlogic S805X2 and S905Y4
 	  devices, AKA S4. Say Y if you want S4 peripherals clock controller to work.
 
+config COMMON_CLK_T7_CPU
+	tristate "Amlogic T7 SoC CPU clock controller support"
+	depends on ARM64 && MESON_SM
+	default ARCH_MESON
+	select COMMON_CLK_MESON_REGMAP
+	select COMMON_CLK_MESON_CLKC_UTILS
+	select COMMON_CLK_MESON_PLL
+	help
+	  Support for the CPU clock controller on Amlogic A311D2 based
+	  device, AKA T7. The A73 and A53 clusters run from their own PLL
+	  or from a dynamic clock. Only the secure firmware can write these
+	  clocks, so the driver programs them through the secure monitor.
+	  Say Y if you want CPU frequency scaling on T7.
+
 config COMMON_CLK_T7_PLL
 	tristate "Amlogic T7 SoC PLL controller support"
 	depends on ARM64
