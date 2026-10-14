@@ -462,6 +462,24 @@
 				sound-dai = <&acodec>;
 			};
 		};
+
+		/* hdmi glue */
+		dai-link-13 {
+			sound-dai = <&tohdmitx TOHDMITX_I2S_OUT>;
+
+			codec {
+				sound-dai = <&hdmi_tx 0>;
+			};
+		};
+
+		/* hdmi glue, compressed */
+		dai-link-14 {
+			sound-dai = <&tohdmitx TOHDMITX_SPDIF_OUT>;
+
+			codec {
+				sound-dai = <&hdmi_tx 1>;
+			};
+		};
 	};
 };
 
