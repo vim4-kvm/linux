@@ -88,6 +88,9 @@ allOf:
         compatible:
           contains:
             const: amlogic,t7-thermal
+          not:
+            contains:
+              const: amlogic,s4-thermal
     then:
       properties:
         clocks:
