@@ -223,6 +223,7 @@ static const struct of_device_id aml_vdec_match[] = {
 	{.compatible = "amlogic,s4-vcodec-dec", .data = &aml_vdec_s4_pdata},
 	{},
 };
+MODULE_DEVICE_TABLE(of, aml_vdec_match);
 
 static struct platform_driver aml_vcodec_dec_driver = {
 	.probe    = aml_vdec_drv_probe,
