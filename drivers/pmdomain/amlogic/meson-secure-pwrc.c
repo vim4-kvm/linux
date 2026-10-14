@@ -338,7 +338,8 @@ static const struct meson_secure_pwrc_domain_desc t7_pwrc_domains[] = {
 	TOP_PD(T7_DOS_WAVE,	0, PWRC_T7_NIC3_ID),
 	/* VPU domains: the VPU keeps state in all three, keep them on */
 	SEC_PD(T7_VPU_HDMI,	GENPD_FLAG_ALWAYS_ON),
-	SEC_PD(T7_USB_COMB,	0),
+	/* USB, SDIO and eMMC hosts do not recover from a power cycle */
+	SEC_PD(T7_USB_COMB,	GENPD_FLAG_ALWAYS_ON),
 	SEC_PD(T7_PCIE,		0),
 	TOP_PD(T7_GE2D,		0, PWRC_T7_NIC3_ID),
 	/* SRAMA is used as ATF runtime memory, and should be always on */
@@ -354,9 +355,9 @@ static const struct meson_secure_pwrc_domain_desc t7_pwrc_domains[] = {
 	SEC_PD(T7_MIPI_ISP,	0),
 	TOP_PD(T7_GDC,		0, PWRC_T7_NIC3_ID),
 	TOP_PD(T7_DEWARP,	0, PWRC_T7_NIC3_ID),
-	SEC_PD(T7_SDIO_A,	0),
-	SEC_PD(T7_SDIO_B,	0),
-	SEC_PD(T7_EMMC,		0),
+	SEC_PD(T7_SDIO_A,	GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(T7_SDIO_B,	GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(T7_EMMC,		GENPD_FLAG_ALWAYS_ON),
 	TOP_PD(T7_MALI_SC0,	0, PWRC_T7_NNA_TOP_ID),
 	TOP_PD(T7_MALI_SC1,	0, PWRC_T7_NNA_TOP_ID),
 	TOP_PD(T7_MALI_SC2,	0, PWRC_T7_NNA_TOP_ID),
