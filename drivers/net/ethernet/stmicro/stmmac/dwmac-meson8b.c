@@ -460,6 +460,8 @@ static int meson8b_dwmac_probe(struct platform_device *pdev)
 		return ret;
 
 	plat_dat->bsp_priv = dwmac;
+	/* The MAC can stall after a WoL resume until the next open */
+	plat_dat->flags |= STMMAC_FLAG_RESET_AFTER_WOL;
 
 	return stmmac_dvr_probe(&pdev->dev, plat_dat, &stmmac_res);
 }

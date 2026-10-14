@@ -8393,6 +8393,10 @@ int stmmac_resume(struct device *dev)
 
 	netif_device_attach(ndev);
 
+	/* Some MACs stall after the WoL power-down mode. Reset them. */
+	if (priv->wolopts && (priv->plat->flags & STMMAC_FLAG_RESET_AFTER_WOL))
+		stmmac_global_err(priv);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(stmmac_resume);
