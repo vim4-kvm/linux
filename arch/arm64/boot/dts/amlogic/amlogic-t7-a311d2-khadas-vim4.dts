@@ -270,6 +270,8 @@
 		regulator-name = "VDDCPU_A";
 		regulator-min-microvolt = <689000>;
 		regulator-max-microvolt = <1049000>;
+		/* the filtered PWM output needs time to settle */
+		regulator-ramp-delay = <150>;
 		pwms = <&pwm_ao_cd 1 1500 0>;
 		voltage-table = <1049000 0>,
 				<1039000 3>,
@@ -317,6 +319,8 @@
 		regulator-name = "VDDCPU_B";
 		regulator-min-microvolt = <689000>;
 		regulator-max-microvolt = <1049000>;
+		/* the filtered PWM output needs time to settle */
+		regulator-ramp-delay = <150>;
 		pwms = <&pwm_ao_ab 1 1500 0>;
 		voltage-table = <1049000 0>,
 				<1039000 3>,
