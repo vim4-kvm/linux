@@ -105,7 +105,8 @@ properties:
     const: 0
 
   "#sound-dai-cells":
-    const: 0
+    description: With 1 cell, 0 selects the I2S input and 1 the SPDIF input.
+    enum: [0, 1]
 
   sound-name-prefix: true
 
