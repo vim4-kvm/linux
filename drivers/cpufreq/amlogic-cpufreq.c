@@ -10,6 +10,7 @@
  * Copyright (C) 2026 Martin Blumenstingl <martin.blumenstingl@googlemail.com>
  */
 
+#include <linux/arch_topology.h>
 #include <linux/cpu.h>
 #include <linux/firmware/meson/meson_sm.h>
 #include <linux/module.h>
@@ -18,12 +19,20 @@
 #include <linux/pm_opp.h>
 #include <linux/slab.h>
 
+/* T7 reports one bin per cluster: the firmware takes the cluster index */
+#define AMLOGIC_CPUFREQ_BIN_PER_CLUSTER	BIT(0)
+
+#define AMLOGIC_CPUFREQ_MAX_CLUSTERS	2
+
 struct amlogic_cpufreq_priv {
 	struct platform_device *cpufreq_dt_pdev;
 	int opp_tokens[];
 };
 
-static int amlogic_cpufreq_get_bin(struct device *dev)
+/* One OPP table per cluster: the first one to probe sets up all CPUs */
+static bool amlogic_cpufreq_done;
+
+static int amlogic_cpufreq_get_bin(struct device *dev, unsigned int cluster)
 {
 	struct meson_sm_firmware *fw;
 	s32 bin;
@@ -39,7 +48,8 @@ static int amlogic_cpufreq_get_bin(struct device *dev)
 	if (!fw)
 		return -EPROBE_DEFER;
 
-	ret = meson_sm_call(fw, SM_GET_DVFS_TABLE_INDEX, &bin, 0, 0, 0, 0, 0);
+	ret = meson_sm_call(fw, SM_GET_DVFS_TABLE_INDEX, &bin, cluster, 0, 0,
+			    0, 0);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to read the CPU bin\n");
 
@@ -61,15 +71,25 @@ static void amlogic_cpufreq_clear_config(struct amlogic_cpufreq_priv *priv)
 static int amlogic_cpufreq_probe(struct platform_device *pdev)
 {
 	char name[] = "binXXXXXXXXXXX"; /* Integers can take 11 chars max */
+	int bins[AMLOGIC_CPUFREQ_MAX_CLUSTERS];
 	struct dev_pm_opp_config config = {};
 	struct amlogic_cpufreq_priv *priv;
+	unsigned long flags;
 	struct device *cpu_dev;
-	unsigned int cpu;
-	int bin, ret;
+	unsigned int cpu, cluster;
+	int i, nbins, ret;
 
-	bin = amlogic_cpufreq_get_bin(&pdev->dev);
-	if (bin < 0)
-		return bin;
+	if (amlogic_cpufreq_done)
+		return 0;
+
+	flags = (unsigned long)of_device_get_match_data(&pdev->dev);
+	nbins = flags & AMLOGIC_CPUFREQ_BIN_PER_CLUSTER ?
+		AMLOGIC_CPUFREQ_MAX_CLUSTERS : 1;
+	for (i = 0; i < nbins; i++) {
+		bins[i] = amlogic_cpufreq_get_bin(&pdev->dev, i);
+		if (bins[i] < 0)
+			return bins[i];
+	}
 
 	priv = devm_kzalloc(&pdev->dev,
 			    struct_size(priv, opp_tokens, num_possible_cpus()),
@@ -77,7 +97,6 @@ static int amlogic_cpufreq_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
-	snprintf(name, sizeof(name), "bin%d", bin);
 	config.prop_name = name;
 
 	for_each_present_cpu(cpu) {
@@ -86,6 +105,13 @@ static int amlogic_cpufreq_probe(struct platform_device *pdev)
 			ret = -ENODEV;
 			goto err_clear_config;
 		}
+
+		cluster = nbins > 1 ? topology_cluster_id(cpu) : 0;
+		if (cluster >= nbins) {
+			ret = -EINVAL;
+			goto err_clear_config;
+		}
+		snprintf(name, sizeof(name), "bin%d", bins[cluster]);
 
 		ret = dev_pm_opp_set_config(cpu_dev, &config);
 		if (ret < 0)
@@ -103,8 +129,11 @@ static int amlogic_cpufreq_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, priv);
+	amlogic_cpufreq_done = true;
 
-	dev_info(&pdev->dev, "Using CPU bin %d voltages\n", bin);
+	for (i = 0; i < nbins; i++)
+		dev_info(&pdev->dev, "Using CPU bin %d voltages for cluster %d\n",
+			 bins[i], i);
 
 	return 0;
 
@@ -117,12 +146,20 @@ static void amlogic_cpufreq_remove(struct platform_device *pdev)
 {
 	struct amlogic_cpufreq_priv *priv = platform_get_drvdata(pdev);
 
+	if (!priv)
+		return;
+
+	amlogic_cpufreq_done = false;
 	platform_device_unregister(priv->cpufreq_dt_pdev);
 	amlogic_cpufreq_clear_config(priv);
 }
 
 static const struct of_device_id amlogic_cpufreq_match_list[] = {
 	{ .compatible = "amlogic,s4-cpu-operating-points" },
+	{
+		.compatible = "amlogic,t7-cpu-operating-points",
+		.data = (void *)AMLOGIC_CPUFREQ_BIN_PER_CLUSTER,
+	},
 	{}
 };
 MODULE_DEVICE_TABLE(of, amlogic_cpufreq_match_list);
