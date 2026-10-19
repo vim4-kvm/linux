@@ -14,6 +14,7 @@ def function(name):
 
 harness = r"""
 #include <assert.h>
+#include <stdbool.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -31,23 +32,35 @@ typedef uint32_t u32;
 #define CRG_DEBUG(...) do {} while (0)
 #define CRG_ERROR(...) do {} while (0)
 #define container_of(p, t, m) ((t *)((char *)(p) - offsetof(t, m)))
+enum { USB_STATE_NOTATTACHED, USB_STATE_CONFIGURED };
 enum { USB_SPEED_UNKNOWN, USB_SPEED_FULL, USB_SPEED_HIGH,
        USB_SPEED_SUPER, USB_SPEED_SUPER_PLUS };
 struct usb_request { int unused; };
 struct usb_ep { int unused; };
 struct crg_udc_request { struct usb_request usb_req; };
 struct crg_uccr { u32 control, capability, config0; };
+struct usb_gadget { int max_speed, irq, state; };
 struct crg_gadget_dev {
     struct crg_uccr *uccr;
-    struct { int max_speed, irq; } gadget;
+    struct usb_gadget gadget;
     struct { struct usb_ep usb_ep; } udc_ep[1];
     struct crg_udc_request *status_req;
     int irq;
+    int udc_lock;
+    bool pullup_enabled;
 };
 struct platform_device { int unused; };
 static struct crg_gadget_dev crg_udc_dev;
 static int fail_at, stage, irq_result, request_result, irq_requests;
 static struct crg_udc_request status_request;
+static bool stop_ok = true;
+static int starts;
+#define spin_lock_irqsave(lock, flags) do { (void)(lock); (flags) = 0; } while (0)
+#define spin_unlock_irqrestore(lock, flags) do { (void)(lock); (void)(flags); } while (0)
+static void crg_udc_start(struct crg_gadget_dev *d) { (void)d; starts++; }
+static int g_dnl_board_usb_cable_connected(void) { return 1; }
+static bool crg_stop_controller(struct crg_gadget_dev *d) { (void)d; return stop_ok; }
+static void usb_gadget_set_state(struct usb_gadget *g, int state) { g->state = state; }
 static u32 reg_read(u32 *p) { return *p; }
 static void reg_write(u32 *p, u32 v) { *p = v; }
 static int init_event_ring(struct crg_gadget_dev *d, int i)
@@ -100,6 +113,15 @@ int main(void)
     assert(crg_gadget_irq_init(&device) == -ENOMEM && irq_requests == 1);
     request_result = 0;
     assert(crg_gadget_irq_init(&device) == 0 && irq_requests == 2);
+    udc.gadget.state = USB_STATE_CONFIGURED;
+    assert(crg_gadget_pullup(&udc.gadget, 0) == 0);
+    assert(!udc.pullup_enabled && udc.gadget.state == USB_STATE_NOTATTACHED);
+    assert(crg_gadget_pullup(&udc.gadget, 1) == 0);
+    assert(udc.pullup_enabled && starts == 1);
+    /* Binding again must not expose the previous connection's configured state. */
+    assert(udc.gadget.state == USB_STATE_NOTATTACHED);
+    stop_ok = false;
+    assert(crg_gadget_pullup(&udc.gadget, 0) == -ETIMEDOUT);
     puts("CRG allocation and IRQ failure regressions passed");
     return 0;
 }
@@ -108,7 +130,8 @@ int main(void)
 with tempfile.TemporaryDirectory(prefix="crg-probe-test-") as directory:
     path = pathlib.Path(directory)
     (path / "test.c").write_text(harness + function("reset_data_struct")
-                                 + function("crg_gadget_irq_init") + checks)
+                                 + function("crg_gadget_irq_init")
+                                 + function("crg_gadget_pullup") + checks)
     subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
                     str(path / "test.c"), "-o", str(path / "test")], check=True)
     subprocess.run([str(path / "test")], check=True)
