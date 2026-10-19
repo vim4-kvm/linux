@@ -1,4 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0
+config USB_CRG_UDC
+	tristate "Amlogic T7 Corigine USB device controller (experimental)"
+	depends on ARCH_MESON && OF && USB_DWC3_MESON_G12A && EXPERT
+	help
+	  USB 2.0 peripheral controller beneath the Meson USB glue. Only
+	  fixed peripheral mode and one controller instance are supported.
+	  System sleep is rejected while this experimental driver is bound.
+
 #
 # USB Gadget support on a system involves
 #    (a) a peripheral controller, and
