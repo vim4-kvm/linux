@@ -607,6 +607,11 @@ static int dwc3_meson_g12a_otg_init(struct platform_device *pdev,
 		}
 	}
 
+	/* The experimental T7 UDC has no host/device handover protocol. */
+	if (of_device_is_compatible(dev->of_node, "amlogic,t7-usb-ctrl") &&
+	    priv->otg_mode == USB_DR_MODE_PERIPHERAL)
+		return 0;
+
 	/* Setup role switcher */
 	priv->switch_desc.usb2_port = dwc3_meson_g12_find_child(dev,
 								"snps,dwc3");
