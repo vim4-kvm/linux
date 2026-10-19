@@ -3039,8 +3039,11 @@ static int crg_gadget_pullup(struct usb_gadget *g, int is_on)
 		g_dnl_board_usb_cable_connected();
 	}
 	spin_unlock_irqrestore(&udc->udc_lock, flags);
-	if (!is_on && !crg_stop_controller(udc))
-		return -ETIMEDOUT;
+	if (!is_on) {
+		if (!crg_stop_controller(udc))
+			return -ETIMEDOUT;
+		usb_gadget_set_state(g, USB_STATE_NOTATTACHED);
+	}
 	return 0;
 }
 
