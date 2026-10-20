@@ -797,6 +797,13 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
 		inst->enc_param.avc_idr_period = ctrl->val;
 		break;
+	case V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD:
+		inst->intra_refresh_period = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE:
+		if (ctrl->val != V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_CYCLIC)
+			return -EINVAL;
+		break;
 	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
 		atomic_set(&inst->force_keyframe, 1);
 		break;
@@ -1181,13 +1188,26 @@ static void wave5_vpu_enc_buf_queue(struct vb2_buffer *vb)
 	v4l2_m2m_buf_queue(m2m_ctx, vbuf);
 }
 
+static void wave5_set_intra_refresh(struct enc_wave_param *param, u32 height,
+				  u32 period, bool hevc)
+{
+	u32 rows = DIV_ROUND_UP(height, hevc ? 64 : 16);
+	u32 refresh_rows = period ? DIV_ROUND_UP(rows, period) : 0;
+
+	/* Firmware takes rows per frame. Round up to finish within the requested
+	 * period, including partial bottom rows, without enabling the other codec.
+	 */
+	param->intra_mb_refresh_mode = !hevc && period ? REFRESH_MB_MODE_CTU_ROWS : 0;
+	param->intra_mb_refresh_arg = !hevc ? refresh_rows : 0;
+	param->intra_refresh_mode = hevc && period ? REFRESH_MODE_CTU_ROWS : 0;
+	param->intra_refresh_arg = hevc ? refresh_rows : 0;
+}
+
 static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 				   struct vpu_instance *inst)
 {
 	struct enc_wave_param input = inst->enc_param;
 	const struct v4l2_format_info *info;
-	u32 num_ctu_row = ALIGN(inst->dst_fmt.height, 64) / 64;
-	u32 num_mb_row = ALIGN(inst->dst_fmt.height, 16) / 16;
 
 	info = v4l2_format_info(inst->src_fmt.pixelformat);
 	if (!info)
@@ -1287,22 +1307,8 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.independ_slice_mode_arg = input.independ_slice_mode_arg;
 	open_param->wave_param.avc_slice_mode = input.avc_slice_mode;
 	open_param->wave_param.avc_slice_arg = input.avc_slice_arg;
-	open_param->wave_param.intra_mb_refresh_mode = input.intra_mb_refresh_mode;
-	if (input.intra_mb_refresh_mode != REFRESH_MB_MODE_NONE) {
-		if (num_mb_row >= input.intra_mb_refresh_arg)
-			open_param->wave_param.intra_mb_refresh_arg =
-				num_mb_row / input.intra_mb_refresh_arg;
-		else
-			open_param->wave_param.intra_mb_refresh_arg = num_mb_row;
-	}
-	open_param->wave_param.intra_refresh_mode = input.intra_refresh_mode;
-	if (input.intra_refresh_mode != 0) {
-		if (num_ctu_row >= input.intra_refresh_arg)
-			open_param->wave_param.intra_refresh_arg =
-				num_ctu_row / input.intra_refresh_arg;
-		else
-			open_param->wave_param.intra_refresh_arg = num_ctu_row;
-	}
+	wave5_set_intra_refresh(&open_param->wave_param, inst->conf_win.height,
+			       inst->intra_refresh_period, inst->std == W_HEVC_ENC);
 	open_param->wave_param.forced_idr_header_enable = input.forced_idr_header_enable;
 
 	return 0;
@@ -1790,6 +1796,13 @@ static int wave5_vpu_open_enc(struct file *filp)
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_GOP_SIZE,
 			  0, 2047, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, 0, 4096, 1, 0);
+	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			       V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE,
+			       V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_CYCLIC,
+			       BIT(V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_RANDOM),
+			       V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_CYCLIC);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
 			  0, 0, 0, 0);

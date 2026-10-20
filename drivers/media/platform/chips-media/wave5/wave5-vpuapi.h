@@ -843,6 +843,7 @@ struct vpu_instance {
 	unsigned int bit_depth;
 	unsigned int frame_rate;
 	unsigned int vbv_buf_size;
+	unsigned int intra_refresh_period;
 	unsigned int rc_mode;
 	unsigned int rc_enable;
 	unsigned int bit_rate;
