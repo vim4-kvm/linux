@@ -44,6 +44,7 @@ struct mutex { pthread_mutex_t native; };
 #define dev_err(...) ((void)0)
 #define msecs_to_jiffies(x) (x)
 #define DMA_FROM_DEVICE 1
+#define dma_wmb() ((void)0)
 #define V4L2_FIELD_NONE 1
 typedef struct { pthread_mutex_t lock; pthread_cond_t cond; unsigned long generation; } wait_queue_head_t;
 static bool expire;
