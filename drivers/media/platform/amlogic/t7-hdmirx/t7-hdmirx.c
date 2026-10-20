@@ -528,39 +528,45 @@ static u32 t7_hdmirx_core_read16(struct t7_hdmirx *rx, u32 offset)
 	return readb(rx->cor + offset) | (readb(rx->cor + offset + 1) << 8);
 }
 
-int t7_hdmirx_check_1080p(struct device *dev)
+int t7_hdmirx_check_1080p_now(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
 	u32 ticks, reference;
-	unsigned int i;
 
 	if (!rx || !rx->core_active)
 		return -ENOLINK;
-	for (i = 0; i < 2; i++) {
-		if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
-		    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
-			return -ENOLINK;
-		if (readb(rx->cor + T7_RX_COR_FRAME_STATUS) & BIT(2))
-			return -ERANGE;
-		if (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
-		    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4)
-			return -ERANGE;
-		if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != 1920 ||
-		    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != 1080 ||
-		    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC) +
-		    t7_hdmirx_core_read16(rx, T7_RX_COR_HFRONT_BACK) != 2200 ||
-		    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC) +
-		    t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT_BACK) != 1125)
-			return -ERANGE;
-		ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
-			(readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
-		reference = clk_get_rate(rx->clocks[T7_RX_PCLK].clk);
-		if (!ticks || ticks < reference / 61 || ticks > reference / 59)
-			return -ERANGE;
-		if (!i)
-			usleep_range(20000, 21000);
-	}
+	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
+	    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
+		return -ENOLINK;
+	if (readb(rx->cor + T7_RX_COR_FRAME_STATUS) & BIT(2))
+		return -ERANGE;
+	if (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
+	    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4)
+		return -ERANGE;
+	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != 1920 ||
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != 1080 ||
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC) +
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HFRONT_BACK) != 2200 ||
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC) +
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT_BACK) != 1125)
+		return -ERANGE;
+	ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
+		(readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
+	reference = clk_get_rate(rx->clocks[T7_RX_PCLK].clk);
+	if (!ticks || ticks < reference / 61 || ticks > reference / 59)
+		return -ERANGE;
 	return 0;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_check_1080p_now);
+
+int t7_hdmirx_check_1080p(struct device *dev)
+{
+	int ret = t7_hdmirx_check_1080p_now(dev);
+
+	if (ret)
+		return ret;
+	usleep_range(20000, 21000);
+	return t7_hdmirx_check_1080p_now(dev);
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_check_1080p);
 
