@@ -73,6 +73,9 @@
 
 /* Receiver core registers are byte-addressed and require byte accesses. */
 #define T7_RX_COR_AON_RESET	0x0005
+#define T7_RX_COR_DDC_SWITCH	0x0009
+#define T7_RX_COR_SINK_VERSION	0x0301
+#define T7_RX_COR_TMDS_CONFIG	0x0320
 #define T7_RX_COR_HDMI2_MODE	0x0040
 #define T7_RX_COR_INT_CTRL		0x0079
 #define T7_RX_COR_HPD_CTRL		0x00f5
@@ -121,6 +124,10 @@ static bool core_test;
 module_param(core_test, bool, 0400);
 MODULE_PARM_DESC(core_test, "Initialize the TMDS video core; requires phy_test=1");
 
+static bool uhd60;
+module_param(uhd60, bool, 0400);
+MODULE_PARM_DESC(uhd60, "Opt-in RGB8 3840x2160p60 HDMI 2.0 trial; requires matching EDID");
+
 static const u32 t7_hdmirx_phy_top_regs[] = {
 	T7_RX_TOP_CLK_CNTL, T7_RX_TOP_PORT_SEL, T7_RX_TOP_PHYIF_CNTL0,
 	T7_RX_TOP_CHAN_SWITCH_0, T7_RX_TOP_CHAN_SWITCH_1,
@@ -139,6 +146,8 @@ enum t7_hdmirx_clock {
 };
 
 struct t7_hdmirx {
+	bool uhd60;
+	u8 saved_ddc_switch, saved_sink_version, saved_tmds_config;
 	void __iomem *top;
 	void __iomem *phy;
 	void __iomem *cor;
@@ -209,6 +218,19 @@ static int t7_hdmirx_validate_phy_edid(const u8 *edid, size_t size)
 	return 0;
 }
 
+static int t7_hdmirx_validate_uhd_edid(const u8 *edid, size_t size)
+{
+	int ret = t7_hdmirx_validate_edid(edid, size);
+
+	if (ret)
+		return ret;
+	/* The opt-in profile requires a 594 MHz preferred timing and CTA block. */
+	if (size != 256 || !(edid[20] & BIT(7)) ||
+	    (edid[54] | (edid[55] << 8)) != 59400 || edid[128] != 2)
+		return -EOPNOTSUPP;
+	return 0;
+}
+
 static void t7_hdmirx_ddc_stop(void *data)
 {
 	struct t7_hdmirx *rx = data;
@@ -263,7 +285,9 @@ static int t7_hdmirx_ddc_start(struct t7_hdmirx *rx, const u8 *edid, size_t size
 	memcpy(rx->edid, edid, size);
 	rx->edid_blob.data = rx->edid;
 	rx->edid_blob.size = size;
-	t7_hdmirx_set_hpd(rx, true);
+	/* UHD sources must see SCDC enabled before the first HPD rising edge. */
+	if (!rx->uhd60)
+		t7_hdmirx_set_hpd(rx, true);
 	return 0;
 }
 
@@ -329,7 +353,7 @@ static void t7_hdmirx_phy_prepare(struct t7_hdmirx *rx)
 	writel(BIT(5) | BIT(6), rx->top + T7_RX_TOP_SW_RESET);
 	readl(rx->top + T7_RX_TOP_SW_RESET);
 	writel(0, rx->top + T7_RX_TOP_SW_RESET);
-	/* Fixed PHY_BW_2 analog settings; other input rates must not program APLL. */
+	/* Fixed PHY_BW_2 or PHY_BW_5; qualify the cable and SCDC ratio before APLL. */
 	writel(0x200773f8, rx->phy + T7_RX_PHY_MISC0);
 	usleep_range(5, 10);
 	if (trim & BIT(0))
@@ -340,12 +364,13 @@ static void t7_hdmirx_phy_prepare(struct t7_hdmirx *rx)
 	writel(trim, rx->phy + T7_RX_PHY_MISC1);
 	writel(0, rx->phy + T7_RX_PHY_MISC2);
 	writel(0x817, rx->phy + T7_RX_PHY_MISC3);
-	writel(0x17270fff, rx->phy + T7_RX_PHY_DCHA0);
+	writel(rx->uhd60 ? 0x10210fff : 0x17270fff, rx->phy + T7_RX_PHY_DCHA0);
 	writel(0x45ff4b58, rx->phy + T7_RX_PHY_DCHA1);
-	writel(0x01ff28c9, rx->phy + T7_RX_PHY_DCHA2);
-	writel(0x630, rx->phy + T7_RX_PHY_DCHA3);
-	writel(0xe3372103 & ~(BIT(28) | GENMASK(25, 24)), rx->phy + T7_RX_PHY_DCHD0);
-	writel(0x40009000, rx->phy + T7_RX_PHY_DCHD1);
+	writel(rx->uhd60 ? 0x01ff2a21 : 0x01ff28c9, rx->phy + T7_RX_PHY_DCHA2);
+	writel(rx->uhd60 ? 0x1080 : 0x630, rx->phy + T7_RX_PHY_DCHA3);
+	writel((rx->uhd60 ? 0xe3372903 : 0xe3372103) &
+	       ~(BIT(28) | GENMASK(25, 24)), rx->phy + T7_RX_PHY_DCHD0);
+	writel(rx->uhd60 ? 0x4004f000 : 0x40009000, rx->phy + T7_RX_PHY_DCHD1);
 	writel(0x0d422222 & ~BIT(26), rx->phy + T7_RX_PHY_DCHD2);
 	writel(0x10000000, rx->phy + T7_RX_PHY_DCHD3);
 	writel(0x3001, rx->phy + T7_RX_PHY_DCHD4);
@@ -369,8 +394,9 @@ static int t7_hdmirx_wait_cable(struct t7_hdmirx *rx, unsigned long reference_hz
 		status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
 		sample_hz = t7_hdmirx_meter_hz(status, reference_hz);
 		rx->cable_hz = sample_hz;
-		/* This trial only supports 1080p60 RGB 8-bit's 148.5 MHz TMDS clock. */
-		if (sample_hz >= 146500000 && sample_hz <= 150500000 && previous &&
+		/* Both profiles have a 148.5 MHz cable clock; SCDC distinguishes 1:40. */
+		if ((!!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1)) == rx->uhd60) &&
+		    sample_hz >= 146500000 && sample_hz <= 150500000 && previous &&
 		    abs((int)sample_hz - (int)previous) <= 500000)
 			stable++;
 		else
@@ -387,7 +413,7 @@ static int t7_hdmirx_phy_pll(struct t7_hdmirx *rx)
 {
 	unsigned int attempt;
 
-	/* PHY_BW_2 / PLL_BW_2: M=40, N=1, TMDS output divide by 8. */
+	/* M=40, N=1; output divide by 8 for 1080p or by 2 for UHD's 1:40 link. */
 	for (attempt = 0; attempt < 3; attempt++) {
 		writel(0x20090428, rx->phy + T7_RX_PHY_APLL0);
 		usleep_range(5, 10);
@@ -396,10 +422,10 @@ static int t7_hdmirx_phy_pll(struct t7_hdmirx *rx)
 		writel(0, rx->phy + T7_RX_PHY_APLL1);
 		writel(0x00001118, rx->phy + T7_RX_PHY_APLL2);
 		usleep_range(5, 10);
-		writel(0x10058f30, rx->phy + T7_RX_PHY_APLL3);
-		writel(0x0b0130c0, rx->phy + T7_RX_PHY_APLL4);
+		writel(rx->uhd60 ? 0x10058f00 : 0x10058f30, rx->phy + T7_RX_PHY_APLL3);
+		writel(rx->uhd60 ? 0x090130c0 : 0x0b0130c0, rx->phy + T7_RX_PHY_APLL4);
 		usleep_range(5, 10);
-		writel(0x0b8130c0, rx->phy + T7_RX_PHY_APLL4);
+		writel(rx->uhd60 ? 0x098130c0 : 0x0b8130c0, rx->phy + T7_RX_PHY_APLL4);
 		usleep_range(5, 10);
 		writel(0x34090428, rx->phy + T7_RX_PHY_APLL0);
 		usleep_range(5, 10);
@@ -425,7 +451,10 @@ static void t7_hdmirx_phy_equalize(struct t7_hdmirx *rx)
 	usleep_range(100, 110);
 	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(30), BIT(30));
 	usleep_range(10000, 10100);
-	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, BIT(27), BIT(27));
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(27), BIT(27));
+	if (rx->uhd60)
+		t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(29), 0);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, BIT(26), 0);
 	usleep_range(10, 20);
 	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, BIT(26), BIT(26));
 	usleep_range(100, 110);
@@ -450,6 +479,9 @@ static void t7_hdmirx_core_stop(void *data)
 	writeb(rx->core_saved_power, rx->cor + T7_RX_COR_POWER_CTRL);
 	writeb(rx->core_saved_aon_reset, rx->cor + T7_RX_COR_AON_RESET);
 	readb(rx->cor + T7_RX_COR_PHY_CLOCK3);
+	writeb(rx->saved_ddc_switch, rx->cor + T7_RX_COR_DDC_SWITCH);
+	writeb(rx->saved_sink_version, rx->cor + T7_RX_COR_SINK_VERSION);
+	writeb(rx->saved_tmds_config, rx->cor + T7_RX_COR_TMDS_CONFIG);
 	rx->core_active = false;
 }
 
@@ -472,6 +504,9 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 	rx->core_smc_result = res.a0;
 	if (res.a0)
 		return -EIO;
+	rx->saved_ddc_switch = readb(rx->cor + T7_RX_COR_DDC_SWITCH);
+	rx->saved_sink_version = readb(rx->cor + T7_RX_COR_SINK_VERSION);
+	rx->saved_tmds_config = readb(rx->cor + T7_RX_COR_TMDS_CONFIG);
 	rx->core_saved_aon_reset = readb(rx->cor + T7_RX_COR_AON_RESET);
 	rx->core_saved_power = readb(rx->cor + T7_RX_COR_POWER_CTRL);
 	rx->core_saved_sys = readb(rx->cor + T7_RX_COR_SYS_CTRL);
@@ -482,6 +517,10 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 	/* Hold AON reset while removing TMDS isolation and selecting PHY lanes. */
 	writeb(1, rx->cor + T7_RX_COR_AON_RESET);
 	writeb(0x11, rx->cor + T7_RX_COR_HDMI2_MODE);
+	/* Start a fresh SCDC handshake while HPD is low. */
+	writeb(0x86, rx->cor + T7_RX_COR_DDC_SWITCH);
+	writeb(1, rx->cor + T7_RX_COR_SINK_VERSION);
+	writeb(0, rx->cor + T7_RX_COR_TMDS_CONFIG);
 	writeb(0, rx->cor + T7_RX_COR_INT_CTRL);
 	writeb(0, rx->cor + T7_RX_COR_POWER_CTRL);
 	writeb(3, rx->cor + T7_RX_COR_SYS_CTRL);
@@ -499,8 +538,8 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 	writeb(4, rx->cor + T7_RX_COR_HDMI_MODE);
 	writeb(1, rx->cor + T7_RX_COR_HPD_CTRL);
 	writeb(0, rx->cor + T7_RX_COR_CLAMP);
-	/* DVI sources have no HDMI guard-band preamble. */
-	writeb(0, rx->cor + T7_RX_COR_PREAMBLE);
+	/* The UHD CTA profile is HDMI; the base-block 1080p profile is DVI. */
+	writeb(rx->uhd60 ? 6 : 0, rx->cor + T7_RX_COR_PREAMBLE);
 	writeb(0xff, rx->cor + T7_RX_COR_PHY_CLOCK1);
 	writeb(0x3f, rx->cor + T7_RX_COR_PHY_CLOCK2);
 	writeb(1, rx->cor + T7_RX_COR_PHY_CLOCK3);
@@ -520,6 +559,8 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 	if (readb(rx->cor + T7_RX_COR_SYS_CTRL) != 3 ||
 	    readb(rx->cor + T7_RX_COR_PHY_CLOCK1) != 0xff)
 		return -EIO;
+	if (rx->uhd60)
+		t7_hdmirx_set_hpd(rx, true);
 	return 0;
 }
 
@@ -528,7 +569,7 @@ static u32 t7_hdmirx_core_read16(struct t7_hdmirx *rx, u32 offset)
 	return readb(rx->cor + offset) | (readb(rx->cor + offset + 1) << 8);
 }
 
-int t7_hdmirx_check_1080p_now(struct device *dev)
+int t7_hdmirx_check_video_now(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
 	u32 ticks, reference;
@@ -543,12 +584,12 @@ int t7_hdmirx_check_1080p_now(struct device *dev)
 	if (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
 	    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4)
 		return -ERANGE;
-	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != 1920 ||
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != 1080 ||
+	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (rx->uhd60 ? 3840 : 1920) ||
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != (rx->uhd60 ? 2160 : 1080) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC) +
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_HFRONT_BACK) != 2200 ||
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HFRONT_BACK) != (rx->uhd60 ? 4400 : 2200) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC) +
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT_BACK) != 1125)
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT_BACK) != (rx->uhd60 ? 2250 : 1125))
 		return -ERANGE;
 	ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
 		(readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
@@ -557,18 +598,30 @@ int t7_hdmirx_check_1080p_now(struct device *dev)
 		return -ERANGE;
 	return 0;
 }
-EXPORT_SYMBOL_GPL(t7_hdmirx_check_1080p_now);
+EXPORT_SYMBOL_GPL(t7_hdmirx_check_video_now);
 
-int t7_hdmirx_check_1080p(struct device *dev)
+int t7_hdmirx_check_video(struct device *dev)
 {
-	int ret = t7_hdmirx_check_1080p_now(dev);
+	int ret = t7_hdmirx_check_video_now(dev);
 
 	if (ret)
 		return ret;
 	usleep_range(20000, 21000);
-	return t7_hdmirx_check_1080p_now(dev);
+	return t7_hdmirx_check_video_now(dev);
 }
-EXPORT_SYMBOL_GPL(t7_hdmirx_check_1080p);
+EXPORT_SYMBOL_GPL(t7_hdmirx_check_video);
+
+int t7_hdmirx_get_size(struct device *dev, unsigned int *width, unsigned int *height)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+
+	if (!rx || !rx->core_active)
+		return -ENOLINK;
+	*width = rx->uhd60 ? 3840 : 1920;
+	*height = rx->uhd60 ? 2160 : 1080;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_get_size);
 
 static int t7_hdmirx_status(struct seq_file *s, void *unused)
 {
@@ -663,6 +716,9 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 	unsigned int i;
 	int ret;
 
+	if (uhd60 && !core_test)
+		return dev_err_probe(dev, -EINVAL,
+				     "UHD trial requires video core initialization\n");
 	if (phy_test && !edid_firmware)
 		return dev_err_probe(dev, -EINVAL, "PHY trial requires an EDID firmware\n");
 	if (core_test && !phy_test)
@@ -673,6 +729,7 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 	ret = device_property_read_u32(dev, "amlogic,input-port", &rx->port);
 	if (ret || rx->port > 2)
 		return dev_err_probe(dev, -EINVAL, "Require input port 0..2\n");
+	rx->uhd60 = uhd60;
 	rx->top = devm_platform_ioremap_resource_byname(pdev, "top");
 	if (IS_ERR(rx->top))
 		return PTR_ERR(rx->top);
@@ -717,7 +774,10 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 		ret = request_firmware(&firmware, edid_firmware, dev);
 		if (ret)
 			return dev_err_probe(dev, ret, "Cannot load EDID firmware\n");
-		ret = phy_test ? t7_hdmirx_validate_phy_edid(firmware->data, firmware->size) : 0;
+		ret = 0;
+		if (phy_test)
+			ret = uhd60 ? t7_hdmirx_validate_uhd_edid(firmware->data, firmware->size) :
+				      t7_hdmirx_validate_phy_edid(firmware->data, firmware->size);
 		if (!ret)
 			ret = t7_hdmirx_ddc_start(rx, firmware->data, firmware->size);
 		release_firmware(firmware);
