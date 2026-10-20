@@ -46,3 +46,38 @@ Next stages are T7 PHY tuning and signal lock, then an independent
 VDIN capture path using completed frames and explicit DMA buffer ownership.
 Existing 5.15 TVIN/VFM/codec_mm interfaces must be replaced or explicitly adapted;
 the Synopsys rk3588 capture driver is not a drop-in T7 frontend.
+
+## Direct capture experiment and local benchmark
+
+The VDIN V4L2 queue defaults to the private cached ring/copy path. The read-only
+module option `direct_dma=1` instead arms coherent vb2 allocations taken from the
+queued list. Only a final AXI completion can publish a buffer. A dequeued buffer
+is never armed again until the consumer queues it; starvation pauses capture,
+and resuming discards a possibly partial first frame. The encoder still holds
+the capture-pool lease while importing its DMA planes. No CPU frame copy or
+private-ring cache synchronization is performed in direct mode.
+
+Each direct buffer acquires an independent allocator DMA-buf lease in buf_init,
+before it can reach an IRQ. STREAMOFF joins the worker and synchronizes DMA/IRQs
+before vb2 teardown. On a stop timeout, ERROR contents are invalid, the queue
+cannot restart, and allocator leases of hardware-used buffers are intentionally
+retained until reboot along with the existing module/private-memory retention.
+Thus REQBUFS(0), close, and loss of userspace exports cannot free or reuse memory
+that a failed-stop MIF might still write. Suppressed platform bind attributes
+and the fault module reference prevent normal driver removal in that state.
+Unused allocations are released normally. `stream_copy_bytes` in debugfs counts
+CPU frame-copy bytes in the current stream; direct mode must report zero.
+
+`python3 test_stream.py` compiles actual IRQ/queue/worker/cleanup C code with
+controlled hardware gates and ASan/UBSan. It covers both paths, held buffers,
+starvation/requeue, in-flight STREAMOFF, busy/missing IRQ quarantine, allocator
+lease failure, and memory surviving destruction of vb2 metadata. These checks
+do not prove hardware timing, DMA import or frame correctness.
+
+On Linux ARM64, `python3 test_copy.py --output /tmp/vdin-copy-bench` builds a
+standalone comparison of the actual kernel memcpy_generic and a SIMD candidate.
+Run its `--benchmark /dev/videoN` mode only with an idle t7-vdin-test queue. It
+allocates four real vb2 MMAP buffers, alternates implementations, validates full
+outputs, and never starts capture. Ordinary cached sources omit source DMA
+synchronization and kernel SIMD context costs. The SIMD candidate is not linked
+into the module; it showed no benefit in the initial VIM4 mapping measurements.

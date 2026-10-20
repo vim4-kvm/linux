@@ -51,6 +51,8 @@ static void wake_up(wait_queue_head_t *w) { (void)w; }
 mmio = r'''
 static uint8_t registers[0x40000], frame[3840U * 2160U * 3U + 16];
 static struct t7_vdin receiver;
+static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)
+{ assert(!vdin->direct_dma); return NULL; }
 static unsigned int pins, requests, timing_checks;
 static bool timeout, busy, bad_timing, change_timing;
 static u32 readl(void *address)
