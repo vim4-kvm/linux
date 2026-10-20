@@ -6,7 +6,7 @@ import tempfile
 
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
-types = source[source.index('struct t7_vdin {'):source.index('static u32 t7_vdin_read')]
+types = source[source.index('enum t7_vdin_slot_state {'):source.index('static u32 t7_vdin_read')]
 functions = source[source.index('static u32 t7_vdin_read'):
                    source.index('static int t7_vdin_frame_open')]
 prefix = r'''
@@ -44,6 +44,7 @@ struct v4l2_device { int unused; };
 struct video_device { int unused; };
 struct vb2_queue { int unused; };
 static u64 ktime_get_ns(void) { return 123456789; }
+static void wake_up(wait_queue_head_t *w) { (void)w; }
 '''
 mmio = r'''
 static uint8_t registers[0x40000], frame[VDIN_FRAME_SIZE];
