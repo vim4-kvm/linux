@@ -2027,8 +2027,6 @@ int wave5_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *
 	if (ret)
 		return ret;
 
-	p_enc_info->vb_mv = vb_mv;
-
 	fbc_y_tbl_size = ALIGN(WAVE5_FBC_LUMA_TABLE_SIZE(buf_width, buf_height), 16);
 	fbc_c_tbl_size = ALIGN(WAVE5_FBC_CHROMA_TABLE_SIZE(buf_width, buf_height), 16);
 
@@ -2038,15 +2036,11 @@ int wave5_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *
 	if (ret)
 		goto free_vb_fbc_y_tbl;
 
-	p_enc_info->vb_fbc_y_tbl = vb_fbc_y_tbl;
-
 	vb_fbc_c_tbl.daddr = 0;
 	vb_fbc_c_tbl.size = ALIGN(fbc_c_tbl_size * count, BUFFER_MARGIN) + BUFFER_MARGIN;
 	ret = wave5_vdi_allocate_dma_memory(vpu_dev, &vb_fbc_c_tbl);
 	if (ret)
 		goto free_vb_fbc_c_tbl;
-
-	p_enc_info->vb_fbc_c_tbl = vb_fbc_c_tbl;
 
 	if (avc_encoding)
 		sub_sampled_size = WAVE5_SUBSAMPLED_ONE_SIZE_AVC(buf_width, buf_height);
@@ -2058,8 +2052,6 @@ int wave5_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *
 	if (ret)
 		goto free_vb_sam_buf;
 
-	p_enc_info->vb_sub_sam_buf = vb_sub_sam_buf;
-
 	vb_task.size = (p_enc_info->vlc_buf_size * VLC_BUF_NUM) +
 			(p_enc_info->param_buf_size * WAVE521_COMMAND_QUEUE_DEPTH);
 	vb_task.daddr = 0;
@@ -2068,12 +2060,21 @@ int wave5_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *
 		if (ret)
 			goto free_vb_task;
 
-		p_enc_info->vb_task = vb_task;
-
-		vpu_write_reg(inst->dev, W5_CMD_SET_FB_ADDR_TASK_BUF,
-			      p_enc_info->vb_task.daddr);
+		vpu_write_reg(inst->dev, W5_CMD_SET_FB_ADDR_TASK_BUF, vb_task.daddr);
 		vpu_write_reg(inst->dev, W5_CMD_SET_FB_TASK_BUF_SIZE, vb_task.size);
 	}
+
+	/*
+	 * Transfer ownership only after all allocations succeed. Once SET_FB is
+	 * submitted, even a command failure can leave firmware using these buffers;
+	 * enc_close must stop the instance before releasing them.
+	 */
+	p_enc_info->vb_mv = vb_mv;
+	p_enc_info->vb_fbc_y_tbl = vb_fbc_y_tbl;
+	p_enc_info->vb_fbc_c_tbl = vb_fbc_c_tbl;
+	p_enc_info->vb_sub_sam_buf = vb_sub_sam_buf;
+	if (vb_task.vaddr)
+		p_enc_info->vb_task = vb_task;
 
 	/* set sub-sampled buffer base addr */
 	vpu_write_reg(inst->dev, W5_ADDR_SUB_SAMPLED_FB_BASE, vb_sub_sam_buf.daddr);
@@ -2127,17 +2128,11 @@ int wave5_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *
 
 		ret = send_firmware_command(inst, W5_SET_FB, false, NULL, NULL);
 		if (ret)
-			goto free_vb_mem;
+			return ret;
 	}
 
-	ret = wave5_vpu_firmware_command_queue_error_check(vpu_dev, NULL);
-	if (ret)
-		goto free_vb_mem;
+	return wave5_vpu_firmware_command_queue_error_check(vpu_dev, NULL);
 
-	return ret;
-
-free_vb_mem:
-	wave5_vdi_free_dma_memory(vpu_dev, &vb_task);
 free_vb_task:
 	wave5_vdi_free_dma_memory(vpu_dev, &vb_sub_sam_buf);
 free_vb_sam_buf:
