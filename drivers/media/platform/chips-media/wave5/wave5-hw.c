@@ -174,6 +174,9 @@ static int wave5_wait_bus_busy(struct vpu_device *vpu_dev, unsigned int addr)
 	    vpu_dev->product_code == WAVE521E1_CODE)
 		gdi_status_check_value = 0x00ff1f3f;
 
+	/* T7's Wave521c exposes six bus-idle bits, unlike the TI integration. */
+	if (vpu_dev->bus_idle_value)
+		gdi_status_check_value = vpu_dev->bus_idle_value;
 	return wave5_wait_fio_readl(vpu_dev, addr, gdi_status_check_value);
 }
 
@@ -393,6 +396,9 @@ static int setup_wave5_properties(struct device *dev)
 							   hw_config_def0);
 	}
 
+	/* Older T7 hardware does not report encoder capability in STD_DEF1. */
+	if (vpu_dev->encoder_mask)
+		p_attr->support_encoders = vpu_dev->encoder_mask;
 	setup_wave5_interrupts(vpu_dev);
 
 	return 0;
@@ -1430,7 +1436,7 @@ int wave5_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 	case SW_RESET_ON_BOOT:
 	case SW_RESET_FORCE:
 	case SW_RESET_SAFETY:
-		val = W5_RST_BLOCK_ALL;
+		val = vpu_dev->reset_mask;
 		break;
 	default:
 		return -EINVAL;
@@ -1753,6 +1759,9 @@ int wave5_vpu_enc_init_seq(struct vpu_instance *inst)
 			| p_open_param->pic_width);
 	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_CUSTOM_MAP_ENDIAN, VDI_LITTLE_ENDIAN);
 
+	dev_dbg(inst->dev->dev, "encoder setup: codec %u profile %u level %u fps %u rc %u\n",
+		inst->std, p_param->profile, p_param->level, p_open_param->frame_rate_info,
+		p_open_param->rc_enable);
 	reg_val = p_param->profile |
 		(p_param->level << 3) |
 		(p_param->internal_bit_depth << 14);
@@ -1861,6 +1870,11 @@ int wave5_vpu_enc_init_seq(struct vpu_instance *inst)
 	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_USER_SCALING_LIST_ADDR, 0);
 	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_NUM_UNITS_IN_TICK, 0);
 	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_TIME_SCALE, 0);
+	if (inst->std == W_HEVC_ENC && inst->dev->legacy_firmware) {
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_NUM_UNITS_IN_TICK, 1);
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_TIME_SCALE,
+			      p_open_param->frame_rate_info);
+	}
 	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_NUM_TICKS_POC_DIFF_ONE, 0);
 
 	if (inst->std == W_HEVC_ENC) {
