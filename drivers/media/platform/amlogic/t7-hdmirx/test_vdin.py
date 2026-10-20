@@ -18,7 +18,9 @@ prefix = r'''
 #include <stdio.h>
 typedef uint32_t u32;
 typedef uint64_t dma_addr_t;
+typedef uint64_t u64;
 typedef int spinlock_t;
+typedef int wait_queue_head_t;
 typedef int irqreturn_t;
 #define __iomem
 #define BIT(n) (1U << (n))
@@ -35,6 +37,13 @@ struct device { int unused; };
 struct clk_bulk_data { int unused; };
 struct mutex { int unused; };
 struct completion { bool done; };
+struct kref { int unused; };
+struct list_head { int unused; };
+struct vb2_v4l2_buffer { int unused; };
+struct v4l2_device { int unused; };
+struct video_device { int unused; };
+struct vb2_queue { int unused; };
+static u64 ktime_get_ns(void) { return 123456789; }
 '''
 mmio = r'''
 static uint8_t registers[0x40000], frame[VDIN_FRAME_SIZE];
