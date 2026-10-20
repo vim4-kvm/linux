@@ -1346,6 +1346,7 @@ static int prepare_fb(struct vpu_instance *inst)
 	u32 fb_height = ALIGN(inst->dst_fmt.height, 32);
 	int i, ret = 0;
 
+	/* Instance cleanup releases these only after enc_close stops firmware. */
 	for (i = 0; i < inst->fbc_buf_count; i++) {
 		u32 luma_size = fb_stride * fb_height;
 		u32 chroma_size = ALIGN(fb_stride / 2, 16) * fb_height;
@@ -1355,7 +1356,7 @@ static int prepare_fb(struct vpu_instance *inst)
 		if (ret < 0) {
 			dev_err(inst->dev->dev, "%s: failed to allocate FBC buffer %zu\n",
 				__func__, inst->frame_vbuf[i].size);
-			goto free_buffers;
+			return ret;
 		}
 
 		inst->frame_buf[i].buf_y = inst->frame_vbuf[i].daddr;
@@ -1371,14 +1372,10 @@ static int prepare_fb(struct vpu_instance *inst)
 		dev_err(inst->dev->dev,
 			"%s: wave5_vpu_enc_register_frame_buffer, fail: %d\n",
 			__func__, ret);
-		goto free_buffers;
+		return ret;
 	}
 
 	return 0;
-free_buffers:
-	for (i = 0; i < inst->fbc_buf_count; i++)
-		wave5_vpu_dec_reset_framebuffer(inst, i);
-	return ret;
 }
 
 static int wave5_vpu_enc_start_streaming(struct vb2_queue *q, unsigned int count)
