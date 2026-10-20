@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Receiver resource/cable experiment; the normal VIM4 DTB stays disabled. */
+#include "amlogic-t7-a311d2-khadas-vim4-udc-test.dts"
+
+&periphs_pinctrl {
+	hdmirx_b_detect_pins: hdmirx-b-detect-pins {
+		mux {
+			groups = "hdmirx_b_det";
+			function = "hdmirx_b";
+			bias-disable;
+		};
+	};
+};
+
+&hdmirx {
+	amlogic,input-port = <1>;
+	pinctrl-0 = <&hdmirx_b_detect_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+};
