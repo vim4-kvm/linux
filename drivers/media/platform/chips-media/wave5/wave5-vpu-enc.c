@@ -948,13 +948,13 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		inst->enc_param.tmvp_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
+		inst->enc_param.constraint_set1_flag =
+			ctrl->val == V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE;
 		switch (ctrl->val) {
 		case V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE:
 		case V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE:
 			inst->enc_param.profile = H264_PROFILE_BP;
 			inst->bit_depth = 8;
-			if (ctrl->val == V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE)
-				inst->enc_param.constraint_set1_flag = 1;
 			break;
 		case V4L2_MPEG_VIDEO_H264_PROFILE_MAIN:
 			inst->enc_param.profile = H264_PROFILE_MP;
@@ -1717,7 +1717,11 @@ static int wave5_vpu_open_enc(struct file *filp)
 
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_H264_PROFILE,
-			       V4L2_MPEG_VIDEO_H264_PROFILE_HIGH_444_PREDICTIVE, 0,
+			       V4L2_MPEG_VIDEO_H264_PROFILE_HIGH_444_PREDICTIVE,
+			       dev->legacy_firmware ?
+			       BIT(V4L2_MPEG_VIDEO_H264_PROFILE_EXTENDED) |
+			       BIT(V4L2_MPEG_VIDEO_H264_PROFILE_HIGH_422) |
+			       BIT(V4L2_MPEG_VIDEO_H264_PROFILE_HIGH_444_PREDICTIVE) : 0,
 			       V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_H264_LEVEL,

@@ -1704,6 +1704,18 @@ static void wave5_set_enc_crop_info(u32 codec, struct enc_wave_param *param, int
 	}
 }
 
+static u32 wave5_enc_sps_profile(struct vpu_instance *inst, u32 profile)
+{
+	/* The T7 firmware predates Extended: its AVC High/High10 IDs are 3/4,
+	 * while the current Wave5 command ABI uses 4/5. Keep API values intact
+	 * for validation and translate only when issuing the firmware command.
+	 */
+	if (inst->dev->legacy_firmware && inst->std == W_AVC_ENC &&
+	    (profile == H264_PROFILE_HP || profile == H264_PROFILE_HIGH10))
+		return profile - 1;
+	return profile;
+}
+
 int wave5_vpu_enc_init_seq(struct vpu_instance *inst)
 {
 	u32 reg_val = 0, rot_mir_mode, fixed_cu_size_mode = 0x7;
@@ -1762,7 +1774,7 @@ int wave5_vpu_enc_init_seq(struct vpu_instance *inst)
 	dev_dbg(inst->dev->dev, "encoder setup: codec %u profile %u level %u fps %u rc %u\n",
 		inst->std, p_param->profile, p_param->level, p_open_param->frame_rate_info,
 		p_open_param->rc_enable);
-	reg_val = p_param->profile |
+	reg_val = wave5_enc_sps_profile(inst, p_param->profile) |
 		(p_param->level << 3) |
 		(p_param->internal_bit_depth << 14);
 	if (inst->std == W_HEVC_ENC)
