@@ -58,6 +58,7 @@ struct snd_soc_pcm_runtime;
 #define FIFO_CTRL2			0x28
 
 struct axg_fifo {
+	void __iomem *chsync;
 	struct regmap *map;
 	struct clk *pclk;
 	struct reset_control *arb;
@@ -67,6 +68,7 @@ struct axg_fifo {
 };
 
 struct axg_fifo_match_data {
+	bool has_chsync;
 	const struct snd_soc_component_driver *component_drv;
 	struct snd_soc_dai_driver *dai_drv;
 	struct reg_field field_threshold;

@@ -346,6 +346,12 @@ int axg_fifo_probe(struct platform_device *pdev)
 	regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
+	/* Map channel synchronization before publishing the PCM device. */
+	if (data->has_chsync) {
+		fifo->chsync = devm_platform_ioremap_resource_byname(pdev, "chsync");
+		if (IS_ERR(fifo->chsync))
+			return PTR_ERR(fifo->chsync);
+	}
 
 	fifo->map = devm_regmap_init_mmio(dev, regs, &axg_fifo_regmap_cfg);
 	if (IS_ERR(fifo->map)) {

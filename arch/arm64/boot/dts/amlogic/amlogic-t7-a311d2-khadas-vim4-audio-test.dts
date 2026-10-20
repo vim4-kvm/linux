@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Independent stereo HDMI capture; no dependency on the disabled HDMI TX. */
+#include "amlogic-t7-a311d2-khadas-vim4-hdmirx-test.dts"
+
+&hdmirx {
+	#sound-dai-cells = <0>;
+	reg = <0x0 0x398000 0x0 0x4000>,
+	      <0x0 0x39c000 0x0 0x90>,
+	      <0x0 0x3a0000 0x0 0x8000>,
+	      <0x0 0x330800 0x0 0x30>;
+	reg-names = "top", "phy", "cor", "frhdmirx";
+	clocks = <&clkc_periphs CLKID_SYS_HDMIRX_PCLK>,
+		 <&clkc_periphs CLKID_SYS_HDMIRX>,
+		 <&clkc_periphs CLKID_HDMIRX_CFG>,
+		 <&clkc_periphs CLKID_HDMIRX_METER>,
+		 <&clkc_periphs CLKID_HDMIRX_2M>,
+		 <&clkc_periphs CLKID_HDMIRX_5M>,
+		 <&clkc_periphs CLKID_HDMIRX_AUD_PLL>,
+		 <&clkc_audio AUD_CLKID_FRHDMIRX>;
+	clock-names = "pclk", "sys", "cfg", "meter", "2m", "5m",
+		      "audio-pll", "frhdmirx";
+};
+
+&toddr_a {
+	compatible = "amlogic,t7-toddr";
+	reg = <0x0 0x330100 0x0 0x2c>, <0x0 0x330c3c 0x0 0x4>;
+	reg-names = "fifo", "chsync";
+};
+
+/ {
+	/delete-node/ sound;
+	sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "VIM4HDMIRX";
+		simple-audio-card,routing = "TODDR_A IN 8", "HDMI RX Capture";
+
+		simple-audio-card,cpu {
+			sound-dai = <&toddr_a>;
+		};
+		simple-audio-card,codec {
+			sound-dai = <&hdmirx>;
+		};
+	};
+};
