@@ -1957,6 +1957,21 @@
 		reg = <0x0 0x36048 0x0 0x14>;
 	};
 
+	hdmirx: hdmi-receiver@398000 {
+		compatible = "amlogic,t7-hdmirx";
+		amlogic,input-port = <0>;
+		reg = <0x0 0x398000 0x0 0x4000>;
+		reg-names = "top";
+		power-domains = <&pwrc PWRC_T7_HDMIRX_ID>;
+		clocks = <&clkc_periphs CLKID_SYS_HDMIRX_PCLK>,
+			 <&clkc_periphs CLKID_HDMIRX_CFG>,
+			 <&clkc_periphs CLKID_HDMIRX_METER>,
+			 <&clkc_periphs CLKID_HDMIRX_2M>,
+			 <&clkc_periphs CLKID_HDMIRX_5M>;
+		clock-names = "pclk", "cfg", "meter", "2m", "5m";
+		status = "disabled";
+	};
+
 	hdmi_tx: hdmi-tx@300000 {
 		compatible = "amlogic,t7-hdmi-tx";
 		reg = <0x0 0x300000 0x0 0x10000>,
