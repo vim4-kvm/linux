@@ -28,6 +28,10 @@
 #define DSPB_CLK_CTRL0		0xa0
 #define CLK12_24_CTRL		0xa8
 #define ANAKIN_CLK_CTRL		0xac
+#define VPU_CLK_CTRL		0xe8
+#define VPU_CLKB_CTRL		0xec
+#define VDIN_MEAS_CTRL		0xf8
+#define VAPB_CLK_CTRL		0xfc
 #define MIPI_CSI_PHY_CLK_CTRL	0x10c
 #define MIPI_ISP_CLK_CTRL	0x110
 #define HRX_CLK_CTRL0		0x128
@@ -968,6 +972,107 @@ static T7_COMP_SEL(hdmirx_meter, HRX_CLK_CTRL3, 9, 0x3, t7_hdmirx_parents);
 static T7_COMP_DIV(hdmirx_meter, HRX_CLK_CTRL3, 0, 7);
 static T7_COMP_GATE(hdmirx_meter, HRX_CLK_CTRL3, 8, 0);
 
+static const struct clk_parent_data t7_vpu_parents[] = {
+	{ .fw_name = "fdiv3" },
+	{ .fw_name = "fdiv4" },
+	{ .fw_name = "fdiv5" },
+	{ .fw_name = "fdiv7" },
+};
+
+static T7_COMP_SEL(vpu_0, VPU_CLK_CTRL, 9, 0x3, t7_vpu_parents);
+static T7_COMP_DIV(vpu_0, VPU_CLK_CTRL, 0, 7);
+static T7_COMP_GATE(vpu_0, VPU_CLK_CTRL, 8, 0);
+static T7_COMP_SEL(vpu_1, VPU_CLK_CTRL, 25, 0x3, t7_vpu_parents);
+static T7_COMP_DIV(vpu_1, VPU_CLK_CTRL, 16, 7);
+static T7_COMP_GATE(vpu_1, VPU_CLK_CTRL, 24, 0);
+
+static struct clk_regmap t7_vpu = {
+	.data = &(struct clk_regmap_mux_data) {
+		.offset = VPU_CLK_CTRL,
+		.mask = 1,
+		.shift = 31,
+	},
+	.hw.init = &(struct clk_init_data) {
+		.name = "vpu",
+		.ops = &clk_regmap_mux_ops,
+		.parent_hws = (const struct clk_hw *[]) { &t7_vpu_0.hw, &t7_vpu_1.hw },
+		.num_parents = 2,
+		.flags = CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT,
+	},
+};
+
+static const struct clk_parent_data t7_vapb_parents[] = {
+	{ .fw_name = "fdiv4" },
+	{ .fw_name = "fdiv3" },
+	{ .fw_name = "fdiv5" },
+	{ .fw_name = "fdiv7" },
+	{ .fw_name = "fdiv2p5" },
+};
+
+static u32 t7_vapb_parent_values[] = { 0, 1, 2, 3, 7 };
+
+static MESON_COMP_SEL(t7_, vapb_0, VAPB_CLK_CTRL, 9, 0x7, t7_vapb_parents,
+		     t7_vapb_parent_values, 0, 0);
+static T7_COMP_DIV(vapb_0, VAPB_CLK_CTRL, 0, 7);
+static T7_COMP_GATE(vapb_0, VAPB_CLK_CTRL, 8, 0);
+static MESON_COMP_SEL(t7_, vapb_1, VAPB_CLK_CTRL, 25, 0x7, t7_vapb_parents,
+		     t7_vapb_parent_values, 0, 0);
+static T7_COMP_DIV(vapb_1, VAPB_CLK_CTRL, 16, 7);
+static T7_COMP_GATE(vapb_1, VAPB_CLK_CTRL, 24, 0);
+
+static struct clk_regmap t7_vapb = {
+	.data = &(struct clk_regmap_mux_data) {
+		.offset = VAPB_CLK_CTRL,
+		.mask = 1,
+		.shift = 31,
+	},
+	.hw.init = &(struct clk_init_data) {
+		.name = "vapb",
+		.ops = &clk_regmap_mux_ops,
+		.parent_hws = (const struct clk_hw *[]) { &t7_vapb_0.hw, &t7_vapb_1.hw },
+		.num_parents = 2,
+		.flags = CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT,
+	},
+};
+
+static const struct clk_parent_data t7_vpu_clkb_parents[] = {
+	{ .hw = &t7_vpu.hw },
+	{ .fw_name = "fdiv4" },
+	{ .fw_name = "fdiv5" },
+	{ .fw_name = "fdiv7" },
+};
+
+static T7_COMP_SEL(vpu_clkb_tmp, VPU_CLKB_CTRL, 20, 0x3, t7_vpu_clkb_parents);
+static T7_COMP_DIV(vpu_clkb_tmp, VPU_CLKB_CTRL, 16, 4);
+static T7_COMP_GATE(vpu_clkb_tmp, VPU_CLKB_CTRL, 24, 0);
+static struct clk_regmap t7_vpu_clkb_div = {
+	.data = &(struct clk_regmap_div_data) {
+		.offset = VPU_CLKB_CTRL,
+		.shift = 0,
+		.width = 8,
+	},
+	.hw.init = &(struct clk_init_data) {
+		.name = "vpu_clkb_div",
+		.ops = &clk_regmap_divider_ops,
+		.parent_hws = (const struct clk_hw *[]) { &t7_vpu_clkb_tmp.hw },
+		.num_parents = 1,
+		.flags = CLK_SET_RATE_PARENT,
+	},
+};
+
+static T7_COMP_GATE(vpu_clkb, VPU_CLKB_CTRL, 8, 0);
+
+static const struct clk_parent_data t7_vdin_meas_parents[] = {
+	{ .fw_name = "xtal" },
+	{ .fw_name = "fdiv4" },
+	{ .fw_name = "fdiv3" },
+	{ .fw_name = "fdiv5" },
+};
+
+static T7_COMP_SEL(vdin_meas, VDIN_MEAS_CTRL, 9, 0x7, t7_vdin_meas_parents);
+static T7_COMP_DIV(vdin_meas, VDIN_MEAS_CTRL, 0, 7);
+static T7_COMP_GATE(vdin_meas, VDIN_MEAS_CTRL, 8, 0);
+
 static const struct clk_parent_data t7_sys_pclk_parents = { .fw_name = "sys" };
 
 #define T7_SYS_PCLK(_name, _reg, _bit, _flags) \
@@ -1305,6 +1410,28 @@ static struct clk_hw *t7_peripherals_hw_clks[] = {
 	[CLKID_HDMIRX_METER_DIV]		= &t7_hdmirx_meter_div.hw,
 	[CLKID_HDMIRX_METER]		= &t7_hdmirx_meter.hw,
 	[CLKID_SYS_HDMIRX]		= &t7_sys_hdmirx.hw,
+	[CLKID_VPU_0_SEL]			= &t7_vpu_0_sel.hw,
+	[CLKID_VPU_0_DIV]			= &t7_vpu_0_div.hw,
+	[CLKID_VPU_0]			= &t7_vpu_0.hw,
+	[CLKID_VPU_1_SEL]			= &t7_vpu_1_sel.hw,
+	[CLKID_VPU_1_DIV]			= &t7_vpu_1_div.hw,
+	[CLKID_VPU_1]			= &t7_vpu_1.hw,
+	[CLKID_VPU]			= &t7_vpu.hw,
+	[CLKID_VAPB_0_SEL]		= &t7_vapb_0_sel.hw,
+	[CLKID_VAPB_0_DIV]		= &t7_vapb_0_div.hw,
+	[CLKID_VAPB_0]			= &t7_vapb_0.hw,
+	[CLKID_VAPB_1_SEL]		= &t7_vapb_1_sel.hw,
+	[CLKID_VAPB_1_DIV]		= &t7_vapb_1_div.hw,
+	[CLKID_VAPB_1]			= &t7_vapb_1.hw,
+	[CLKID_VAPB]			= &t7_vapb.hw,
+	[CLKID_VPU_CLKB_TMP_SEL]		= &t7_vpu_clkb_tmp_sel.hw,
+	[CLKID_VPU_CLKB_TMP_DIV]		= &t7_vpu_clkb_tmp_div.hw,
+	[CLKID_VPU_CLKB_TMP]		= &t7_vpu_clkb_tmp.hw,
+	[CLKID_VPU_CLKB_DIV]		= &t7_vpu_clkb_div.hw,
+	[CLKID_VPU_CLKB]			= &t7_vpu_clkb.hw,
+	[CLKID_VDIN_MEAS_SEL]		= &t7_vdin_meas_sel.hw,
+	[CLKID_VDIN_MEAS_DIV]		= &t7_vdin_meas_div.hw,
+	[CLKID_VDIN_MEAS]			= &t7_vdin_meas.hw,
 };
 
 static const struct meson_clkc_data t7_peripherals_data = {
