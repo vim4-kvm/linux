@@ -7,6 +7,7 @@ config VIDEO_MESON_T7_HDMIRX
 	  Manage the T7 HDMI receiver power domain and clocks, and expose
 	  read-only cable and register status through debugfs. This initial
 	  driver supports resource, cable detection and firmware EDID/DDC/HPD
-	  bring-up. PHY tuning and VDIN capture require further implementation.
+	  bring-up, plus an opt-in fixed-rate input PLL trial. Automatic PHY
+	  tuning and VDIN capture require further implementation.
 
 	  To compile this driver as a module, choose M here.
