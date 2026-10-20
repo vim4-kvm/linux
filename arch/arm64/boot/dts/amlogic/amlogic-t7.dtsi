@@ -1960,8 +1960,9 @@
 	hdmirx: hdmi-receiver@398000 {
 		compatible = "amlogic,t7-hdmirx";
 		amlogic,input-port = <0>;
-		reg = <0x0 0x398000 0x0 0x4000>;
-		reg-names = "top";
+		reg = <0x0 0x398000 0x0 0x4000>,
+		      <0x0 0x39c000 0x0 0x50>;
+		reg-names = "top", "phy";
 		power-domains = <&pwrc PWRC_T7_HDMIRX_ID>;
 		clocks = <&clkc_periphs CLKID_SYS_HDMIRX_PCLK>,
 			 <&clkc_periphs CLKID_SYS_HDMIRX>,
