@@ -219,8 +219,13 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 	pic_param.source_frame = &frame_buf;
 	pic_param.code_option.implicit_header_encode = 1;
 	pic_param.code_option.encode_aud = inst->encode_aud;
+	if (src_buf)
+		pic_param.force_keyframe = atomic_xchg(&inst->force_keyframe, 0);
 	ret = wave5_vpu_enc_start_one_frame(inst, &pic_param, fail_res);
 	if (ret) {
+		/* A command which was not accepted must not consume the request. */
+		if (pic_param.force_keyframe)
+			atomic_set(&inst->force_keyframe, 1);
 		if (*fail_res == WAVE5_SYSERR_QUEUEING_FAIL)
 			return -EINVAL;
 
@@ -785,6 +790,9 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
 		inst->enc_param.avc_idr_period = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
+		atomic_set(&inst->force_keyframe, 1);
 		break;
 	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE:
 		inst->enc_param.independ_slice_mode = ctrl->val;
@@ -1639,6 +1647,7 @@ static int wave5_vpu_open_enc(struct file *filp)
 	v4l2_fh_add(&inst->v4l2_fh, filp);
 
 	INIT_LIST_HEAD(&inst->list);
+	atomic_set(&inst->force_keyframe, 0);
 
 	inst->v4l2_m2m_dev = inst->dev->v4l2_m2m_enc_dev;
 	inst->v4l2_fh.m2m_ctx =
@@ -1774,6 +1783,9 @@ static int wave5_vpu_open_enc(struct file *filp)
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_GOP_SIZE,
 			  0, 2047, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
+			  0, 0, 0, 0);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE,
 			       V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB, 0,
