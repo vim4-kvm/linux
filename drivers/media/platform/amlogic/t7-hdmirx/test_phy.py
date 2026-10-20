@@ -36,7 +36,11 @@ struct clk_bulk_data { int unused; };
 struct debugfs_blob_wrapper { void *data; unsigned long size; };
 '''
 mmio = r'''
-static u8 top[0x4000], phy[0x50];
+static u8 top[0x4000], phy[0x50], core[0x8000];
+static u8 readb(void *address) {
+    assert((u8 *)address >= core && (u8 *)address < core + sizeof(core));
+    return *(u8 *)address;
+}
 static struct t7_hdmirx receiver;
 static bool lock_pll, jitter, delayed_source;
 static unsigned int delays, meter_reads, pll_attempts, writes;
@@ -88,7 +92,8 @@ static void reset(void)
 {
     memset(top, 0, sizeof(top));
     memset(phy, 0, sizeof(phy));
-    receiver = (struct t7_hdmirx) { .top = top, .phy = phy, .port = 1 };
+    memset(core, 0, sizeof(core));
+    receiver = (struct t7_hdmirx) { .top = top, .phy = phy, .cor = core, .port = 1 };
     lock_pll = jitter = delayed_source = false;
     delays = meter_reads = pll_attempts = writes = 0;
     writel(BIT(21) | BIT(1), top + T7_RX_TOP_HPD_PWR5V);
@@ -132,6 +137,7 @@ int main(void)
     assert(!t7_hdmirx_phy_pll(&receiver) && pll_attempts == 1);
     t7_hdmirx_phy_equalize(&receiver);
     assert(readl(phy + T7_RX_PHY_DCHD0) & BIT(28));
+    assert(readl(phy + T7_RX_PHY_DCHD0) & BIT(27));
     assert(readl(phy + T7_RX_PHY_DCHD2) & BIT(26));
     t7_hdmirx_phy_stop(&receiver);
     assert(!receiver.phy_active);
@@ -162,7 +168,18 @@ int main(void)
     assert(t7_hdmirx_phy_pll(&receiver) == -ETIMEDOUT && pll_attempts == 3);
     t7_hdmirx_phy_stop(&receiver);
     assert(!receiver.phy_active && !(readl(top + T7_RX_TOP_HPD_PWR5V) & BIT(1)));
-    puts("PHY clock qualification, trim, bounded PLL timeout and cleanup passed");
+    reset(); receiver.uhd60 = true;
+    writel(BIT(31) | 50688, top + T7_RX_TOP_METER_CABLE_STAT);
+    assert(t7_hdmirx_wait_cable(&receiver, 24000000) == -ETIMEDOUT);
+    assert(!pll_attempts);
+    reset(); receiver.uhd60 = true; core[T7_RX_COR_TMDS_CONFIG] = 3;
+    writel(BIT(31) | 50688, top + T7_RX_TOP_METER_CABLE_STAT);
+    assert(!t7_hdmirx_wait_cable(&receiver, 24000000));
+    lock_pll = true;
+    t7_hdmirx_phy_prepare(&receiver);
+    assert(!t7_hdmirx_phy_pll(&receiver));
+    assert((raw_read(phy + T7_RX_PHY_APLL4) & (7U << 24)) == (1U << 24));
+    puts("PHY clock/SCDC qualification, trim, bounded PLL timeout and cleanup passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

@@ -27,6 +27,10 @@
 
 #include "t7-hdmirx.h"
 
+static bool nv12;
+module_param(nv12, bool, 0400);
+MODULE_PARM_DESC(nv12, "Capture BT.709 limited-range NV12 instead of RGB24");
+
 /* VCBUS word indices; the accessors alone convert them to byte offsets. */
 #define VDIN_COM_CTRL0		0x1202
 #define VDIN_ACTIVE_PIXELS	0x1203
@@ -50,7 +54,9 @@
 #define VDIN_HDR_MATRIX_IN	0x12bb
 #define VDIN_HDR_MATRIX_OUT	0x12bc
 #define VDIN_WR_BADDR		0x12cc
+#define VDIN_WR_CHROMA		0x12cd
 #define VDIN_WR_STRIDE		0x12ce
+#define VDIN_WR_CHROMA_STRIDE	0x12cf
 #define VDIN_DOUBLE_CTRL		0x410b
 #define VDIN_TOP_MISC		0x410d
 #define VPU_SW_RESET		0x2720
@@ -59,10 +65,6 @@
 #define VDIN_WR_REQ		BIT(8)
 #define VDIN_VCP_WR		BIT(25)
 #define VDIN_DONE_CLEAR		BIT(21)
-#define VDIN_WIDTH		1920
-#define VDIN_HEIGHT		1080
-#define VDIN_STRIDE		(VDIN_WIDTH * 3)
-#define VDIN_FRAME_SIZE		(VDIN_STRIDE * VDIN_HEIGHT)
 #define VDIN_DMA_SLOTS		3
 
 enum t7_vdin_slot_state {
@@ -85,7 +87,15 @@ struct t7_vdin_buffer {
 	struct list_head list;
 };
 
+struct t7_vdin_snapshot {
+	size_t size;
+	unsigned char data[];
+};
+
 struct t7_vdin {
+	unsigned int width, height, stride, frame_size;
+	u32 pixel_format;
+	bool nv12;
 	struct kref ref;
 	struct device *dev;
 	struct device *receiver;
@@ -148,6 +158,9 @@ static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
 	vdin->slots[index].state = VDIN_SLOT_WRITING;
 	vdin->active_slot = index;
 	t7_vdin_write(vdin, VDIN_WR_BADDR, vdin->slots[index].dma >> 4);
+	if (vdin->nv12)
+		t7_vdin_write(vdin, VDIN_WR_CHROMA,
+			      (vdin->slots[index].dma + vdin->stride * vdin->height) >> 4);
 	vdin->dma_idle = false;
 	vdin->ring_running = true;
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR,
@@ -261,30 +274,52 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	t7_vdin_update(vdin, VDIN_TOP_MISC, BIT(26) | BIT(29), 0);
 	t7_vdin_write(vdin, VDIN_GCLK_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_GCLK_CTRL2, 0);
-	/* HDMI input; components G/B/R pass through with no colour matrix. */
-	t7_vdin_write(vdin, VDIN_COM_CTRL0, 0x915);
+	/* The core supplies R/G/B; the packed MIF emits components 2/1/0. */
+	t7_vdin_write(vdin, VDIN_COM_CTRL0, vdin->nv12 ? 0x915 : 0x195);
 	t7_vdin_write(vdin, VDIN_ASFIFO_CTRL1, 0xe40000);
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), BIT(26));
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), 0);
-	t7_vdin_write(vdin, VDIN_WIDTHS, ((VDIN_WIDTH - 1) << 16) | (VDIN_WIDTH - 1));
-	t7_vdin_write(vdin, VDIN_INTF_WIDTH, VDIN_WIDTH - 1);
+	t7_vdin_write(vdin, VDIN_WIDTHS, ((vdin->width - 1) << 16) | (vdin->width - 1));
+	t7_vdin_write(vdin, VDIN_INTF_WIDTH, vdin->width - 1);
 	t7_vdin_write(vdin, VDIN_SC_MISC_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_VSHRK_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_HDR_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 0);
 	t7_vdin_write(vdin, VDIN_HDR_MATRIX_OUT, 0);
+	if (vdin->nv12) {
+		/* Full-range RGB to limited BT.709 before 4:2:0 subsampling. */
+		t7_vdin_write(vdin, 0x128c, 0);
+		t7_vdin_write(vdin, 0x128d, 0);
+		t7_vdin_write(vdin, 0x1282, 0x00bb0275);
+		t7_vdin_write(vdin, 0x1283, 0x003f1f99);
+		t7_vdin_write(vdin, 0x1284, 0x1ea601c2);
+		t7_vdin_write(vdin, 0x1285, 0x01c21e67);
+		t7_vdin_write(vdin, 0x1286, 0x00001fd7);
+		t7_vdin_write(vdin, 0x128a, 0x00400200);
+		t7_vdin_write(vdin, 0x128b, 0x00000200);
+		t7_vdin_write(vdin, VDIN_HDR_CTRL, BIT(16));
+		t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 1);
+		t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 1);
+	}
 	t7_vdin_update(vdin, VDIN_LFIFO_CTRL, GENMASK(13, 0) | BIT(17) | BIT(18),
 		       BIT(17) | 0x780);
 	t7_vdin_write(vdin, VDIN_WR_CTRL2, BIT(18) | (2 << 12));
-	t7_vdin_write(vdin, VDIN_WR_H_WIN, BIT(30) | (VDIN_WIDTH - 1));
-	t7_vdin_write(vdin, VDIN_WR_V_WIN, VDIN_HEIGHT - 1);
+	t7_vdin_write(vdin, VDIN_WR_H_WIN, BIT(30) | (vdin->width - 1));
+	t7_vdin_write(vdin, VDIN_WR_V_WIN, vdin->height - 1);
 	/* Packed 24-bit output; use EOL to reset the packer on every line. */
 	t7_vdin_write(vdin, VDIN_WR_CTRL,
-		      (3U << 30) | BIT(29) | BIT(27) | BIT(24) | BIT(23) | BIT(22) | (3 << 16) |
-		      BIT(12) | BIT(10) | BIT(9));
+		      ((vdin->nv12 ? 2U : 3U) << 30) | BIT(29) | BIT(27) |
+		      BIT(24) | BIT(23) | BIT(22) |
+		      (vdin->nv12 ? BIT(18) : (3 << 16)) |
+		      (vdin->nv12 ? (2 << 12) : BIT(12)) | BIT(10) | BIT(9));
 	t7_vdin_write(vdin, VDIN_WR_BADDR, vdin->frame_dma >> 4);
-	t7_vdin_write(vdin, VDIN_WR_STRIDE, VDIN_STRIDE >> 4);
+	t7_vdin_write(vdin, VDIN_WR_STRIDE, vdin->stride >> 4);
+	if (vdin->nv12) {
+		t7_vdin_write(vdin, VDIN_WR_CHROMA,
+			      (vdin->frame_dma + vdin->stride * vdin->height) >> 4);
+		t7_vdin_write(vdin, VDIN_WR_CHROMA_STRIDE, vdin->stride >> 4);
+	}
 	/* MIF0 takes normal VDIN0; done waits for the final AXI write response. */
 	t7_vdin_update(vdin, VDIN_DOUBLE_CTRL, GENMASK(7, 0) | BIT(20),
 		       BIT(4) | BIT(20));
@@ -301,10 +336,10 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 
 	if (vdin->faulted)
 		return -EIO;
-	ret = t7_hdmirx_check_1080p(vdin->receiver);
+	ret = t7_hdmirx_check_video(vdin->receiver);
 	if (ret)
 		return ret;
-	memset(vdin->frame, 0xa5, VDIN_FRAME_SIZE);
+	memset(vdin->frame, 0xa5, vdin->frame_size);
 	dma_wmb();
 	t7_vdin_configure(vdin);
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_DONE_CLEAR, VDIN_DONE_CLEAR);
@@ -328,7 +363,7 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 		return -ETIMEDOUT;
 	}
 	dma_rmb();
-	ret = t7_hdmirx_check_1080p(vdin->receiver);
+	ret = t7_hdmirx_check_video(vdin->receiver);
 	if (!ret)
 		vdin->snapshots++;
 	return ret;
@@ -337,13 +372,13 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 static int t7_vdin_frame_open(struct inode *inode, struct file *file)
 {
 	struct t7_vdin *vdin = inode->i_private;
-	void *snapshot;
+	struct t7_vdin_snapshot *snapshot;
 	int ret;
 
 	ret = debugfs_file_get(file->f_path.dentry);
 	if (ret)
 		return ret;
-	snapshot = kvmalloc(VDIN_FRAME_SIZE, GFP_KERNEL);
+	snapshot = kvmalloc(struct_size(snapshot, data, vdin->frame_size), GFP_KERNEL);
 	if (!snapshot) {
 		ret = -ENOMEM;
 		goto put_file;
@@ -352,8 +387,10 @@ static int t7_vdin_frame_open(struct inode *inode, struct file *file)
 	if (ret)
 		goto free_snapshot;
 	ret = vdin->streaming ? -EBUSY : t7_vdin_capture(vdin);
-	if (!ret)
-		memcpy(snapshot, vdin->frame, VDIN_FRAME_SIZE);
+	if (!ret) {
+		snapshot->size = vdin->frame_size;
+		memcpy(snapshot->data, vdin->frame, snapshot->size);
+	}
 	mutex_unlock(&vdin->lock);
 	if (ret)
 		goto free_snapshot;
@@ -371,7 +408,9 @@ put_file:
 static ssize_t t7_vdin_frame_read(struct file *file, char __user *buffer,
 				  size_t size, loff_t *offset)
 {
-	return simple_read_from_buffer(buffer, size, offset, file->private_data, VDIN_FRAME_SIZE);
+	struct t7_vdin_snapshot *snapshot = file->private_data;
+
+	return simple_read_from_buffer(buffer, size, offset, snapshot->data, snapshot->size);
 }
 
 static int t7_vdin_frame_release(struct inode *inode, struct file *file)
@@ -549,20 +588,20 @@ static int t7_vdin_thread(void *data)
 			continue;
 		buffer = t7_vdin_next_buffer(vdin);
 		mutex_lock(&vdin->lock);
-		ret = t7_hdmirx_check_1080p_now(vdin->receiver);
-		dma_sync_single_for_cpu(vdin->dev, slot->dma, VDIN_FRAME_SIZE, DMA_FROM_DEVICE);
+		ret = t7_hdmirx_check_video_now(vdin->receiver);
+		dma_sync_single_for_cpu(vdin->dev, slot->dma, vdin->frame_size, DMA_FROM_DEVICE);
 		if (!ret) {
 			/* Hardware never addresses vb2 memory, even on a stop timeout. */
 			memcpy(vb2_plane_vaddr(&buffer->vb.vb2_buf, 0),
-			       slot->data, VDIN_FRAME_SIZE);
+			       slot->data, vdin->frame_size);
 			/* Publish CPU writes to the coherent output before handing it off. */
 			dma_wmb();
-			ret = t7_hdmirx_check_1080p_now(vdin->receiver);
+			ret = t7_hdmirx_check_video_now(vdin->receiver);
 			buffer->vb.vb2_buf.timestamp = slot->timestamp;
 			buffer->vb.sequence = slot->sequence;
 			buffer->vb.field = V4L2_FIELD_NONE;
 		}
-		dma_sync_single_for_device(vdin->dev, slot->dma, VDIN_FRAME_SIZE, DMA_FROM_DEVICE);
+		dma_sync_single_for_device(vdin->dev, slot->dma, vdin->frame_size, DMA_FROM_DEVICE);
 		if (ret) {
 			unsigned long flags;
 
@@ -592,18 +631,22 @@ static int t7_vdin_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
 			       unsigned int *planes, unsigned int sizes[],
 			       struct device *alloc_devs[])
 {
+	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
+
 	if (*planes)
-		return *planes == 1 && sizes[0] >= VDIN_FRAME_SIZE ? 0 : -EINVAL;
+		return *planes == 1 && sizes[0] >= vdin->frame_size ? 0 : -EINVAL;
 	*planes = 1;
-	sizes[0] = VDIN_FRAME_SIZE;
+	sizes[0] = vdin->frame_size;
 	return 0;
 }
 
 static int t7_vdin_buffer_prepare(struct vb2_buffer *vb)
 {
-	if (vb2_plane_size(vb, 0) < VDIN_FRAME_SIZE)
+	struct t7_vdin *vdin = vb2_get_drv_priv(vb->vb2_queue);
+
+	if (vb2_plane_size(vb, 0) < vdin->frame_size)
 		return -EINVAL;
-	vb2_set_plane_payload(vb, 0, VDIN_FRAME_SIZE);
+	vb2_set_plane_payload(vb, 0, vdin->frame_size);
 	return 0;
 }
 
@@ -626,7 +669,7 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	int ret;
 
 	mutex_lock(&vdin->lock);
-	ret = vdin->faulted ? -EIO : t7_hdmirx_check_1080p(vdin->receiver);
+	ret = vdin->faulted ? -EIO : t7_hdmirx_check_video(vdin->receiver);
 	if (!ret) {
 		vdin->streaming = true;
 		vdin->thread = kthread_run(t7_vdin_thread, vdin, "t7-vdin-capture");
@@ -672,24 +715,30 @@ static int t7_vdin_querycap(struct file *file, void *priv, struct v4l2_capabilit
 
 static int t7_vdin_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *fmt)
 {
+	struct t7_vdin *vdin = video_drvdata(file);
+
 	if (fmt->index)
 		return -EINVAL;
-	fmt->pixelformat = V4L2_PIX_FMT_RGB24;
+	fmt->pixelformat = vdin->pixel_format;
 	return 0;
 }
 
 static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
 {
+	struct t7_vdin *vdin = video_drvdata(file);
+
 	fmt->fmt.pix = (struct v4l2_pix_format) {
-		.width = VDIN_WIDTH,
-		.height = VDIN_HEIGHT,
-		.pixelformat = V4L2_PIX_FMT_RGB24,
+		.width = vdin->width,
+		.height = vdin->height,
+		.pixelformat = vdin->pixel_format,
 		.field = V4L2_FIELD_NONE,
-		.bytesperline = VDIN_STRIDE,
-		.sizeimage = VDIN_FRAME_SIZE,
-		.colorspace = V4L2_COLORSPACE_SRGB,
-		.xfer_func = V4L2_XFER_FUNC_SRGB,
-		.quantization = V4L2_QUANTIZATION_FULL_RANGE,
+		.bytesperline = vdin->stride,
+		.sizeimage = vdin->frame_size,
+		.colorspace = vdin->nv12 ? V4L2_COLORSPACE_REC709 : V4L2_COLORSPACE_SRGB,
+		.xfer_func = vdin->nv12 ? V4L2_XFER_FUNC_709 : V4L2_XFER_FUNC_SRGB,
+		.ycbcr_enc = vdin->nv12 ? V4L2_YCBCR_ENC_709 : V4L2_YCBCR_ENC_DEFAULT,
+		.quantization = vdin->nv12 ? V4L2_QUANTIZATION_LIM_RANGE :
+					   V4L2_QUANTIZATION_FULL_RANGE,
 	};
 	return 0;
 }
@@ -712,7 +761,7 @@ static int t7_vdin_enum_input(struct file *file, void *priv, struct v4l2_input *
 	strscpy(input->name, "HDMI", sizeof(input->name));
 	input->type = V4L2_INPUT_TYPE_CAMERA;
 	input->capabilities = 0;
-	if (t7_hdmirx_check_1080p(vdin->receiver))
+	if (t7_hdmirx_check_video(vdin->receiver))
 		input->status = V4L2_IN_ST_NO_SYNC;
 	return 0;
 }
@@ -882,9 +931,9 @@ static void t7_vdin_free_frame(void *data)
 		return;
 	for (i = 0; i < VDIN_DMA_SLOTS; i++)
 		if (vdin->slots[i].data)
-			dma_free_noncoherent(vdin->dev, VDIN_FRAME_SIZE, vdin->slots[i].data,
+			dma_free_noncoherent(vdin->dev, vdin->frame_size, vdin->slots[i].data,
 					     vdin->slots[i].dma, DMA_FROM_DEVICE);
-	dma_free_coherent(vdin->dev, VDIN_FRAME_SIZE, vdin->frame, vdin->frame_dma);
+	dma_free_coherent(vdin->dev, vdin->frame_size, vdin->frame, vdin->frame_dma);
 }
 
 static void t7_vdin_debugfs_remove(void *data)
@@ -937,6 +986,15 @@ static int t7_vdin_probe(struct platform_device *pdev)
 		return -EPROBE_DEFER;
 	if (!device_link_add(dev, vdin->receiver, DL_FLAG_AUTOREMOVE_CONSUMER))
 		return -EINVAL;
+	ret = t7_hdmirx_get_size(vdin->receiver, &vdin->width, &vdin->height);
+	if (ret)
+		return ret;
+	vdin->nv12 = nv12;
+	vdin->pixel_format = nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24;
+	vdin->stride = vdin->width * (nv12 ? 1 : 3);
+	vdin->frame_size = vdin->stride * vdin->height;
+	if (nv12)
+		vdin->frame_size += vdin->frame_size / 2;
 	vdin->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(vdin->regs))
 		return PTR_ERR(vdin->regs);
@@ -963,13 +1021,13 @@ static int t7_vdin_probe(struct platform_device *pdev)
 		}
 		vdin->domains[vdin->domain_count++] = domain;
 	}
-	ret = clk_set_rate(vdin->clocks[1].clk, 400000000);
+	ret = clk_set_rate(vdin->clocks[1].clk, vdin->width > 1920 ? 666666666 : 400000000);
 	if (ret)
 		return ret;
-	ret = clk_set_rate(vdin->clocks[2].clk, 250000000);
+	ret = clk_set_rate(vdin->clocks[2].clk, vdin->width > 1920 ? 500000000 : 250000000);
 	if (ret)
 		return ret;
-	ret = clk_set_rate(vdin->clocks[3].clk, 400000000);
+	ret = clk_set_rate(vdin->clocks[3].clk, vdin->width > 1920 ? 666666666 : 400000000);
 	if (ret)
 		return ret;
 	ret = clk_set_rate(vdin->clocks[4].clk, 50000000);
@@ -990,21 +1048,21 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
-	vdin->frame = dma_alloc_coherent(dev, VDIN_FRAME_SIZE, &vdin->frame_dma, GFP_KERNEL);
+	vdin->frame = dma_alloc_coherent(dev, vdin->frame_size, &vdin->frame_dma, GFP_KERNEL);
 	if (!vdin->frame)
 		return -ENOMEM;
 	ret = devm_add_action_or_reset(dev, t7_vdin_free_frame, vdin);
 	if (ret)
 		return ret;
 	for (i = 0; i < VDIN_DMA_SLOTS; i++) {
-		vdin->slots[i].data = dma_alloc_noncoherent(dev, VDIN_FRAME_SIZE,
+		vdin->slots[i].data = dma_alloc_noncoherent(dev, vdin->frame_size,
 							    &vdin->slots[i].dma, DMA_FROM_DEVICE,
 							    GFP_KERNEL);
 		if (!vdin->slots[i].data)
 			return -ENOMEM;
 		/* Allocation zeroes the cached mapping; transfer initial ownership too. */
 		dma_sync_single_for_device(dev, vdin->slots[i].dma,
-					   VDIN_FRAME_SIZE, DMA_FROM_DEVICE);
+					   vdin->frame_size, DMA_FROM_DEVICE);
 	}
 	vdin->irq = platform_get_irq(pdev, 0);
 	if (vdin->irq < 0)
@@ -1023,7 +1081,8 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	ret = t7_vdin_video_register(vdin);
 	if (ret)
 		return ret;
-	dev_info(dev, "exclusive 1080p RGB24 capture ready at /dev/video%d\n", vdin->video.num);
+	dev_info(dev, "exclusive %ux%u %s capture ready at /dev/video%d\n",
+		 vdin->width, vdin->height, nv12 ? "NV12" : "RGB24", vdin->video.num);
 	return 0;
 }
 
