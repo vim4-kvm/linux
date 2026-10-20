@@ -1961,8 +1961,9 @@
 		compatible = "amlogic,t7-hdmirx";
 		amlogic,input-port = <0>;
 		reg = <0x0 0x398000 0x0 0x4000>,
-		      <0x0 0x39c000 0x0 0x50>;
-		reg-names = "top", "phy";
+		      <0x0 0x39c000 0x0 0x50>,
+		      <0x0 0x3a0000 0x0 0x8000>;
+		reg-names = "top", "phy", "cor";
 		power-domains = <&pwrc PWRC_T7_HDMIRX_ID>;
 		clocks = <&clkc_periphs CLKID_SYS_HDMIRX_PCLK>,
 			 <&clkc_periphs CLKID_SYS_HDMIRX>,
