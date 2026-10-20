@@ -15,17 +15,22 @@ description:
 
 properties:
   compatible:
-    items:
-      - enum:
-          - ti,j721s2-wave521c
-      - const: cnm,wave521c
+    oneOf:
+      - items:
+          - const: ti,j721s2-wave521c
+          - const: cnm,wave521c
+      - const: amlogic,t7-wave521c
 
   reg:
     maxItems: 1
 
   clocks:
-    items:
-      - description: VCODEC clock
+    minItems: 1
+    maxItems: 5
+
+  clock-names:
+    minItems: 1
+    maxItems: 5
 
   interrupts:
     maxItems: 1
@@ -47,6 +52,40 @@ required:
   - compatible
   - reg
   - clocks
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: amlogic,t7-wave521c
+    then:
+      properties:
+        clocks:
+          items:
+            - description: DOS register clock
+            - description: VPU APB clock
+            - description: Wave AXI clock (A)
+            - description: Wave bitstream processor clock (B)
+            - description: Wave video codec clock (C)
+        clock-names:
+          items:
+            - const: pclk
+            - const: apb
+            - const: axi
+            - const: bpu
+            - const: vce
+      required:
+        - clock-names
+        - interrupts
+        - power-domains
+        - resets
+    else:
+      properties:
+        clocks:
+          items:
+            - description: VCODEC clock
+        clock-names: false
 
 additionalProperties: false
 

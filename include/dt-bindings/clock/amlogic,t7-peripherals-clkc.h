@@ -268,5 +268,14 @@
 #define CLKID_VDIN_MEAS_SEL		259
 #define CLKID_VDIN_MEAS_DIV		260
 #define CLKID_VDIN_MEAS			261
+#define CLKID_WAVE_A_SEL			262
+#define CLKID_WAVE_A_DIV			263
+#define CLKID_WAVE_A			264
+#define CLKID_WAVE_B_SEL			265
+#define CLKID_WAVE_B_DIV			266
+#define CLKID_WAVE_B			267
+#define CLKID_WAVE_C_SEL			268
+#define CLKID_WAVE_C_DIV			269
+#define CLKID_WAVE_C			270
 
 #endif /* __T7_PERIPHERALS_CLKC_H */
