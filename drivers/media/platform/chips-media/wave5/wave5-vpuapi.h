@@ -761,6 +761,10 @@ struct vpu_device {
 	struct vpu_buf sram_buf;
 	void __iomem *vdb_register;
 	u32 product_code;
+	u32 bus_idle_value;
+	u32 encoder_mask;
+	bool legacy_firmware;
+	u32 reset_mask;
 	struct ida inst_ida;
 	struct clk_bulk_data *clks;
 	struct hrtimer hrtimer;

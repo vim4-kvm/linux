@@ -22,11 +22,16 @@
 
 #define WAVE5_IS_ENC BIT(0)
 #define WAVE5_IS_DEC BIT(1)
+#define WAVE5_KEEP_POWER BIT(2)
 
 struct wave5_match_data {
 	int flags;
 	const char *fw_name;
 	u32 sram_size;
+	u32 bus_idle_value;
+	u32 encoder_mask;
+	bool legacy_firmware;
+	u32 reset_mask;
 };
 
 static int vpu_poll_interval = 5;
@@ -223,6 +228,9 @@ static __maybe_unused int wave5_pm_suspend(struct device *dev)
 {
 	struct vpu_device *vpu = dev_get_drvdata(dev);
 
+	/* T7 keeps clocks running until genpd completes its power-off sequence. */
+	if (vpu->legacy_firmware)
+		return 0;
 	if (pm_runtime_suspended(dev))
 		return 0;
 
@@ -240,12 +248,17 @@ static __maybe_unused int wave5_pm_resume(struct device *dev)
 	struct vpu_device *vpu = dev_get_drvdata(dev);
 	int ret = 0;
 
-	wave5_vpu_sleep_wake(dev, false, NULL, 0);
+	/* T7 probe owns the clocks before asking genpd to power the block on. */
+	if (vpu->legacy_firmware)
+		return 0;
 	ret = clk_bulk_prepare_enable(vpu->num_clks, vpu->clks);
 	if (ret) {
 		dev_err(dev, "Enabling clocks, fail: %d\n", ret);
 		return ret;
 	}
+	/* Initial runtime resume powers the domain before firmware is allocated. */
+	if (vpu->common_mem.vaddr)
+		wave5_vpu_sleep_wake(dev, false, NULL, 0);
 
 	if (vpu->irq < 0 && !hrtimer_active(&vpu->hrtimer))
 		hrtimer_start(&vpu->hrtimer, ns_to_ktime(vpu->vpu_poll_interval * NSEC_PER_MSEC),
@@ -264,6 +277,7 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 	struct vpu_device *dev;
 	const struct wave5_match_data *match_data;
 	u32 fw_revision;
+	bool power_held = false;
 
 	match_data = device_get_match_data(&pdev->dev);
 	if (!match_data) {
@@ -293,16 +307,13 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 	spin_lock_init(&dev->irq_spinlock);
 	dev_set_drvdata(&pdev->dev, dev);
 	dev->dev = &pdev->dev;
+	dev->legacy_firmware = match_data->legacy_firmware;
 
 	dev->resets = devm_reset_control_array_get_optional_exclusive(&pdev->dev);
 	if (IS_ERR(dev->resets)) {
 		return dev_err_probe(&pdev->dev, PTR_ERR(dev->resets),
 				     "Failed to get reset control\n");
 	}
-
-	ret = reset_control_deassert(dev->resets);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "Failed to deassert resets\n");
 
 	ret = devm_clk_bulk_get_all(&pdev->dev, &dev->clks);
 
@@ -318,12 +329,30 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Enabling clocks, fail: %d\n", ret);
 		goto err_reset_assert;
 	}
+	if (match_data->flags & WAVE5_KEEP_POWER) {
+		pm_runtime_enable(&pdev->dev);
+		ret = pm_runtime_resume_and_get(&pdev->dev);
+		if (ret < 0) {
+			pm_runtime_disable(&pdev->dev);
+			goto err_clk_dis;
+		}
+		power_held = true;
+	}
+	/* The T7 AXI bridge must leave reset with its domain and clocks running. */
+	ret = reset_control_deassert(dev->resets);
+	if (ret) {
+		dev_err(&pdev->dev, "Failed to deassert resets: %d\n", ret);
+		goto err_clk_dis;
+	}
 
 	dev->sram_pool = of_gen_pool_get(pdev->dev.of_node, "sram", 0);
-	if (!dev->sram_pool)
+	if (!dev->sram_pool && match_data->sram_size)
 		dev_warn(&pdev->dev, "sram node not found\n");
 
 	dev->sram_size = match_data->sram_size;
+	dev->bus_idle_value = match_data->bus_idle_value;
+	dev->encoder_mask = match_data->encoder_mask;
+	dev->reset_mask = match_data->reset_mask ?: W5_RST_BLOCK_ALL;
 
 	dev->product_code = wave5_vdi_read_register(dev, VPU_PRODUCT_CODE_REGISTER);
 	ret = wave5_vdi_init(&pdev->dev);
@@ -362,7 +391,7 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 						wave5_vpu_irq_thread, IRQF_ONESHOT, "vpu_irq", dev);
 		if (ret) {
 			dev_err(&pdev->dev, "Register interrupt handler, fail: %d\n", ret);
-			goto err_enc_unreg;
+			goto err_vdi_release;
 		}
 	}
 
@@ -387,6 +416,16 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 		}
 	}
 
+	if (match_data->flags & WAVE5_KEEP_POWER) {
+		dev_info(&pdev->dev, "T7 product %#x, previous PC %#x\n",
+			 dev->product_code, wave5_vdi_read_register(dev, W5_VCPU_CUR_PC));
+		/* A warm boot can retain the previous kernel's firmware state. */
+		ret = wave5_vpu_reset(&pdev->dev, SW_RESET_ON_BOOT);
+		if (ret) {
+			dev_err(&pdev->dev, "T7 initial reset failed: %d\n", ret);
+			goto err_enc_unreg;
+		}
+	}
 	ret = wave5_vpu_load_firmware(&pdev->dev, match_data->fw_name, &fw_revision);
 	if (ret) {
 		dev_err(&pdev->dev, "wave5_vpu_load_firmware, fail: %d\n", ret);
@@ -401,8 +440,11 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 
 	pm_runtime_set_autosuspend_delay(&pdev->dev, 500);
 	pm_runtime_use_autosuspend(&pdev->dev);
-	pm_runtime_enable(&pdev->dev);
-	wave5_vpu_sleep_wake(&pdev->dev, true, NULL, 0);
+	/* T7 retains the initial runtime reference: power collapse loses firmware. */
+	if (!(match_data->flags & WAVE5_KEEP_POWER)) {
+		pm_runtime_enable(&pdev->dev);
+		wave5_vpu_sleep_wake(&pdev->dev, true, NULL, 0);
+	}
 
 	return 0;
 
@@ -417,14 +459,30 @@ err_v4l2_unregister:
 err_irq_release:
 	if (dev->irq < 0)
 		kthread_destroy_worker(dev->worker);
+	else
+		devm_free_irq(&pdev->dev, dev->irq, dev);
 err_vdi_release:
 	if (dev->irq_thread) {
 		kthread_stop(dev->irq_thread);
 		up(&dev->irq_sem);
 		dev->irq_thread = NULL;
 	}
+	if (power_held) {
+		int power_ret = pm_runtime_put_sync_suspend(&pdev->dev);
+
+		pm_runtime_disable(&pdev->dev);
+		power_held = false;
+		if (power_ret < 0) {
+			dev_err(&pdev->dev, "Power-off failed; retaining DMA memory and clocks\n");
+			return ret;
+		}
+	}
 	wave5_vdi_release(&pdev->dev);
 err_clk_dis:
+	if (power_held) {
+		pm_runtime_put_sync_suspend(&pdev->dev);
+		pm_runtime_disable(&pdev->dev);
+	}
 	clk_bulk_disable_unprepare(dev->num_clks, dev->clks);
 err_reset_assert:
 	reset_control_assert(dev->resets);
@@ -435,6 +493,8 @@ err_reset_assert:
 static void wave5_vpu_remove(struct platform_device *pdev)
 {
 	struct vpu_device *dev = dev_get_drvdata(&pdev->dev);
+	const struct wave5_match_data *match_data = device_get_match_data(&pdev->dev);
+	bool stopped = true;
 
 	wave5_vpu_enc_unregister_device(dev);
 	wave5_vpu_dec_unregister_device(dev);
@@ -450,6 +510,21 @@ static void wave5_vpu_remove(struct platform_device *pdev)
 		hrtimer_cancel(&dev->hrtimer);
 		kthread_cancel_work_sync(&dev->work);
 		kthread_destroy_worker(dev->worker);
+	} else {
+		/* No handler may access registers or instance locks after teardown. */
+		devm_free_irq(&pdev->dev, dev->irq, dev);
+	}
+	if (match_data->flags & WAVE5_KEEP_POWER) {
+		/* Stop instruction fetch and drain DMA before resetting the AXI bridge. */
+		stopped = !wave5_vpu_reset(&pdev->dev, SW_RESET_ON_BOOT);
+		/* Finish the secure power-off while the functional clocks still run. */
+		if (stopped)
+			stopped = pm_runtime_put_sync_suspend(&pdev->dev) >= 0;
+		else
+			pm_runtime_put_noidle(&pdev->dev);
+		if (!stopped)
+			dev_err(&pdev->dev,
+				"T7 DMA stop failed; retaining firmware memory and clocks until reboot\n");
 	}
 
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
@@ -458,9 +533,11 @@ static void wave5_vpu_remove(struct platform_device *pdev)
 	mutex_destroy(&dev->dev_lock);
 	mutex_destroy(&dev->hw_lock);
 	mutex_destroy(&dev->irq_lock);
-	reset_control_assert(dev->resets);
-	clk_bulk_disable_unprepare(dev->num_clks, dev->clks);
-	wave5_vdi_release(&pdev->dev);
+	if (stopped) {
+		reset_control_assert(dev->resets);
+		clk_bulk_disable_unprepare(dev->num_clks, dev->clks);
+		wave5_vdi_release(&pdev->dev);
+	}
 	ida_destroy(&dev->inst_ida);
 }
 
@@ -470,8 +547,18 @@ static const struct wave5_match_data ti_wave521c_data = {
 	.sram_size = (64 * 1024),
 };
 
+static const struct wave5_match_data t7_wave521c_data = {
+	.flags = WAVE5_IS_ENC | WAVE5_KEEP_POWER,
+	.fw_name = "amlogic/t7-wave521c-enc.bin",
+	.bus_idle_value = 0x3f,
+	.encoder_mask = BIT(STD_AVC) | BIT(STD_HEVC),
+	.legacy_firmware = true,
+	.reset_mask = GENMASK(26, 0),
+};
+
 static const struct of_device_id wave5_dt_ids[] = {
 	{ .compatible = "ti,j721s2-wave521c", .data = &ti_wave521c_data },
+	{ .compatible = "amlogic,t7-wave521c", .data = &t7_wave521c_data },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, wave5_dt_ids);
