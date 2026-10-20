@@ -9,16 +9,19 @@ config VIDEO_MESON_T7_HDMIRX
 	  driver supports resource, cable detection and firmware EDID/DDC/HPD
 	  bring-up, plus opt-in fixed-rate PHY and TMDS core initialization.
 	  Automatic PHY tuning and production V4L2 capture need further work;
-	  the separate VDIN experiment can obtain progressive 1080p60 snapshots.
+	  the separate VDIN experiment captures progressive 1080p60 input
+	  through a bounded copy queue, below the input frame rate.
 
 	  To compile this driver as a module, choose M here.
 
 config VIDEO_MESON_T7_VDIN_TEST
-	tristate "Amlogic T7 VDIN snapshot experiment"
+	tristate "Amlogic T7 VDIN capture experiment"
 	depends on VIDEO_MESON_T7_HDMIRX
-	depends on OF && HAS_DMA
+	depends on VIDEO_DEV && OF && HAS_DMA
+	select VIDEOBUF2_VMALLOC
 	help
-	  Exclusive 1080p60 RGB snapshot experiment for the dedicated VIM4
+	  Exclusive 1080p60 RGB capture experiment for the dedicated VIM4
 	  receiver DTB. Owns the VPU register window while DRM is disabled.
-	  Exposes a read-only debugfs frame after write completion and DMA idle;
-	  this is not a production V4L2 capture interface.
+	  Exposes debugfs snapshots and a V4L2 MMAP queue. Each capture stops
+	  DMA before copying to application buffers; capture runs slower than
+	  the input frame rate. This is not a production capture driver.
