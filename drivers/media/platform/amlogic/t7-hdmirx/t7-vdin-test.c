@@ -63,6 +63,22 @@
 #define VDIN_HEIGHT		1080
 #define VDIN_STRIDE		(VDIN_WIDTH * 3)
 #define VDIN_FRAME_SIZE		(VDIN_STRIDE * VDIN_HEIGHT)
+#define VDIN_DMA_SLOTS		3
+
+enum t7_vdin_slot_state {
+	VDIN_SLOT_FREE,
+	VDIN_SLOT_WRITING,
+	VDIN_SLOT_READY,
+	VDIN_SLOT_COPYING,
+};
+
+struct t7_vdin_slot {
+	void *data;
+	dma_addr_t dma;
+	enum t7_vdin_slot_state state;
+	u64 timestamp;
+	u32 sequence;
+};
 
 struct t7_vdin_buffer {
 	struct vb2_v4l2_buffer vb;
@@ -82,6 +98,7 @@ struct t7_vdin {
 	spinlock_t irq_lock; /* Protects armed/frame_irqs and request gating. */
 	bool armed;
 	bool faulted;
+	bool dma_idle;
 	unsigned int frame_irqs;
 	unsigned int snapshots;
 	int irq;
@@ -98,7 +115,16 @@ struct t7_vdin {
 	wait_queue_head_t buffer_wait;
 	struct task_struct *thread;
 	bool streaming; /* Protected by lock, including debugfs exclusion. */
-	u32 sequence;
+	/* Private cached DMA ring; all ownership transitions use irq_lock. */
+	struct t7_vdin_slot slots[VDIN_DMA_SLOTS];
+	bool ring_mode;
+	bool ring_running;
+	bool ring_stopping;
+	bool ring_discard;
+	int ring_error;
+	unsigned int active_slot;
+	u32 ring_sequence;
+	u32 ring_pauses;
 };
 
 static u32 t7_vdin_read(struct t7_vdin *vdin, u32 reg)
@@ -116,6 +142,64 @@ static void t7_vdin_update(struct t7_vdin *vdin, u32 reg, u32 mask, u32 value)
 	t7_vdin_write(vdin, reg, (t7_vdin_read(vdin, reg) & ~mask) | (value & mask));
 }
 
+/* Caller holds irq_lock and has proved that no request targets the old slot. */
+static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
+{
+	vdin->slots[index].state = VDIN_SLOT_WRITING;
+	vdin->active_slot = index;
+	t7_vdin_write(vdin, VDIN_WR_BADDR, vdin->slots[index].dma >> 4);
+	vdin->dma_idle = false;
+	vdin->ring_running = true;
+	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR,
+		       VDIN_WR_REQ | VDIN_VCP_WR);
+}
+
+static int t7_vdin_ring_free_slot(struct t7_vdin *vdin)
+{
+	unsigned int i;
+
+	for (i = 0; i < VDIN_DMA_SLOTS; i++)
+		if (vdin->slots[i].state == VDIN_SLOT_FREE)
+			return i;
+	return -1;
+}
+
+/* Gate at write completion, hand off the old address, then rearm in blanking. */
+static void t7_vdin_ring_done(struct t7_vdin *vdin)
+{
+	struct t7_vdin_slot *slot = &vdin->slots[vdin->active_slot];
+	int next;
+
+	if (!vdin->ring_running)
+		return;
+	vdin->frame_irqs++;
+	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR, 0);
+	t7_vdin_read(vdin, VDIN_WR_CTRL);
+	vdin->ring_running = false;
+	vdin->dma_idle = t7_vdin_read(vdin, VDIN_WR_STATUS) & BIT(0);
+	if (!vdin->dma_idle) {
+		/* A late interrupt cannot transfer a potentially writable slot. */
+		vdin->ring_error = -EIO;
+	} else if (!vdin->ring_stopping) {
+		if (vdin->ring_discard) {
+			vdin->ring_discard = false;
+			slot->state = VDIN_SLOT_FREE;
+		} else {
+			slot->timestamp = ktime_get_ns();
+			slot->sequence = vdin->ring_sequence++;
+			slot->state = VDIN_SLOT_READY;
+		}
+		next = t7_vdin_ring_free_slot(vdin);
+		if (next >= 0)
+			t7_vdin_ring_arm(vdin, next);
+		else
+			vdin->ring_pauses++;
+	}
+	if (!vdin->ring_running)
+		complete(&vdin->done);
+	wake_up(&vdin->buffer_wait);
+}
+
 static irqreturn_t t7_vdin_write_done(int irq, void *data)
 {
 	struct t7_vdin *vdin = data;
@@ -125,14 +209,20 @@ static irqreturn_t t7_vdin_write_done(int irq, void *data)
 	/* The write-done interrupt is latched until this clear pulse. */
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_DONE_CLEAR, VDIN_DONE_CLEAR);
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_DONE_CLEAR, 0);
+	if (vdin->ring_mode) {
+		t7_vdin_ring_done(vdin);
+		goto unlock;
+	}
 	if (vdin->armed && ++vdin->frame_irqs == 2) {
 		/* Discard the first partial frame, then stop before another starts. */
 		t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR, 0);
 		t7_vdin_read(vdin, VDIN_WR_CTRL);
 		vdin->armed = false;
+		vdin->dma_idle = true;
 		vdin->frame_timestamp = ktime_get_ns();
 		complete(&vdin->done);
 	}
+unlock:
 	spin_unlock_irqrestore(&vdin->irq_lock, flags);
 	return IRQ_HANDLED;
 }
@@ -151,7 +241,7 @@ static int t7_vdin_stop_dma(struct t7_vdin *vdin)
 	synchronize_irq(vdin->irq);
 	/* T7's integrated MIF uses write-done, not the older VPU arbiter bits. */
 	ret = readl_poll_timeout(vdin->regs + VDIN_WR_STATUS * 4, idle,
-				 vdin->frame_irqs == 2 && (idle & BIT(0)),
+				 vdin->dma_idle && (idle & BIT(0)),
 				 10, 100000);
 	if (ret) {
 		/* Keep DMA memory, clocks and binding alive until a hardware reboot. */
@@ -222,6 +312,7 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 	reinit_completion(&vdin->done);
 	spin_lock_irqsave(&vdin->irq_lock, flags);
 	vdin->frame_irqs = 0;
+	vdin->dma_idle = false;
 	vdin->armed = true;
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR,
 		       VDIN_WR_REQ | VDIN_VCP_WR);
@@ -329,41 +420,168 @@ static void t7_vdin_return_buffers(struct t7_vdin *vdin, enum vb2_buffer_state s
 		vb2_buffer_done(&buffer->vb.vb2_buf, state);
 }
 
+static void t7_vdin_ring_begin(struct t7_vdin *vdin)
+{
+	unsigned long flags;
+	unsigned int i;
+
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	for (i = 0; i < VDIN_DMA_SLOTS; i++)
+		vdin->slots[i].state = VDIN_SLOT_FREE;
+	vdin->ring_error = 0;
+	vdin->ring_stopping = false;
+	vdin->ring_discard = true;
+	vdin->ring_sequence = 0;
+	vdin->ring_pauses = 0;
+	vdin->frame_irqs = 0;
+	t7_vdin_configure(vdin);
+	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_DONE_CLEAR, VDIN_DONE_CLEAR);
+	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_DONE_CLEAR, 0);
+	reinit_completion(&vdin->done);
+	vdin->ring_mode = true;
+	t7_vdin_ring_arm(vdin, 0);
+	spin_unlock_irqrestore(&vdin->irq_lock, flags);
+}
+
+static int t7_vdin_ring_stop(struct t7_vdin *vdin)
+{
+	unsigned long flags;
+	bool running;
+	int ret;
+
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	vdin->ring_stopping = true;
+	running = vdin->ring_running;
+	if (running)
+		reinit_completion(&vdin->done);
+	spin_unlock_irqrestore(&vdin->irq_lock, flags);
+	/* Prefer a frame boundary to truncating an in-flight AXI transaction. */
+	if (running)
+		wait_for_completion_timeout(&vdin->done, msecs_to_jiffies(1000));
+	ret = t7_vdin_stop_dma(vdin);
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	vdin->ring_mode = false;
+	vdin->ring_running = false;
+	spin_unlock_irqrestore(&vdin->irq_lock, flags);
+	return ret;
+}
+
+static bool t7_vdin_ring_ready(struct t7_vdin *vdin)
+{
+	unsigned long flags;
+	unsigned int i;
+	bool ready = false;
+
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	for (i = 0; i < VDIN_DMA_SLOTS; i++)
+		ready |= vdin->slots[i].state == VDIN_SLOT_READY;
+	spin_unlock_irqrestore(&vdin->irq_lock, flags);
+	return ready;
+}
+
+static struct t7_vdin_slot *t7_vdin_ring_take(struct t7_vdin *vdin)
+{
+	struct t7_vdin_slot *oldest = NULL;
+	unsigned long flags;
+	unsigned int i;
+
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	for (i = 0; i < VDIN_DMA_SLOTS; i++) {
+		struct t7_vdin_slot *slot = &vdin->slots[i];
+
+		if (slot->state == VDIN_SLOT_READY &&
+		    (!oldest || (s32)(slot->sequence - oldest->sequence) < 0))
+			oldest = slot;
+	}
+	if (oldest)
+		oldest->state = VDIN_SLOT_COPYING;
+	spin_unlock_irqrestore(&vdin->irq_lock, flags);
+	return oldest;
+}
+
+static void t7_vdin_ring_release(struct t7_vdin *vdin, struct t7_vdin_slot *slot)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	slot->state = VDIN_SLOT_FREE;
+	if (!vdin->ring_running && !vdin->ring_stopping && !vdin->ring_error &&
+	    !kthread_should_stop()) {
+		/* An arbitrary restart may begin mid-frame; discard it once. */
+		vdin->ring_discard = true;
+		t7_vdin_ring_arm(vdin, slot - vdin->slots);
+	}
+	spin_unlock_irqrestore(&vdin->irq_lock, flags);
+}
+
 static int t7_vdin_thread(void *data)
 {
 	struct t7_vdin *vdin = data;
+	int ret = 0;
 
+	t7_vdin_ring_begin(vdin);
 	while (!kthread_should_stop()) {
 		struct t7_vdin_buffer *buffer;
-		int ret;
+		struct t7_vdin_slot *slot;
+		long ready;
 
-		wait_event_interruptible(vdin->buffer_wait,
-					 kthread_should_stop() || t7_vdin_has_buffer(vdin));
+		ready = wait_event_interruptible_timeout(vdin->buffer_wait,
+							 kthread_should_stop() ||
+							 READ_ONCE(vdin->ring_error) ||
+							 (t7_vdin_has_buffer(vdin) &&
+							  t7_vdin_ring_ready(vdin)),
+							 msecs_to_jiffies(1000));
 		if (kthread_should_stop())
 			break;
-		buffer = t7_vdin_next_buffer(vdin);
-		if (!buffer)
+		if (ready < 0) {
+			ret = ready;
+			break;
+		}
+		ret = READ_ONCE(vdin->ring_error);
+		if (!ready && t7_vdin_has_buffer(vdin))
+			ret = -ETIMEDOUT;
+		if (ret)
+			break;
+		if (!ready)
 			continue;
+		slot = t7_vdin_ring_take(vdin);
+		if (!slot)
+			continue;
+		buffer = t7_vdin_next_buffer(vdin);
 		mutex_lock(&vdin->lock);
-		ret = t7_vdin_capture(vdin);
+		ret = t7_hdmirx_check_1080p_now(vdin->receiver);
+		dma_sync_single_for_cpu(vdin->dev, slot->dma, VDIN_FRAME_SIZE, DMA_FROM_DEVICE);
 		if (!ret) {
 			/* Hardware never addresses vb2 memory, even on a stop timeout. */
 			memcpy(vb2_plane_vaddr(&buffer->vb.vb2_buf, 0),
-			       vdin->frame, VDIN_FRAME_SIZE);
-			buffer->vb.vb2_buf.timestamp = vdin->frame_timestamp;
-			buffer->vb.sequence = vdin->sequence++;
+			       slot->data, VDIN_FRAME_SIZE);
+			ret = t7_hdmirx_check_1080p_now(vdin->receiver);
+			buffer->vb.vb2_buf.timestamp = slot->timestamp;
+			buffer->vb.sequence = slot->sequence;
 			buffer->vb.field = V4L2_FIELD_NONE;
 		}
+		dma_sync_single_for_device(vdin->dev, slot->dma, VDIN_FRAME_SIZE, DMA_FROM_DEVICE);
+		if (ret) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&vdin->irq_lock, flags);
+			vdin->ring_stopping = true;
+			spin_unlock_irqrestore(&vdin->irq_lock, flags);
+		}
+		t7_vdin_ring_release(vdin, slot);
 		mutex_unlock(&vdin->lock);
 		vb2_buffer_done(&buffer->vb.vb2_buf,
 				ret ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
-		if (ret) {
-			vb2_queue_error(&vdin->queue);
-			t7_vdin_return_buffers(vdin, VB2_BUF_STATE_ERROR);
-			/* Keep the task alive until STREAMOFF joins it. */
-			wait_event_interruptible(vdin->buffer_wait, kthread_should_stop());
+		if (ret)
 			break;
-		}
+	}
+	if (t7_vdin_ring_stop(vdin))
+		ret = -EIO;
+	if (ret) {
+		vb2_queue_error(&vdin->queue);
+		t7_vdin_return_buffers(vdin, VB2_BUF_STATE_ERROR);
+		/* Keep the task alive until STREAMOFF joins it. */
+		wait_event_interruptible(vdin->buffer_wait, kthread_should_stop());
 	}
 	return 0;
 }
@@ -409,7 +627,6 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	ret = vdin->faulted ? -EIO : t7_hdmirx_check_1080p(vdin->receiver);
 	if (!ret) {
 		vdin->streaming = true;
-		vdin->sequence = 0;
 		vdin->thread = kthread_run(t7_vdin_thread, vdin, "t7-vdin-capture");
 		if (IS_ERR(vdin->thread)) {
 			ret = PTR_ERR(vdin->thread);
@@ -616,6 +833,10 @@ static int t7_vdin_status(struct seq_file *s, void *unused)
 	seq_printf(s, "snapshots: %u\n", vdin->snapshots);
 	seq_printf(s, "frame_irqs: %u\n", vdin->frame_irqs);
 	seq_printf(s, "faulted: %u\n", vdin->faulted);
+	seq_printf(s, "dma_idle: %u\n", vdin->dma_idle);
+	seq_printf(s, "stream_frames: %u\n", vdin->ring_sequence);
+	seq_printf(s, "stream_pauses: %u\n", vdin->ring_pauses);
+	seq_printf(s, "stream_error: %d\n", vdin->ring_error);
 	seq_printf(s, "write_ctrl: %#x\n", t7_vdin_read(vdin, VDIN_WR_CTRL));
 	seq_printf(s, "write_status: %#x\n", t7_vdin_read(vdin, VDIN_WR_STATUS));
 	seq_printf(s, "pixels: %#x\n", t7_vdin_read(vdin, VDIN_ACTIVE_PIXELS));
@@ -652,9 +873,15 @@ static void t7_vdin_clocks_off(void *data)
 static void t7_vdin_free_frame(void *data)
 {
 	struct t7_vdin *vdin = data;
+	unsigned int i;
 
-	if (!vdin->faulted)
-		dma_free_coherent(vdin->dev, VDIN_FRAME_SIZE, vdin->frame, vdin->frame_dma);
+	if (vdin->faulted)
+		return;
+	for (i = 0; i < VDIN_DMA_SLOTS; i++)
+		if (vdin->slots[i].data)
+			dma_free_noncoherent(vdin->dev, VDIN_FRAME_SIZE, vdin->slots[i].data,
+					     vdin->slots[i].dma, DMA_FROM_DEVICE);
+	dma_free_coherent(vdin->dev, VDIN_FRAME_SIZE, vdin->frame, vdin->frame_dma);
 }
 
 static void t7_vdin_debugfs_remove(void *data)
@@ -766,6 +993,16 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	ret = devm_add_action_or_reset(dev, t7_vdin_free_frame, vdin);
 	if (ret)
 		return ret;
+	for (i = 0; i < VDIN_DMA_SLOTS; i++) {
+		vdin->slots[i].data = dma_alloc_noncoherent(dev, VDIN_FRAME_SIZE,
+							    &vdin->slots[i].dma, DMA_FROM_DEVICE,
+							    GFP_KERNEL);
+		if (!vdin->slots[i].data)
+			return -ENOMEM;
+		/* Allocation zeroes the cached mapping; transfer initial ownership too. */
+		dma_sync_single_for_device(dev, vdin->slots[i].dma,
+					   VDIN_FRAME_SIZE, DMA_FROM_DEVICE);
+	}
 	vdin->irq = platform_get_irq(pdev, 0);
 	if (vdin->irq < 0)
 		return vdin->irq;

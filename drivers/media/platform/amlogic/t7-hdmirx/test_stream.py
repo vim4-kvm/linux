@@ -1,82 +1,136 @@
 #!/usr/bin/env python3
-"""Exercise the actual vb2 worker with deterministic pthread capture/stop gates."""
+# SPDX-License-Identifier: GPL-2.0-only
+"""Run actual IRQ/ring/vb2 C code with deterministic hardware and CPU-copy gates."""
 from pathlib import Path
 import subprocess
 import tempfile
 
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
-functions = source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer'):
-                   source.index('static const struct vb2_ops t7_vdin_queue_ops')]
+defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
+types = source[source.index('enum t7_vdin_slot_state {'):source.index('static u32 t7_vdin_read')]
+hardware = source[source.index('static u32 t7_vdin_read'):source.index('static int t7_vdin_capture')]
+stream = source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer'):
+                source.index('static const struct vb2_ops t7_vdin_queue_ops')]
 prefix = r'''
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#define VDIN_FRAME_SIZE 64
-#define container_of(p,t,m) ((t *)((char *)(p) - offsetof(t,m)))
-#define IS_ERR(p) ((p) == (void *)-ENOMEM)
+typedef uint32_t u32;
+typedef int32_t s32;
+typedef uint64_t u64;
+typedef uint64_t dma_addr_t;
+typedef pthread_mutex_t spinlock_t;
+typedef int irqreturn_t;
+#define __iomem
+#define BIT(n) (1U<<(n))
+#define GENMASK(h,l) ((~0U>>(31-(h))) & (~0U<<(l)))
+#define IRQ_HANDLED 1
+#define THIS_MODULE NULL
+#define READ_ONCE(x) __atomic_load_n(&(x),__ATOMIC_ACQUIRE)
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define IS_ERR(p) ((p)==(void *)-ENOMEM)
 #define PTR_ERR(p) (-ENOMEM)
-#define spin_lock_irqsave(l,f) ((void)((f)=0), pthread_mutex_lock(l))
-#define spin_unlock_irqrestore(l,f) ((void)(f), pthread_mutex_unlock(l))
-#define mutex_lock(l) pthread_mutex_lock(l)
-#define mutex_unlock(l) pthread_mutex_unlock(l)
+#define spin_lock_irqsave(l,f) ((void)((f)=0),pthread_mutex_lock(l))
+#define spin_unlock_irqrestore(l,f) ((void)(f),pthread_mutex_unlock(l))
+struct mutex { pthread_mutex_t native; };
+#define mutex_lock(l) pthread_mutex_lock(&(l)->native)
+#define mutex_unlock(l) pthread_mutex_unlock(&(l)->native)
+#define dev_err(...) ((void)0)
+#define msecs_to_jiffies(x) (x)
+#define DMA_FROM_DEVICE 1
 #define V4L2_FIELD_NONE 1
-typedef struct { pthread_mutex_t lock; pthread_cond_t cond; } wait_queue_head_t;
-#define wait_event_interruptible(w, condition) do { \
-    pthread_mutex_lock(&(w).lock); \
-    while (!(condition)) pthread_cond_wait(&(w).cond, &(w).lock); \
-    pthread_mutex_unlock(&(w).lock); \
-} while (0)
+typedef struct { pthread_mutex_t lock; pthread_cond_t cond; unsigned long generation; } wait_queue_head_t;
+static bool expire;
+#define fake_wait(w,condition,timed) ({ \
+    long result=0; \
+    for (;;) { \
+        pthread_mutex_lock(&(w).lock); unsigned long generation=(w).generation; \
+        pthread_mutex_unlock(&(w).lock); \
+        if (condition) { result=1; break; } \
+        if ((timed) && READ_ONCE(expire)) break; \
+        pthread_mutex_lock(&(w).lock); \
+        while (generation==(w).generation) pthread_cond_wait(&(w).cond,&(w).lock); \
+        pthread_mutex_unlock(&(w).lock); \
+    } result; \
+})
+#define wait_event_interruptible(w,condition) ((void)fake_wait(w,condition,false))
+#define wait_event_interruptible_timeout(w,condition,limit) fake_wait(w,condition,true)
 static void wake_up(wait_queue_head_t *w) {
-    pthread_mutex_lock(&w->lock);
-    pthread_cond_broadcast(&w->cond);
+    pthread_mutex_lock(&w->lock); w->generation++; pthread_cond_broadcast(&w->cond);
     pthread_mutex_unlock(&w->lock);
 }
-struct list_head { struct list_head *next, *prev; };
-static bool list_empty(struct list_head *h) { return h->next == h; }
-static void list_add_tail(struct list_head *n, struct list_head *h) {
+struct list_head { struct list_head *next,*prev; };
+static bool list_empty(struct list_head *h) { return h->next==h; }
+static void list_add_tail(struct list_head *n,struct list_head *h) {
     n->prev=h->prev; n->next=h; h->prev->next=n; h->prev=n;
 }
 static void list_del(struct list_head *n) { n->prev->next=n->next; n->next->prev=n->prev; }
 #define list_first_entry(h,t,m) container_of((h)->next,t,m)
-struct device;
+struct device { int unused; };
+struct clk_bulk_data { int unused; };
+struct kref { int unused; };
+struct v4l2_device { int unused; };
+struct video_device { int unused; };
 struct vb2_queue { void *priv; bool error; };
 struct vb2_buffer { struct vb2_queue *vb2_queue; unsigned long timestamp;
-                    unsigned char data[VDIN_FRAME_SIZE]; size_t payload, size; int state, done; };
-struct vb2_v4l2_buffer { struct vb2_buffer vb2_buf; unsigned int sequence, field; };
-struct t7_vdin_buffer { struct vb2_v4l2_buffer vb; struct list_head list; };
+    unsigned char *data; size_t payload,size; int state,done; };
+struct vb2_v4l2_buffer { struct vb2_buffer vb2_buf; unsigned int sequence,field; };
 #define to_vb2_v4l2_buffer(p) container_of(p,struct vb2_v4l2_buffer,vb2_buf)
-enum vb2_buffer_state { VB2_BUF_STATE_QUEUED=1, VB2_BUF_STATE_ERROR, VB2_BUF_STATE_DONE };
+enum vb2_buffer_state { VB2_BUF_STATE_QUEUED=1,VB2_BUF_STATE_ERROR,VB2_BUF_STATE_DONE };
+struct completion { wait_queue_head_t wait; bool done; };
 struct task_struct { pthread_t thread; int (*fn)(void *); void *arg; bool stop; };
-struct t7_vdin {
-    pthread_mutex_t queue_lock, lock;
-    struct list_head queued;
-    wait_queue_head_t buffer_wait;
-    struct vb2_queue queue;
-    struct task_struct *thread;
-    bool faulted, streaming;
-    void *receiver, *frame;
-    unsigned int sequence;
-    unsigned long frame_timestamp;
-};
-static pthread_mutex_t gate = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
-static unsigned int entered, permits, completed;
-static bool fail_capture, fail_timing, stopping;
+'''
+stubs = r'''
+static uint8_t registers[0x40000];
+static struct t7_vdin receiver;
+static pthread_mutex_t gate=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t changed=PTHREAD_COND_INITIALIZER;
+static unsigned int started,entered,permits,completed,pins,stop_waiting;
+static bool stopping,fail_timing,cpu_owned[VDIN_DMA_SLOTS];
 static _Thread_local struct task_struct *current;
-static bool kthread_should_stop(void) {
-    return __atomic_load_n(&current->stop, __ATOMIC_ACQUIRE);
+static u32 readl(void *address) { u32 v; memcpy(&v,address,4); return v; }
+static void writel(u32 value,void *address) {
+    if (address==registers+VDIN_WR_CTRL*4 && value&VDIN_WR_REQ &&
+        !(readl(address)&VDIN_WR_REQ)) {
+        int index=receiver.active_slot;
+        assert(receiver.slots[index].state==VDIN_SLOT_WRITING && !cpu_owned[index]);
+        assert(readl(registers+VDIN_WR_BADDR*4)==receiver.slots[index].dma>>4);
+        u32 busy=0; memcpy(registers+VDIN_WR_STATUS*4,&busy,4);
+        pthread_mutex_lock(&gate); started++; pthread_cond_broadcast(&changed);
+        pthread_mutex_unlock(&gate);
+    }
+    memcpy(address,&value,4);
 }
-static void *thread_main(void *p) {
-    current=p; current->fn(current->arg); return NULL;
+static void udelay(unsigned int delay) { assert(delay==1); }
+static u64 ktime_get_ns(void) { static u64 ticks; return ++ticks; }
+static void __module_get(void *module) { pins++; }
+static void synchronize_irq(int irq) { }
+#define readl_poll_timeout(address,value,condition,interval,limit) \
+    ((value=readl(address)),(condition)?0:-ETIMEDOUT)
+static void complete(struct completion *c) {
+    pthread_mutex_lock(&c->wait.lock); c->done=true;
+    pthread_cond_broadcast(&c->wait.cond); pthread_mutex_unlock(&c->wait.lock);
 }
-static struct task_struct *kthread_run(int (*fn)(void *), void *arg, const char *name) {
-    struct task_struct *t=calloc(1,sizeof(*t));
-    assert(t); t->fn=fn; t->arg=arg;
+static void reinit_completion(struct completion *c) {
+    pthread_mutex_lock(&c->wait.lock); c->done=false; pthread_mutex_unlock(&c->wait.lock);
+}
+static unsigned long wait_for_completion_timeout(struct completion *c,unsigned long limit) {
+    pthread_mutex_lock(&gate); stop_waiting++; pthread_cond_broadcast(&changed);
+    pthread_mutex_unlock(&gate);
+    pthread_mutex_lock(&c->wait.lock);
+    while (!c->done && !READ_ONCE(expire)) pthread_cond_wait(&c->wait.cond,&c->wait.lock);
+    bool done=c->done; c->done=false; pthread_mutex_unlock(&c->wait.lock); return done;
+}
+static bool kthread_should_stop(void) { return READ_ONCE(current->stop); }
+static void *thread_main(void *p) { current=p; current->fn(current->arg); return NULL; }
+static struct task_struct *kthread_run(int (*fn)(void *),void *arg,const char *name) {
+    struct task_struct *t=calloc(1,sizeof(*t)); assert(t); t->fn=fn; t->arg=arg;
     assert(!pthread_create(&t->thread,NULL,thread_main,t)); return t;
 }
 static void kthread_stop(struct task_struct *t) {
@@ -87,27 +141,39 @@ static void kthread_stop(struct task_struct *t) {
     assert(!pthread_join(t->thread,NULL)); free(t);
 }
 static void *vb2_get_drv_priv(struct vb2_queue *q) { return q->priv; }
-static void *vb2_plane_vaddr(struct vb2_buffer *b, int p) { return b->data; }
-static size_t vb2_plane_size(struct vb2_buffer *b, int p) { return b->size; }
-static void vb2_set_plane_payload(struct vb2_buffer *b, int p, size_t n) { b->payload=n; }
-static void vb2_buffer_done(struct vb2_buffer *b, enum vb2_buffer_state state) {
-    pthread_mutex_lock(&gate);
-    assert(!b->done); b->state=state; b->done=1; completed++;
-    pthread_cond_broadcast(&changed); pthread_mutex_unlock(&gate);
+static void *vb2_plane_vaddr(struct vb2_buffer *b,int p) { return b->data; }
+static size_t vb2_plane_size(struct vb2_buffer *b,int p) { return b->size; }
+static void vb2_set_plane_payload(struct vb2_buffer *b,int p,size_t n) { b->payload=n; }
+static void vb2_buffer_done(struct vb2_buffer *b,enum vb2_buffer_state state) {
+    pthread_mutex_lock(&gate); assert(!b->done);
+    b->state=state; b->done=1; completed++; pthread_cond_broadcast(&changed);
+    pthread_mutex_unlock(&gate);
 }
 static void vb2_queue_error(struct vb2_queue *q) {
     pthread_mutex_lock(&gate); q->error=true; pthread_cond_broadcast(&changed);
     pthread_mutex_unlock(&gate);
 }
-static int t7_hdmirx_check_1080p(void *receiver) { return fail_timing ? -ENOLINK : 0; }
-static int t7_vdin_capture(struct t7_vdin *v) {
-    pthread_mutex_lock(&gate); unsigned int n=++entered;
-    pthread_cond_broadcast(&changed);
-    while (permits<n) pthread_cond_wait(&changed,&gate);
-    bool fail=fail_capture;
-    pthread_mutex_unlock(&gate);
-    if (fail) { v->faulted=true; return -ETIMEDOUT; }
-    memset(v->frame,(int)n,VDIN_FRAME_SIZE); v->frame_timestamp=n; return 0;
+static int t7_hdmirx_check_1080p(void *dev) { return fail_timing?-ENOLINK:0; }
+static int t7_hdmirx_check_1080p_now(void *dev) {
+    bool copying=false;
+    for (int i=0;i<VDIN_DMA_SLOTS;i++) copying|=cpu_owned[i];
+    if (!copying) {
+        pthread_mutex_lock(&gate); unsigned int n=++entered;
+        pthread_cond_broadcast(&changed);
+        while (permits<n) pthread_cond_wait(&changed,&gate);
+        pthread_mutex_unlock(&gate);
+    }
+    return fail_timing?-ENOLINK:0;
+}
+static void dma_sync_single_for_cpu(struct device *dev,dma_addr_t dma,size_t size,int dir) {
+    int i=(dma-0x10000000)/0x1000000;
+    assert(size==VDIN_FRAME_SIZE && dir==DMA_FROM_DEVICE);
+    assert(receiver.slots[i].state==VDIN_SLOT_COPYING && !cpu_owned[i]); cpu_owned[i]=true;
+}
+static void dma_sync_single_for_device(struct device *dev,dma_addr_t dma,size_t size,int dir) {
+    int i=(dma-0x10000000)/0x1000000;
+    assert(size==VDIN_FRAME_SIZE && dir==DMA_FROM_DEVICE);
+    assert(receiver.slots[i].state==VDIN_SLOT_COPYING && cpu_owned[i]); cpu_owned[i]=false;
 }
 '''
 checks = r'''
@@ -115,76 +181,122 @@ static void permit(unsigned int n) {
     pthread_mutex_lock(&gate); permits=n; pthread_cond_broadcast(&changed);
     pthread_mutex_unlock(&gate);
 }
-static void await(unsigned int *counter, unsigned int target) {
+static void await(unsigned int *counter,unsigned int target) {
     pthread_mutex_lock(&gate);
     while (*counter<target) pthread_cond_wait(&changed,&gate);
     pthread_mutex_unlock(&gate);
 }
-static void *stop_stream(void *data) {
-    t7_vdin_stop_streaming(&((struct t7_vdin *)data)->queue); return NULL;
+static void step(unsigned char pixel,bool busy) {
+    pthread_mutex_lock(&receiver.irq_lock);
+    assert(receiver.ring_running && readl(registers+VDIN_WR_CTRL*4)&VDIN_WR_REQ);
+    int index=receiver.active_slot;
+    assert(!cpu_owned[index] && receiver.slots[index].state==VDIN_SLOT_WRITING);
+    memset(receiver.slots[index].data,pixel,VDIN_FRAME_SIZE);
+    u32 done=busy?0:1; memcpy(registers+VDIN_WR_STATUS*4,&done,4);
+    pthread_mutex_unlock(&receiver.irq_lock);
+    t7_vdin_write_done(1,&receiver);
 }
-static void setup(struct t7_vdin *v, struct t7_vdin_buffer b[4], unsigned char frame[64]) {
-    memset(v,0,sizeof(*v)); memset(b,0,4*sizeof(*b));
-    pthread_mutex_init(&v->lock,NULL); pthread_mutex_init(&v->queue_lock,NULL);
-    pthread_mutex_init(&v->buffer_wait.lock,NULL); pthread_cond_init(&v->buffer_wait.cond,NULL);
-    v->queued.next=v->queued.prev=&v->queued; v->queue.priv=v; v->frame=frame;
-    entered=permits=completed=0; fail_capture=fail_timing=stopping=false;
+static void *stop_stream(void *unused) { t7_vdin_stop_streaming(&receiver.queue); return NULL; }
+static void init_wait(wait_queue_head_t *w) {
+    pthread_mutex_init(&w->lock,NULL); pthread_cond_init(&w->cond,NULL);
+}
+static void destroy_wait(wait_queue_head_t *w) {
+    pthread_mutex_destroy(&w->lock); pthread_cond_destroy(&w->cond);
+}
+static void setup(struct t7_vdin_buffer b[4]) {
+    memset(&receiver,0,sizeof(receiver)); memset(b,0,4*sizeof(*b));
+    memset(registers,0,sizeof(registers)); memset(cpu_owned,0,sizeof(cpu_owned));
+    pthread_mutex_init(&receiver.lock.native,NULL); pthread_mutex_init(&receiver.queue_lock,NULL);
+    pthread_mutex_init(&receiver.irq_lock,NULL);
+    init_wait(&receiver.buffer_wait); init_wait(&receiver.done.wait);
+    receiver.queued.next=receiver.queued.prev=&receiver.queued;
+    receiver.queue.priv=&receiver; receiver.regs=registers;
+    started=entered=permits=completed=pins=stop_waiting=0;
+    stopping=fail_timing=expire=false;
+    for (int i=0;i<VDIN_DMA_SLOTS;i++) {
+        receiver.slots[i].data=malloc(VDIN_FRAME_SIZE); assert(receiver.slots[i].data);
+        receiver.slots[i].dma=0x10000000+i*0x1000000;
+    }
     for (int i=0;i<4;i++) {
-        b[i].vb.vb2_buf.vb2_queue=&v->queue;
-        b[i].vb.vb2_buf.size=64;
+        b[i].vb.vb2_buf.vb2_queue=&receiver.queue; b[i].vb.vb2_buf.size=VDIN_FRAME_SIZE;
+        b[i].vb.vb2_buf.data=calloc(1,VDIN_FRAME_SIZE); assert(b[i].vb.vb2_buf.data);
         assert(!t7_vdin_buffer_prepare(&b[i].vb.vb2_buf));
         t7_vdin_buffer_queue(&b[i].vb.vb2_buf);
     }
 }
-static void teardown(struct t7_vdin *v) {
-    assert(list_empty(&v->queued) && !v->streaming && !v->thread);
-    pthread_mutex_destroy(&v->lock); pthread_mutex_destroy(&v->queue_lock);
-    pthread_mutex_destroy(&v->buffer_wait.lock); pthread_cond_destroy(&v->buffer_wait.cond);
+static void teardown(struct t7_vdin_buffer b[4]) {
+    assert(list_empty(&receiver.queued) && !receiver.streaming && !receiver.thread);
+    for (int i=0;i<VDIN_DMA_SLOTS;i++) { assert(!cpu_owned[i]); free(receiver.slots[i].data); }
+    for (int i=0;i<4;i++) free(b[i].vb.vb2_buf.data);
+    pthread_mutex_destroy(&receiver.lock.native); pthread_mutex_destroy(&receiver.queue_lock);
+    pthread_mutex_destroy(&receiver.irq_lock);
+    destroy_wait(&receiver.buffer_wait); destroy_wait(&receiver.done.wait);
 }
 int main(void) {
-    struct t7_vdin v; struct t7_vdin_buffer b[4]; unsigned char frame[64]; pthread_t stop;
-    /* STREAMOFF cannot return the in-flight CPU destination before copy finishes. */
-    setup(&v,b,frame); assert(!t7_vdin_start_streaming(&v.queue,4)); await(&entered,1);
-    assert(!pthread_create(&stop,NULL,stop_stream,&v));
+    struct t7_vdin_buffer b[4]; pthread_t stop;
+    /* Hardware fills the ring while CPU copy is blocked, without reusing COPYING. */
+    setup(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+    step(1,false); step(2,false); await(&entered,1);
+    step(3,false); step(4,false);
+    assert(!receiver.ring_running && receiver.dma_idle && receiver.ring_pauses==1);
+    assert(receiver.slots[0].state==VDIN_SLOT_COPYING);
+    permit(3); await(&completed,3);
+    assert(receiver.ring_running); step(5,false); step(6,false);
+    permit(4); await(&completed,4);
+    const unsigned char expected[4]={2,3,4,6};
+    for (int i=0;i<4;i++) {
+        assert(b[i].vb.sequence==(unsigned)i && b[i].vb.vb2_buf.data[VDIN_FRAME_SIZE-1]==expected[i]);
+    }
+    step(7,false); step(8,false); step(9,false);
+    assert(!receiver.ring_running && receiver.ring_pauses==2);
+    assert(b[0].vb.vb2_buf.data[VDIN_FRAME_SIZE-1]==2);
+    t7_vdin_stop_streaming(&receiver.queue); assert(!pins); teardown(b);
+    /* STREAMOFF waits for CPU copy and then a hardware completion boundary. */
+    setup(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+    step(1,false); step(2,false); await(&entered,1);
+    assert(!pthread_create(&stop,NULL,stop_stream,NULL));
     pthread_mutex_lock(&gate); while (!stopping) pthread_cond_wait(&changed,&gate);
     assert(!completed); pthread_mutex_unlock(&gate);
-    permit(1); pthread_join(stop,NULL);
-    assert(completed==4 && b[0].vb.vb2_buf.state==VB2_BUF_STATE_DONE);
+    permit(1); await(&stop_waiting,1); step(3,false); pthread_join(stop,NULL);
+    assert(completed==4 && b[0].vb.vb2_buf.state==VB2_BUF_STATE_DONE && !pins);
     for (int i=1;i<4;i++) assert(b[i].vb.vb2_buf.state==VB2_BUF_STATE_ERROR);
-    assert(b[0].vb.vb2_buf.data[63]==1); teardown(&v);
-    /* Queue starvation performs no capture and held destinations remain immutable. */
-    setup(&v,b,frame); permit(4); assert(!t7_vdin_start_streaming(&v.queue,4));
-    await(&completed,4); assert(entered==4 && !t7_vdin_has_buffer(&v));
-    for (int i=0;i<4;i++) {
-        assert(b[i].vb.sequence==(unsigned)i && b[i].vb.vb2_buf.data[63]==i+1);
-    }
-    b[0].vb.vb2_buf.done=0; t7_vdin_buffer_queue(&b[0].vb.vb2_buf);
-    await(&entered,5); permit(5); await(&completed,5);
-    assert(b[0].vb.sequence==4 && b[0].vb.vb2_buf.data[63]==5);
-    assert(b[1].vb.vb2_buf.data[63]==2);
-    t7_vdin_stop_streaming(&v.queue); teardown(&v);
-    /* Capture errors drain buffers and wake DQBUF; faulted restart cannot arm DMA. */
-    setup(&v,b,frame); fail_capture=true; permit(1);
-    assert(!t7_vdin_start_streaming(&v.queue,4)); await(&completed,4);
-    pthread_mutex_lock(&gate); while (!v.queue.error) pthread_cond_wait(&changed,&gate);
-    pthread_mutex_unlock(&gate); t7_vdin_stop_streaming(&v.queue);
+    teardown(b);
+    /* A late/busy write interrupt must not expose a DMA-owned buffer to the CPU. */
+    setup(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+    step(1,true); await(&completed,4); t7_vdin_stop_streaming(&receiver.queue);
+    assert(receiver.queue.error && receiver.faulted && pins==1 && !entered);
     for (int i=0;i<4;i++) assert(b[i].vb.vb2_buf.state==VB2_BUF_STATE_ERROR);
-    assert(v.faulted); teardown(&v);
-    setup(&v,b,frame); fail_timing=true;
-    assert(t7_vdin_start_streaming(&v.queue,4)==-ENOLINK && !entered);
+    teardown(b);
+    /* A missing IRQ follows the bounded-stop fault path without a CPU handoff. */
+    setup(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+    __atomic_store_n(&expire,true,__ATOMIC_RELEASE); wake_up(&receiver.buffer_wait);
+    await(&completed,4); t7_vdin_stop_streaming(&receiver.queue);
+    assert(receiver.queue.error && receiver.faulted && pins==1 && !entered);
+    teardown(b);
+    /* Oldest-ready selection is independent of slot index and handles u32 wrap. */
+    setup(b);
+    for (int i=0;i<VDIN_DMA_SLOTS;i++) {
+        receiver.slots[i].state=VDIN_SLOT_READY;
+        receiver.slots[i].sequence=0U-i;
+    }
+    assert(t7_vdin_ring_take(&receiver)==&receiver.slots[2]);
+    assert(t7_vdin_ring_take(&receiver)==&receiver.slots[1]);
+    assert(t7_vdin_ring_take(&receiver)==&receiver.slots[0]);
+    t7_vdin_return_buffers(&receiver,VB2_BUF_STATE_QUEUED); teardown(b);
+    setup(b); fail_timing=true;
+    assert(t7_vdin_start_streaming(&receiver.queue,4)==-ENOLINK && !started);
     for (int i=0;i<4;i++) assert(b[i].vb.vb2_buf.state==VB2_BUF_STATE_QUEUED);
-    teardown(&v);
-    setup(&v,b,frame); v.faulted=true;
-    assert(t7_vdin_start_streaming(&v.queue,4)==-EIO && !entered);
-    for (int i=0;i<4;i++) assert(b[i].vb.vb2_buf.state==VB2_BUF_STATE_QUEUED);
-    teardown(&v);
-    puts("V4L2 in-flight stop, starvation/resume, immutable held buffers and queue error passed");
+    teardown(b);
+    setup(b); receiver.faulted=true;
+    assert(t7_vdin_start_streaming(&receiver.queue,4)==-EIO && !started);
+    teardown(b);
+    puts("DMA ring ownership, cached CPU handoff, starvation, in-flight stop and busy IRQ containment passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     code = Path(directory) / 'stream.c'
     binary = Path(directory) / 'stream'
-    code.write_text(prefix + functions + checks)
+    code.write_text(prefix + defines + '\n' + types + stubs + hardware + stream + checks)
     subprocess.run(['cc', '-std=gnu11', '-pthread', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-Wno-unused-function', str(code),
                     '-o', str(binary)], check=True)

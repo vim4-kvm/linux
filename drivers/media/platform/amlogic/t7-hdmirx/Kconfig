@@ -10,7 +10,7 @@ config VIDEO_MESON_T7_HDMIRX
 	  bring-up, plus opt-in fixed-rate PHY and TMDS core initialization.
 	  Automatic PHY tuning and production V4L2 capture need further work;
 	  the separate VDIN experiment captures progressive 1080p60 input
-	  through a bounded copy queue, below the input frame rate.
+	  through a private DMA ring and V4L2 copy queue.
 
 	  To compile this driver as a module, choose M here.
 
@@ -22,6 +22,6 @@ config VIDEO_MESON_T7_VDIN_TEST
 	help
 	  Exclusive 1080p60 RGB capture experiment for the dedicated VIM4
 	  receiver DTB. Owns the VPU register window while DRM is disabled.
-	  Exposes debugfs snapshots and a V4L2 MMAP queue. Each capture stops
-	  DMA before copying to application buffers; capture runs slower than
-	  the input frame rate. This is not a production capture driver.
+	  Exposes debugfs snapshots and a V4L2 MMAP queue. Stream buffers are
+	  copied from a private cached DMA ring with explicit CPU/device
+	  synchronization. This is not a production capture driver.
