@@ -277,6 +277,10 @@ static void teardown(struct t7_vdin_buffer b[4]) {
 }
 static void setup_direct(struct t7_vdin_buffer b[4]) {
     setup(b); receiver.direct_dma=true;
+    for (int i=0;i<VDIN_DMA_SLOTS;i++) {
+        free(receiver.slots[i].data); receiver.slots[i].data=NULL;
+        receiver.slots[i].dma=0;
+    }
     for (int i=0;i<4;i++) {
         b[i].vb.vb2_buf.dma=0x20000000+i*0x1000000;
         assert(!t7_vdin_buffer_init(&b[i].vb.vb2_buf));

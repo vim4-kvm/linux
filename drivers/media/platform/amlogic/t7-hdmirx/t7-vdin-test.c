@@ -1164,7 +1164,10 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	ret = devm_add_action_or_reset(dev, t7_vdin_free_frame, vdin);
 	if (ret)
 		return ret;
-	for (i = 0; i < VDIN_DMA_SLOTS; i++) {
+	/* Direct capture uses queued vb2 allocations; the private copy ring has
+	 * no DMA or CPU consumer in that mode. Keep the separate snapshot frame.
+	 */
+	for (i = 0; !vdin->direct_dma && i < VDIN_DMA_SLOTS; i++) {
 		vdin->slots[i].data = dma_alloc_noncoherent(dev, vdin->frame_size,
 							    &vdin->slots[i].dma, DMA_FROM_DEVICE,
 							    GFP_KERNEL);
