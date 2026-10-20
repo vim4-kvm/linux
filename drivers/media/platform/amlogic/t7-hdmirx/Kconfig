@@ -18,10 +18,11 @@ config VIDEO_MESON_T7_VDIN_TEST
 	tristate "Amlogic T7 VDIN capture experiment"
 	depends on VIDEO_MESON_T7_HDMIRX
 	depends on VIDEO_DEV && OF && HAS_DMA
-	select VIDEOBUF2_VMALLOC
+	select VIDEOBUF2_DMA_CONTIG
 	help
 	  Exclusive 1080p60 RGB capture experiment for the dedicated VIM4
 	  receiver DTB. Owns the VPU register window while DRM is disabled.
-	  Exposes debugfs snapshots and a V4L2 MMAP queue. Stream buffers are
+	  Exposes debugfs snapshots and a V4L2 MMAP queue with DMA-buf export.
+	  Physically contiguous, coherent output buffers are
 	  copied from a private cached DMA ring with explicit CPU/device
 	  synchronization. This is not a production capture driver.

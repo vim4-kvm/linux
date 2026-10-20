@@ -23,7 +23,7 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-fh.h>
 #include <media/v4l2-ioctl.h>
-#include <media/videobuf2-vmalloc.h>
+#include <media/videobuf2-dma-contig.h>
 
 #include "t7-hdmirx.h"
 
@@ -555,6 +555,8 @@ static int t7_vdin_thread(void *data)
 			/* Hardware never addresses vb2 memory, even on a stop timeout. */
 			memcpy(vb2_plane_vaddr(&buffer->vb.vb2_buf, 0),
 			       slot->data, VDIN_FRAME_SIZE);
+			/* Publish CPU writes to the coherent output before handing it off. */
+			dma_wmb();
 			ret = t7_hdmirx_check_1080p_now(vdin->receiver);
 			buffer->vb.vb2_buf.timestamp = slot->timestamp;
 			buffer->vb.sequence = slot->sequence;
@@ -739,6 +741,7 @@ static const struct v4l2_ioctl_ops t7_vdin_ioctl_ops = {
 	.vidioc_create_bufs = vb2_ioctl_create_bufs,
 	.vidioc_prepare_buf = vb2_ioctl_prepare_buf,
 	.vidioc_querybuf = vb2_ioctl_querybuf,
+	.vidioc_expbuf = vb2_ioctl_expbuf,
 	.vidioc_qbuf = vb2_ioctl_qbuf,
 	.vidioc_dqbuf = vb2_ioctl_dqbuf,
 	.vidioc_streamon = vb2_ioctl_streamon,
@@ -793,7 +796,7 @@ static int t7_vdin_video_register(struct t7_vdin *vdin)
 	queue->drv_priv = vdin;
 	queue->buf_struct_size = sizeof(struct t7_vdin_buffer);
 	queue->ops = &t7_vdin_queue_ops;
-	queue->mem_ops = &vb2_vmalloc_memops;
+	queue->mem_ops = &vb2_dma_contig_memops;
 	queue->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC |
 				 V4L2_BUF_FLAG_TSTAMP_SRC_EOF;
 	queue->min_queued_buffers = 2;
