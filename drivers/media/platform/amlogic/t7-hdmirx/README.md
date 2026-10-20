@@ -3,7 +3,7 @@
 The initial driver owns the receiver TOP MMIO window, HDMIRX power domain and
 pclk/sys/CFG/METER/2M/5M clocks. It reads source 5V and the HPD request register through
 `/sys/kernel/debug/fe398000.hdmi-receiver/status`. No capture device is exposed;
-PHY tuning, receive interrupts and VDIN DMA still require implementation.
+Automatic PHY tuning, receive interrupts and VDIN DMA still require implementation.
 The normal VIM4 DTB leaves the receiver disabled; use the dedicated hdmirx-test
 DTB for bring-up. Its port 1 detect, HPD and DDC pins are muxed for the receiver.
 
@@ -28,6 +28,19 @@ It checks malformed inputs, HPD ordering, port-bank isolation and readback failu
 Source-side hardware validation must compare at least two distinct EDIDs to avoid
 treating cached display metadata as a new DDC read. It does not validate every
 advertised display mode or establish physical HPD voltage/timing.
+
+An explicit `phy_test=1` parameter adds a bounded input PLL/equalizer trial;
+it requires a digital base-block-only EDID with a 148.5 MHz preferred timing,
+and an input cable clock near 148.5 MHz. CTA/SCDC EDIDs are rejected: HDMI 2.0's
+1:40 clock ratio makes a 594 MHz stream ambiguous at the cable meter. Other rates,
+missing 5V, unstable clocks or three failed PLL attempts fail probe and power
+down the analog path. The trial owns a separate PHY MMIO resource, preserves
+the boot-provided termination trim, and restores its TOP configuration at exit.
+It does not retry asynchronously, tune arbitrary cables, or expose captured
+timings. A PLL lock bit alone does not establish an aligned TMDS/video stream.
+Status reports raw cable/TMDS meters, SQO, alignment and PLL lock separately.
+Run `python3 test_phy.py` for clock qualification, bounded failure and cleanup
+regressions against the actual C functions with fake MMIO.
 
 Next stages are T7 PHY tuning and signal lock, then an independent
 VDIN capture path using completed frames and explicit DMA buffer ownership.
