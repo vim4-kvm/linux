@@ -27,6 +27,9 @@ typedef uint64_t u64;
 typedef uint64_t dma_addr_t;
 typedef pthread_mutex_t spinlock_t;
 typedef int irqreturn_t;
+#define VDIN_FRAME_SIZE (1920U*1080U*3U)
+#define module_param(...)
+#define MODULE_PARM_DESC(...)
 #define __iomem
 #define BIT(n) (1U<<(n))
 #define GENMASK(h,l) ((~0U>>(31-(h))) & (~0U<<(l)))
@@ -154,8 +157,8 @@ static void vb2_queue_error(struct vb2_queue *q) {
     pthread_mutex_lock(&gate); q->error=true; pthread_cond_broadcast(&changed);
     pthread_mutex_unlock(&gate);
 }
-static int t7_hdmirx_check_1080p(void *dev) { return fail_timing?-ENOLINK:0; }
-static int t7_hdmirx_check_1080p_now(void *dev) {
+static int t7_hdmirx_check_video(void *dev) { return fail_timing?-ENOLINK:0; }
+static int t7_hdmirx_check_video_now(void *dev) {
     bool copying=false;
     for (int i=0;i<VDIN_DMA_SLOTS;i++) copying|=cpu_owned[i];
     if (!copying) {
@@ -212,6 +215,8 @@ static void setup(struct t7_vdin_buffer b[4]) {
     init_wait(&receiver.buffer_wait); init_wait(&receiver.done.wait);
     receiver.queued.next=receiver.queued.prev=&receiver.queued;
     receiver.queue.priv=&receiver; receiver.regs=registers;
+    receiver.width=1920; receiver.height=1080; receiver.stride=5760;
+    receiver.frame_size=VDIN_FRAME_SIZE;
     started=entered=permits=completed=pins=stop_waiting=0;
     stopping=fail_timing=expire=false;
     for (int i=0;i<VDIN_DMA_SLOTS;i++) {

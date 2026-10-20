@@ -4,10 +4,13 @@
 
 struct device;
 
-/* Require two stable progressive 1080p60 samples on the bound receiver. */
-int t7_hdmirx_check_1080p(struct device *dev);
+/* Require two stable samples matching the receiver's selected RGB8 profile. */
+int t7_hdmirx_check_video(struct device *dev);
 
 /* One process-context sample, without the stable check's inter-sample delay. */
-int t7_hdmirx_check_1080p_now(struct device *dev);
+int t7_hdmirx_check_video_now(struct device *dev);
+
+/* Profile dimensions are immutable for the lifetime of the bound receiver. */
+int t7_hdmirx_get_size(struct device *dev, unsigned int *width, unsigned int *height);
 
 #endif

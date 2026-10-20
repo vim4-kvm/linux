@@ -93,7 +93,7 @@ int main(void)
     struct t7_hdmirx rx = { .top = top, .cor = core, .port = 1 };
     struct device dev = { .data = &rx };
     unsigned int before;
-    assert(t7_hdmirx_check_1080p(&dev) == -ENOLINK);
+    assert(t7_hdmirx_check_video(&dev) == -ENOLINK);
     smc_error = true;
     assert(t7_hdmirx_core_start(&rx) == -EIO && !writes && !rx.core_active);
     smc_error = false; readback_error = true;
@@ -103,23 +103,23 @@ int main(void)
     assert(!pcs_resets);
     t7_hdmirx_reset_pcs(&rx);
     assert(pcs_resets == 1 && !readl(top + T7_RX_TOP_SW_RESET));
-    assert(rx.core_active && !t7_hdmirx_check_1080p(&dev));
+    assert(rx.core_active && !t7_hdmirx_check_video(&dev));
     core[T7_RX_COR_COLOR_DEPTH] = 5;
-    assert(t7_hdmirx_check_1080p(&dev) == -ERANGE);
+    assert(t7_hdmirx_check_video(&dev) == -ERANGE);
     core[T7_RX_COR_COLOR_DEPTH] = 4;
     writel(BIT(20), top + T7_RX_TOP_VID_STAT);
-    assert(t7_hdmirx_check_1080p(&dev) == -ERANGE);
+    assert(t7_hdmirx_check_video(&dev) == -ERANGE);
     writel(0, top + T7_RX_TOP_VID_STAT);
     core[0x1881] |= BIT(2);
-    assert(t7_hdmirx_check_1080p(&dev) == -ERANGE); timing();
+    assert(t7_hdmirx_check_video(&dev) == -ERANGE); timing();
     word(0x188c, 1280);
-    assert(t7_hdmirx_check_1080p(&dev) == -ERANGE); timing();
+    assert(t7_hdmirx_check_video(&dev) == -ERANGE); timing();
     word(0x1888, 0); core[0x188a] = 0;
-    assert(t7_hdmirx_check_1080p(&dev) == -ERANGE); timing();
+    assert(t7_hdmirx_check_video(&dev) == -ERANGE); timing();
     changed = true;
-    assert(t7_hdmirx_check_1080p(&dev) == -ERANGE); timing(); changed = false;
+    assert(t7_hdmirx_check_video(&dev) == -ERANGE); timing(); changed = false;
     memset(top + T7_RX_TOP_TMDS_ALIGN_STAT, 0, 4);
-    assert(t7_hdmirx_check_1080p(&dev) == -ENOLINK); timing();
+    assert(t7_hdmirx_check_video(&dev) == -ENOLINK); timing();
     t7_hdmirx_core_stop(&rx); before = writes;
     assert(!rx.core_active && !core[0x20a3] && !core[0x20a4] && !core[0x20a5]);
     t7_hdmirx_core_stop(&rx); assert(writes == before);
@@ -131,6 +131,14 @@ int main(void)
     t7_hdmirx_core_stop(&rx);
     assert(core[T7_RX_COR_SYS_CTRL] == 3 && core[T7_RX_COR_PHY_CLOCK1] == 255);
     assert(core[T7_RX_COR_PHY_CLOCK2] == 63 && core[T7_RX_COR_PHY_CLOCK3] == 1);
+    rx.core_active = true; timing(); rx.uhd60 = true;
+    assert(t7_hdmirx_check_video(&dev) == -ERANGE);
+    word(0x188c, 3840); word(0x188e, 2160);
+    word(0x1890, 88); word(0x1892, 4312);
+    word(0x1898, 10); word(0x189a, 2240);
+    assert(!t7_hdmirx_check_video(&dev));
+    word(0x188e, 1080);
+    assert(t7_hdmirx_check_video(&dev) == -ERANGE);
     puts("Core access, stable progressive timing, signal loss and idempotent cleanup passed");
 }
 '''

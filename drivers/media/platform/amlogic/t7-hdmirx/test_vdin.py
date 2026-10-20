@@ -22,6 +22,8 @@ typedef uint64_t u64;
 typedef int spinlock_t;
 typedef int wait_queue_head_t;
 typedef int irqreturn_t;
+#define VDIN_FRAME_SIZE (1920U*1080U*3U)
+#define VDIN_STRIDE (1920U*3U)
 #define __iomem
 #define BIT(n) (1U << (n))
 #define GENMASK(h, l) ((~0U >> (31 - (h))) & (~0U << (l)))
@@ -47,7 +49,7 @@ static u64 ktime_get_ns(void) { return 123456789; }
 static void wake_up(wait_queue_head_t *w) { (void)w; }
 '''
 mmio = r'''
-static uint8_t registers[0x40000], frame[VDIN_FRAME_SIZE];
+static uint8_t registers[0x40000], frame[3840U * 2160U * 3U + 16];
 static struct t7_vdin receiver;
 static unsigned int pins, requests, timing_checks;
 static bool timeout, busy, bad_timing, change_timing;
@@ -64,9 +66,16 @@ static void writel(u32 value, void *address)
     assert((uint8_t *)address >= registers &&
            (uint8_t *)address + 4 <= registers + sizeof(registers));
     if (address == registers + VDIN_WR_CTRL * 4 && value & VDIN_WR_REQ) {
+        /* Every format must feed the MIF, not just program its addresses. */
+        assert(readl(registers + VDIN_COM_CTRL0 * 4) & BIT(4));
         /* Never start DMA before its bounded address/stride have been installed. */
         assert(readl(registers + VDIN_WR_BADDR * 4) == receiver.frame_dma >> 4);
-        assert(readl(registers + VDIN_WR_STRIDE * 4) == VDIN_STRIDE >> 4);
+        assert(readl(registers + VDIN_WR_STRIDE * 4) == receiver.stride >> 4);
+        if (receiver.nv12) {
+            assert(readl(registers + VDIN_WR_CHROMA * 4) ==
+                   (receiver.frame_dma + receiver.stride * receiver.height) >> 4);
+            assert(receiver.frame_size == receiver.stride * receiver.height * 3 / 2);
+        }
         if (!(readl(address) & VDIN_WR_REQ)) requests++;
     }
     memcpy(address, &value, 4);
@@ -83,7 +92,7 @@ static void complete(struct completion *done)
 }
 static void reinit_completion(struct completion *done) { done->done = false; }
 static void udelay(unsigned int delay) { assert(delay == 1); }
-static int t7_hdmirx_check_1080p(struct device *dev)
+static int t7_hdmirx_check_video(struct device *dev)
 {
     (void)dev;
     timing_checks++;
@@ -103,7 +112,7 @@ static unsigned long wait_for_completion_timeout(struct completion *done, unsign
     t7_vdin_write_done(1, &receiver);
     assert(receiver.armed && receiver.frame_irqs == 1 && !done->done);
     assert(readl(registers + VDIN_WR_CTRL * 4) & VDIN_WR_REQ);
-    memset(frame, 0x5a, sizeof(frame));
+    memset(frame, 0x5a, receiver.frame_size);
     if (!busy) writel(BIT(0), registers + VDIN_WR_STATUS * 4);
     t7_vdin_write_done(1, &receiver);
     assert(!receiver.armed && receiver.frame_irqs == 2 && done->done);
@@ -116,8 +125,10 @@ static unsigned long wait_for_completion_timeout(struct completion *done, unsign
 static void reset(void)
 {
     memset(registers, 0, sizeof(registers));
+    memset(frame, 0xa5, sizeof(frame));
     receiver = (struct t7_vdin) { .regs = registers, .frame = frame,
-                               .frame_dma = 0x10000000 };
+                               .frame_dma = 0x10000000, .width = 1920, .height = 1080,
+                               .stride = VDIN_STRIDE, .frame_size = VDIN_FRAME_SIZE };
     pins = requests = timing_checks = 0;
     timeout = busy = bad_timing = change_timing = false;
 }
@@ -128,8 +139,18 @@ int main(void)
     assert(!t7_vdin_capture(&receiver));
     assert((readl(registers + VDIN_LFIFO_CTRL * 4) & 0xc0000000) == 0xc0000000);
     assert(receiver.snapshots == 1 && receiver.frame_irqs == 2 && !receiver.armed);
-    assert(requests == 1 && timing_checks == 2 && frame[sizeof(frame) - 1] == 0x5a);
+    assert(requests == 1 && timing_checks == 2 && frame[receiver.frame_size - 1] == 0x5a);
+    assert(frame[receiver.frame_size] == 0xa5);
     assert(!t7_vdin_capture(&receiver) && receiver.snapshots == 2);
+    reset(); receiver.nv12 = true;
+    receiver.width = 3840; receiver.height = 2160; receiver.stride = 3840;
+    receiver.frame_size = 3840U * 2160U * 3U / 2;
+    assert(!t7_vdin_capture(&receiver));
+    assert(frame[receiver.frame_size - 1] == 0x5a && frame[receiver.frame_size] == 0xa5);
+    /* T7's physical FIFO is 1920 words, independently of the input width. */
+    assert((readl(registers + VDIN_LFIFO_CTRL * 4) & 0x3fff) == 0x780);
+    assert((readl(registers + VDIN_WR_CTRL * 4) >> 12 & 3) == 2);
+    assert(readl(registers + VDIN_WR_CHROMA_STRIDE * 4) == 3840U / 16);
     reset(); bad_timing = true;
     assert(t7_vdin_capture(&receiver) == -ERANGE && !requests && !receiver.armed);
     reset(); timeout = true;
