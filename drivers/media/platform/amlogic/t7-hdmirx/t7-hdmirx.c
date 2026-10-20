@@ -8,12 +8,15 @@
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
 #include <linux/seq_file.h>
+#include <sound/pcm_params.h>
+#include <sound/soc.h>
 
 #include "t7-hdmirx.h"
 
@@ -112,6 +115,20 @@
 #define T7_RX_COR_PHY_CLOCK2	0x20a4
 #define T7_RX_COR_PHY_CLOCK3	0x20a5
 
+#define T7_RX_TOP_ACR_CTRL	(0x00e * 4)
+#define T7_RX_AUD_PLL0		0x80
+#define T7_RX_AUD_PLL2		0x84
+#define T7_RX_AUD_PLL3		0x88
+#define T7_RX_AUD_PLL_STATUS	0x8c
+#define T7_RX_COR_CTS		0x111a
+#define T7_RX_COR_N		0x111d
+#define T7_RX_COR_AUDIO_PACKET	0x1127
+#define T7_RX_COR_AUDIO_INFO	0x1184
+#define T7_RX_COR_AUDIO_CHSTATUS	0x1419
+#define T7_RX_COR_AUDIO_MCLK	0x1401
+#define T7_RX_COR_AUDIO_TDM1	0x1440
+#define T7_RX_COR_AUDIO_TDM2	0x1441
+
 static char *edid_firmware;
 module_param(edid_firmware, charp, 0400);
 MODULE_PARM_DESC(edid_firmware, "Optional validated EDID file in /lib/firmware for DDC bring-up");
@@ -127,6 +144,10 @@ MODULE_PARM_DESC(core_test, "Initialize the TMDS video core; requires phy_test=1
 static bool uhd60;
 module_param(uhd60, bool, 0400);
 MODULE_PARM_DESC(uhd60, "Opt-in RGB8 3840x2160p60 HDMI 2.0 trial; requires matching EDID");
+
+static bool audio_test;
+module_param(audio_test, bool, 0400);
+MODULE_PARM_DESC(audio_test, "Opt-in stereo LPCM ALSA capture codec for the dedicated audio DTB");
 
 static const u32 t7_hdmirx_phy_top_regs[] = {
 	T7_RX_TOP_CLK_CNTL, T7_RX_TOP_PORT_SEL, T7_RX_TOP_PHYIF_CNTL0,
@@ -167,6 +188,13 @@ struct t7_hdmirx {
 	u32 cable_hz;
 	u8 edid[T7_RX_EDID_CAPACITY];
 	struct debugfs_blob_wrapper edid_blob;
+	void __iomem *frhdmirx;
+	struct clk_bulk_data audio_clocks[2];
+	bool audio_active;
+	u32 audio_pll_saved[3];
+	u32 audio_fifo_saved;
+	u8 audio_core_saved[3];
+	u32 audio_clk_saved;
 };
 
 static int t7_hdmirx_validate_edid(const u8 *edid, size_t size)
@@ -623,6 +651,181 @@ int t7_hdmirx_get_size(struct device *dev, unsigned int *width, unsigned int *he
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_get_size);
 
+static u32 t7_hdmirx_audio_word(struct t7_hdmirx *rx, unsigned int reg)
+{
+	return ((readb(rx->cor + reg) & 0xf) << 16) |
+	       (readb(rx->cor + reg + 1) << 8) | readb(rx->cor + reg + 2);
+}
+
+static int t7_hdmirx_validate_audio(u32 tmds, u32 n, u32 cts,
+				  u8 info, u8 packet, u8 channel_status,
+				  unsigned int rate)
+{
+	u64 measured;
+
+	if (!tmds || !n || !cts)
+		return -ENOLINK;
+	if (rate != 32000 && rate != 44100 && rate != 48000)
+		return -EINVAL;
+	/* Reject compressed, HBR and multichannel layouts before touching clocks. */
+	if ((info >> 4) > 1 || (info & 7) > 1 ||
+	    (packet & (BIT(6) | GENMASK(4, 3))) || (channel_status & BIT(1)))
+		return -EINVAL;
+	measured = div_u64((u64)tmds * n, 128 * cts);
+	if (measured < rate - rate / 100 || measured > rate + rate / 100)
+		return -ERANGE;
+	return 0;
+}
+
+static void t7_hdmirx_audio_stop(void *data)
+{
+	struct t7_hdmirx *rx = data;
+	u32 value;
+
+	if (!rx->audio_active)
+		return;
+	/* TODDR owns DMA and stops it through ALSA before this codec is freed. */
+	value = readl(rx->frhdmirx);
+	writel(value & ~BIT(31), rx->frhdmirx);
+	writel(rx->audio_fifo_saved, rx->frhdmirx);
+	writeb(readb(rx->cor + T7_RX_COR_POWER_RESET) | BIT(1),
+	       rx->cor + T7_RX_COR_POWER_RESET);
+	writel(0, rx->phy + T7_RX_AUD_PLL0);
+	writel(rx->audio_pll_saved[1], rx->phy + T7_RX_AUD_PLL2);
+	writel(rx->audio_pll_saved[2], rx->phy + T7_RX_AUD_PLL3);
+	writel(rx->audio_pll_saved[0], rx->phy + T7_RX_AUD_PLL0);
+	writeb(rx->audio_core_saved[0], rx->cor + T7_RX_COR_AUDIO_MCLK);
+	writeb(rx->audio_core_saved[1], rx->cor + T7_RX_COR_AUDIO_TDM1);
+	writeb(rx->audio_core_saved[2], rx->cor + T7_RX_COR_AUDIO_TDM2);
+	value = readl(rx->top + T7_RX_TOP_CLK_CNTL);
+	writel((value & ~BIT(4)) | rx->audio_clk_saved,
+	       rx->top + T7_RX_TOP_CLK_CNTL);
+	clk_bulk_disable_unprepare(ARRAY_SIZE(rx->audio_clocks), rx->audio_clocks);
+	rx->audio_active = false;
+}
+
+static int t7_hdmirx_audio_hw_params(struct snd_pcm_substream *substream,
+				    struct snd_pcm_hw_params *params,
+				    struct snd_soc_dai *dai)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dai->dev);
+	u32 status, value, n, cts, tmds;
+	int ret;
+
+	if (!rx->core_active || params_channels(params) != 2 ||
+	    params_format(params) != SNDRV_PCM_FORMAT_S16_LE)
+		return -EINVAL;
+	n = t7_hdmirx_audio_word(rx, T7_RX_COR_N);
+	cts = t7_hdmirx_audio_word(rx, T7_RX_COR_CTS);
+	tmds = t7_hdmirx_meter_hz(readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
+				clk_get_rate(rx->clocks[T7_RX_METER].clk));
+	ret = t7_hdmirx_validate_audio(tmds, n, cts,
+		readb(rx->cor + T7_RX_COR_AUDIO_INFO),
+		readb(rx->cor + T7_RX_COR_AUDIO_PACKET),
+		readb(rx->cor + T7_RX_COR_AUDIO_CHSTATUS), params_rate(params));
+	if (ret)
+		return ret;
+	if (rx->audio_active)
+		return -EBUSY;
+	ret = clk_bulk_prepare_enable(ARRAY_SIZE(rx->audio_clocks), rx->audio_clocks);
+	if (ret)
+		return ret;
+	rx->audio_fifo_saved = readl(rx->frhdmirx);
+	if (rx->audio_fifo_saved & BIT(31)) {
+		clk_bulk_disable_unprepare(ARRAY_SIZE(rx->audio_clocks), rx->audio_clocks);
+		return -EBUSY;
+	}
+	rx->audio_pll_saved[0] = readl(rx->phy + T7_RX_AUD_PLL0);
+	rx->audio_pll_saved[1] = readl(rx->phy + T7_RX_AUD_PLL2);
+	rx->audio_pll_saved[2] = readl(rx->phy + T7_RX_AUD_PLL3);
+	rx->audio_core_saved[0] = readb(rx->cor + T7_RX_COR_AUDIO_MCLK);
+	rx->audio_core_saved[1] = readb(rx->cor + T7_RX_COR_AUDIO_TDM1);
+	rx->audio_core_saved[2] = readb(rx->cor + T7_RX_COR_AUDIO_TDM2);
+	rx->audio_clk_saved = readl(rx->top + T7_RX_TOP_CLK_CNTL) & BIT(4);
+	rx->audio_active = true;
+	/* Route the receiver's recovered stereo SPDIF lane into FRHDMIRX. */
+	writeb(0, rx->cor + T7_RX_COR_AUDIO_TDM1);
+	writeb(0x10, rx->cor + T7_RX_COR_AUDIO_TDM2);
+	writeb(0x80, rx->cor + T7_RX_COR_AUDIO_MCLK);
+	value = readl(rx->top + T7_RX_TOP_CLK_CNTL);
+	writel(value & ~BIT(4), rx->top + T7_RX_TOP_CLK_CNTL);
+	writel(0x40001540, rx->phy + T7_RX_AUD_PLL0);
+	writel(2 << 2, rx->phy + T7_RX_AUD_PLL2);
+	writel(rx->uhd60 ? 0 : 2, rx->phy + T7_RX_AUD_PLL3);
+	writel(0x60001540, rx->phy + T7_RX_AUD_PLL0);
+	writel(readl(rx->top + T7_RX_TOP_ACR_CTRL) | BIT(11),
+	       rx->top + T7_RX_TOP_ACR_CTRL);
+	ret = readl_poll_timeout(rx->phy + T7_RX_AUD_PLL_STATUS, status,
+				status & BIT(31), 10, 100000);
+	if (ret) {
+		t7_hdmirx_audio_stop(rx);
+		return ret;
+	}
+	value = readb(rx->cor + T7_RX_COR_POWER_RESET);
+	writeb(value | BIT(1), rx->cor + T7_RX_COR_POWER_RESET);
+	udelay(1);
+	writeb(value & ~BIT(1), rx->cor + T7_RX_COR_POWER_RESET);
+	/* T7 has one stereo lane; no FRHDMIRX IRQ or compressed PAO path. */
+	value = BIT(24) | BIT(25) | BIT(26) | (6 << 8) | (0xff << 12);
+	writel(value, rx->frhdmirx);
+	writel(value | BIT(29), rx->frhdmirx);
+	writel(value | BIT(29) | BIT(28), rx->frhdmirx);
+	writel(value | BIT(29) | BIT(28) | BIT(31), rx->frhdmirx);
+	return 0;
+}
+
+static int t7_hdmirx_audio_hw_free(struct snd_pcm_substream *substream,
+				  struct snd_soc_dai *dai)
+{
+	t7_hdmirx_audio_stop(dev_get_drvdata(dai->dev));
+	return 0;
+}
+
+static const struct snd_soc_dai_ops t7_hdmirx_audio_ops = {
+	.hw_params = t7_hdmirx_audio_hw_params,
+	.hw_free = t7_hdmirx_audio_hw_free,
+};
+
+static struct snd_soc_dai_driver t7_hdmirx_audio_dai = {
+	.name = "t7-hdmirx-audio",
+	.capture = {
+		.stream_name = "HDMI RX Capture",
+		.channels_min = 2, .channels_max = 2,
+		.rates = SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE,
+	},
+	.ops = &t7_hdmirx_audio_ops,
+};
+
+static const struct snd_soc_component_driver t7_hdmirx_audio_component = {
+	.name = "t7-hdmirx-audio",
+};
+
+static int t7_hdmirx_audio_register(struct platform_device *pdev, struct t7_hdmirx *rx)
+{
+	struct device *dev = &pdev->dev;
+	struct resource *phy = platform_get_resource_byname(pdev, IORESOURCE_MEM, "phy");
+	int ret;
+
+	if (!audio_test)
+		return 0;
+	if (!core_test || !phy || resource_size(phy) < 0x90)
+		return -EINVAL;
+	rx->frhdmirx = devm_platform_ioremap_resource_byname(pdev, "frhdmirx");
+	if (IS_ERR(rx->frhdmirx))
+		return PTR_ERR(rx->frhdmirx);
+	rx->audio_clocks[0].id = "audio-pll";
+	rx->audio_clocks[1].id = "frhdmirx";
+	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(rx->audio_clocks), rx->audio_clocks);
+	if (ret)
+		return ret;
+	ret = devm_add_action_or_reset(dev, t7_hdmirx_audio_stop, rx);
+	if (ret)
+		return ret;
+	return devm_snd_soc_register_component(dev, &t7_hdmirx_audio_component,
+					     &t7_hdmirx_audio_dai, 1);
+}
+
 static int t7_hdmirx_status(struct seq_file *s, void *unused)
 {
 	struct device *dev = s->private;
@@ -666,6 +869,11 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 		seq_printf(s, "vtotal: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC) +
 			   t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT_BACK));
 		seq_printf(s, "frame_ticks: %u\n", ticks);
+		seq_printf(s, "audio_n: %u\n", t7_hdmirx_audio_word(rx, T7_RX_COR_N));
+		seq_printf(s, "audio_cts: %u\n", t7_hdmirx_audio_word(rx, T7_RX_COR_CTS));
+		seq_printf(s, "audio_info: %#x\n", readb(rx->cor + T7_RX_COR_AUDIO_INFO));
+		seq_printf(s, "audio_packet: %#x\n", readb(rx->cor + T7_RX_COR_AUDIO_PACKET));
+		seq_printf(s, "audio_active: %u\n", rx->audio_active);
 	}
 	if (rx->phy_active) {
 		u32 cable = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
@@ -808,6 +1016,9 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 		if (core_test)
 			t7_hdmirx_reset_pcs(rx);
 	}
+	ret = t7_hdmirx_audio_register(pdev, rx);
+	if (ret)
+		return dev_err_probe(dev, ret, "Cannot register experimental HDMI audio\n");
 	debugfs = debugfs_create_dir(dev_name(dev), NULL);
 	if (IS_ERR(debugfs))
 		return PTR_ERR(debugfs);

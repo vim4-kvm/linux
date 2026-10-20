@@ -384,6 +384,8 @@ static struct clk_regmap pdm =
 	AUD_PCLK_GATE(pdm, AUDIO_CLK_GATE_EN, 1);
 static struct clk_regmap tdmin_a =
 	AUD_PCLK_GATE(tdmin_a, AUDIO_CLK_GATE_EN, 2);
+static struct clk_regmap frhdmirx =
+	AUD_PCLK_GATE(frhdmirx, AUDIO_CLK_GATE_EN, 31);
 static struct clk_regmap tdmin_b =
 	AUD_PCLK_GATE(tdmin_b, AUDIO_CLK_GATE_EN, 3);
 static struct clk_regmap tdmin_c =
@@ -1155,6 +1157,7 @@ static struct clk_hw *g12a_audio_hw_clks[] = {
  * The input clocks of the controller will be populated at runtime
  */
 static struct clk_hw *s4_audio_hw_clks[] = {
+	[AUD_CLKID_FRHDMIRX]		= &frhdmirx.hw,
 	[AUD_CLKID_DDR_ARB]		= &ddr_arb.hw,
 	[AUD_CLKID_PDM]			= &pdm.hw,
 	[AUD_CLKID_TDMIN_A]		= &tdmin_a.hw,
