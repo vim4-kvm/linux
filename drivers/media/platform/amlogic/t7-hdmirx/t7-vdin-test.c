@@ -93,7 +93,7 @@ struct t7_vdin_snapshot {
 };
 
 struct t7_vdin {
-	unsigned int width, height, stride, frame_size;
+	unsigned int width, height, stride, frame_size, allocation_size;
 	u32 pixel_format;
 	bool nv12;
 	struct kref ref;
@@ -634,9 +634,9 @@ static int t7_vdin_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
 	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
 
 	if (*planes)
-		return *planes == 1 && sizes[0] >= vdin->frame_size ? 0 : -EINVAL;
+		return *planes == 1 && sizes[0] >= vdin->allocation_size ? 0 : -EINVAL;
 	*planes = 1;
-	sizes[0] = vdin->frame_size;
+	sizes[0] = vdin->allocation_size;
 	return 0;
 }
 
@@ -644,7 +644,7 @@ static int t7_vdin_buffer_prepare(struct vb2_buffer *vb)
 {
 	struct t7_vdin *vdin = vb2_get_drv_priv(vb->vb2_queue);
 
-	if (vb2_plane_size(vb, 0) < vdin->frame_size)
+	if (vb2_plane_size(vb, 0) < vdin->allocation_size)
 		return -EINVAL;
 	vb2_set_plane_payload(vb, 0, vdin->frame_size);
 	return 0;
@@ -733,7 +733,7 @@ static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fm
 		.pixelformat = vdin->pixel_format,
 		.field = V4L2_FIELD_NONE,
 		.bytesperline = vdin->stride,
-		.sizeimage = vdin->frame_size,
+		.sizeimage = vdin->allocation_size,
 		.colorspace = vdin->nv12 ? V4L2_COLORSPACE_REC709 : V4L2_COLORSPACE_SRGB,
 		.xfer_func = vdin->nv12 ? V4L2_XFER_FUNC_709 : V4L2_XFER_FUNC_SRGB,
 		.ycbcr_enc = vdin->nv12 ? V4L2_YCBCR_ENC_709 : V4L2_YCBCR_ENC_DEFAULT,
@@ -995,6 +995,9 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	vdin->frame_size = vdin->stride * vdin->height;
 	if (nv12)
 		vdin->frame_size += vdin->frame_size / 2;
+	/* Keep NV12 tightly packed, with tail room for aligned encoder plane views. */
+	vdin->allocation_size = nv12 ? vdin->stride * ALIGN(vdin->height, 16) * 3 / 2 :
+				       vdin->frame_size;
 	vdin->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(vdin->regs))
 		return PTR_ERR(vdin->regs);
