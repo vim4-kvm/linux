@@ -2,6 +2,7 @@
 /* Amlogic T7 HDMI receiver resource and cable detection bring-up. */
 /* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
 #include <linux/bitfield.h>
+#include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
@@ -14,6 +15,8 @@
 #include <linux/property.h>
 #include <linux/seq_file.h>
 
+#include "t7-hdmirx.h"
+
 /* TOP register indices use 32-bit words; EDID RAM uses byte offsets. */
 #define T7_RX_TOP_SW_RESET	(0x000 * 4)
 #define T7_RX_TOP_CLK_CNTL	(0x001 * 4)
@@ -22,6 +25,10 @@
 #define T7_RX_TOP_EDID_GEN_CNTL	(0x004 * 4)
 #define T7_RX_TOP_EDID_GEN_STAT	(0x008 * 4)
 #define T7_RX_TOP_INTR_MASKN	(0x009 * 4)
+#define T7_RX_TOP_VID_CNTL		(0x00c * 4)
+#define T7_RX_TOP_VID_CNTL2	(0x013 * 4)
+#define T7_RX_TOP_VID_STAT		(0x00d * 4)
+#define T7_RX_TOP_OUTPUT_OVERRIDE	(0x090 * 4)
 #define T7_RX_TOP_METER_HDMI_CNTL	(0x011 * 4)
 #define T7_RX_TOP_METER_HDMI_STAT	(0x012 * 4)
 #define T7_RX_TOP_CHAN_SWITCH_0	(0x028 * 4)
@@ -64,6 +71,44 @@
 #define T7_RX_EDID_CAPACITY	512
 #define T7_RX_EDID_BLOCK_SIZE	128
 
+/* Receiver core registers are byte-addressed and require byte accesses. */
+#define T7_RX_COR_AON_RESET	0x0005
+#define T7_RX_COR_HDMI2_MODE	0x0040
+#define T7_RX_COR_INT_CTRL		0x0079
+#define T7_RX_COR_HPD_CTRL		0x00f5
+#define T7_RX_COR_POWER_CTRL	0x1001
+#define T7_RX_COR_POWER_RESET	0x1005
+#define T7_RX_COR_STATE		0x1006
+#define T7_RX_COR_SYS_CTRL		0x1007
+#define T7_RX_COR_CHANNEL_MAP	0x100e
+#define T7_RX_COR_DATA_INVERT	0x100f
+#define T7_RX_COR_TMDS_CLOCK	0x1013
+#define T7_RX_COR_HDMI_MODE	0x1022
+#define T7_RX_COR_PREAMBLE		0x1023
+#define T7_RX_COR_COLOR_DEPTH	0x1027
+#define T7_RX_COR_FRL_CTRL		0x1028
+#define T7_RX_COR_TEST_CLOCK	0x103b
+#define T7_RX_COR_PWD_INT_CTRL	0x105f
+#define T7_RX_COR_VIDEO_DIV	0x10c1
+#define T7_RX_COR_CLAMP		0x10c4
+#define T7_RX_COR_AV_MUTE		0x1122
+#define T7_RX_COR_INPUT_FORMAT	0x1814
+#define T7_RX_COR_INPUT_MAP	0x1816
+#define T7_RX_COR_OUTPUT_SYNC	0x1842
+#define T7_RX_COR_FRAME_STATUS	0x1881
+#define T7_RX_COR_FRAME_TICKS	0x1888
+#define T7_RX_COR_WIDTH		0x188c
+#define T7_RX_COR_HEIGHT		0x188e
+#define T7_RX_COR_HSYNC		0x1890
+#define T7_RX_COR_HFRONT_BACK	0x1892
+#define T7_RX_COR_VSYNC		0x1898
+#define T7_RX_COR_VFRONT_BACK	0x189a
+#define T7_RX_COR_DPLL_CONFIG	0x1f15
+#define T7_RX_COR_DPLL_HDMI2	0x1f52
+#define T7_RX_COR_PHY_CLOCK1	0x20a3
+#define T7_RX_COR_PHY_CLOCK2	0x20a4
+#define T7_RX_COR_PHY_CLOCK3	0x20a5
+
 static char *edid_firmware;
 module_param(edid_firmware, charp, 0400);
 MODULE_PARM_DESC(edid_firmware, "Optional validated EDID file in /lib/firmware for DDC bring-up");
@@ -72,10 +117,15 @@ static bool phy_test;
 module_param(phy_test, bool, 0400);
 MODULE_PARM_DESC(phy_test, "Opt-in 148.5 MHz input PLL/equalizer trial; requires EDID firmware");
 
+static bool core_test;
+module_param(core_test, bool, 0400);
+MODULE_PARM_DESC(core_test, "Initialize the TMDS video core; requires phy_test=1");
+
 static const u32 t7_hdmirx_phy_top_regs[] = {
 	T7_RX_TOP_CLK_CNTL, T7_RX_TOP_PORT_SEL, T7_RX_TOP_PHYIF_CNTL0,
 	T7_RX_TOP_CHAN_SWITCH_0, T7_RX_TOP_CHAN_SWITCH_1,
 	T7_RX_TOP_METER_HDMI_CNTL, T7_RX_TOP_METER_CABLE_CNTL,
+	T7_RX_TOP_VID_CNTL, T7_RX_TOP_VID_CNTL2, T7_RX_TOP_OUTPUT_OVERRIDE,
 };
 
 enum t7_hdmirx_clock {
@@ -91,12 +141,15 @@ enum t7_hdmirx_clock {
 struct t7_hdmirx {
 	void __iomem *top;
 	void __iomem *phy;
+	void __iomem *cor;
 	struct clk_bulk_data clocks[T7_RX_NUM_CLOCKS];
 	u32 port;
 	u32 saved_reset;
 	u32 saved_port_sel;
 	bool ddc_active;
 	bool phy_active;
+	bool core_active;
+	unsigned long core_smc_result;
 	u32 phy_top_saved[ARRAY_SIZE(t7_hdmirx_phy_top_regs)];
 	u32 cable_hz;
 	u8 edid[T7_RX_EDID_CAPACITY];
@@ -374,6 +427,124 @@ static void t7_hdmirx_phy_equalize(struct t7_hdmirx *rx)
 	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(28), BIT(28));
 }
 
+static void t7_hdmirx_core_stop(void *data)
+{
+	struct t7_hdmirx *rx = data;
+
+	if (!rx->core_active)
+		return;
+	t7_hdmirx_set_hpd(rx, false);
+	writeb(0x1a, rx->cor + 0x1005);
+	writeb(1, rx->cor + T7_RX_COR_AON_RESET);
+	writeb(1, rx->cor + T7_RX_COR_POWER_CTRL);
+	writeb(0, rx->cor + T7_RX_COR_SYS_CTRL);
+	writeb(0, rx->cor + T7_RX_COR_PHY_CLOCK1);
+	writeb(0, rx->cor + T7_RX_COR_PHY_CLOCK2);
+	writeb(0, rx->cor + T7_RX_COR_PHY_CLOCK3);
+	readb(rx->cor + T7_RX_COR_PHY_CLOCK3);
+	rx->core_active = false;
+}
+
+static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
+{
+	struct arm_smccc_res res;
+
+	/* T7's firmware owns TOP_SECURE_MODE, including non-secure core access. */
+	arm_smccc_smc(0x8200008c, 0xa2, 0x1f, 0, 0, 0, 0, 0, &res);
+	rx->core_smc_result = res.a0;
+	if (res.a0)
+		return -EIO;
+	rx->core_active = true;
+	/* Hold AON reset while removing TMDS isolation and selecting PHY lanes. */
+	writeb(1, rx->cor + T7_RX_COR_AON_RESET);
+	writeb(0x11, rx->cor + T7_RX_COR_HDMI2_MODE);
+	writeb(0, rx->cor + T7_RX_COR_INT_CTRL);
+	writeb(0, rx->cor + T7_RX_COR_POWER_CTRL);
+	writeb(3, rx->cor + T7_RX_COR_SYS_CTRL);
+	writeb(0x12, rx->cor + T7_RX_COR_CHANNEL_MAP);
+	writeb(0x52, rx->cor + T7_RX_COR_DATA_INVERT);
+	writeb(0x20, rx->cor + T7_RX_COR_TMDS_CLOCK);
+	writeb(0x80, rx->cor + T7_RX_COR_TEST_CLOCK);
+	writeb(1, rx->cor + T7_RX_COR_VIDEO_DIV);
+	/* Native single-rate RGB input and video component mapping. */
+	writeb(0, rx->cor + T7_RX_COR_INPUT_FORMAT);
+	writeb(0, rx->cor + T7_RX_COR_INPUT_FORMAT + 1);
+	writeb(0x40, rx->cor + T7_RX_COR_INPUT_MAP);
+	writeb(4, rx->cor + T7_RX_COR_INPUT_MAP + 1);
+	writeb(0, rx->cor + T7_RX_COR_OUTPUT_SYNC);
+	writeb(4, rx->cor + T7_RX_COR_HDMI_MODE);
+	writeb(1, rx->cor + T7_RX_COR_HPD_CTRL);
+	writeb(0, rx->cor + T7_RX_COR_CLAMP);
+	/* DVI sources have no HDMI guard-band preamble. */
+	writeb(0, rx->cor + T7_RX_COR_PREAMBLE);
+	writeb(0xff, rx->cor + T7_RX_COR_PHY_CLOCK1);
+	writeb(0x3f, rx->cor + T7_RX_COR_PHY_CLOCK2);
+	writeb(1, rx->cor + T7_RX_COR_PHY_CLOCK3);
+	writeb(0, rx->cor + T7_RX_COR_AON_RESET);
+	writeb(0, rx->cor + T7_RX_COR_PWD_INT_CTRL);
+	/* TMDS DPLL, no FRL, and video/deep-colour reset pulse. */
+	writeb(0x10, rx->cor + T7_RX_COR_DPLL_CONFIG);
+	writeb(0, rx->cor + T7_RX_COR_FRL_CTRL);
+	writeb(0, rx->cor + T7_RX_COR_DPLL_HDMI2);
+	writeb(0x20, rx->cor + T7_RX_COR_AV_MUTE);
+	writeb(0x1a, rx->cor + T7_RX_COR_POWER_RESET);
+	usleep_range(100, 110);
+	writeb(1, rx->cor + T7_RX_COR_POWER_RESET);
+	writel(BIT(21) | BIT(20) | BIT(7), rx->top + T7_RX_TOP_VID_CNTL);
+	writel(0x0a, rx->top + T7_RX_TOP_VID_CNTL2);
+	writel(0, rx->top + T7_RX_TOP_OUTPUT_OVERRIDE);
+	/* Re-align the PCS after lane and video setup; lock alone is insufficient. */
+	writel(BIT(13) | BIT(7), rx->top + T7_RX_TOP_SW_RESET);
+	readl(rx->top + T7_RX_TOP_SW_RESET);
+	usleep_range(1, 5);
+	writel(0, rx->top + T7_RX_TOP_SW_RESET);
+	if (readb(rx->cor + T7_RX_COR_SYS_CTRL) != 3 ||
+	    readb(rx->cor + T7_RX_COR_PHY_CLOCK1) != 0xff)
+		return -EIO;
+	return 0;
+}
+
+static u32 t7_hdmirx_core_read16(struct t7_hdmirx *rx, u32 offset)
+{
+	return readb(rx->cor + offset) | (readb(rx->cor + offset + 1) << 8);
+}
+
+int t7_hdmirx_check_1080p(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	u32 ticks, reference;
+	unsigned int i;
+
+	if (!rx || !rx->core_active)
+		return -ENOLINK;
+	for (i = 0; i < 2; i++) {
+		if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
+		    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
+			return -ENOLINK;
+		if (readb(rx->cor + T7_RX_COR_FRAME_STATUS) & BIT(2))
+			return -ERANGE;
+		if (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
+		    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4)
+			return -ERANGE;
+		if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != 1920 ||
+		    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != 1080 ||
+		    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC) +
+		    t7_hdmirx_core_read16(rx, T7_RX_COR_HFRONT_BACK) != 2200 ||
+		    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC) +
+		    t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT_BACK) != 1125)
+			return -ERANGE;
+		ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
+			(readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
+		reference = clk_get_rate(rx->clocks[T7_RX_PCLK].clk);
+		if (!ticks || ticks < reference / 61 || ticks > reference / 59)
+			return -ERANGE;
+		if (!i)
+			usleep_range(20000, 21000);
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_check_1080p);
+
 static int t7_hdmirx_status(struct seq_file *s, void *unused)
 {
 	struct device *dev = s->private;
@@ -398,6 +569,26 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 	seq_printf(s, "top_edid_gen_stat: %#010x\n",
 		   readl(rx->top + T7_RX_TOP_EDID_GEN_STAT));
 	seq_printf(s, "phy_active: %u\n", rx->phy_active);
+	seq_printf(s, "core_active: %u\n", rx->core_active);
+	if (rx->core_active) {
+		u32 ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
+			    (readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
+
+		seq_printf(s, "core_state: %#x\n", readb(rx->cor + T7_RX_COR_STATE));
+		seq_printf(s, "core_smc_result: %#lx\n", rx->core_smc_result);
+		seq_printf(s, "core_sys_ctrl: %#x\n", readb(rx->cor + T7_RX_COR_SYS_CTRL));
+		seq_printf(s, "core_phyck: %#x\n", readb(rx->cor + T7_RX_COR_PHY_CLOCK1));
+		seq_printf(s, "core_aon_reset: %#x\n", readb(rx->cor + T7_RX_COR_AON_RESET));
+		seq_printf(s, "core_fdet: %#x\n", readb(rx->cor + T7_RX_COR_FRAME_STATUS));
+		seq_printf(s, "color_depth_code: %#x\n", readb(rx->cor + T7_RX_COR_COLOR_DEPTH));
+		seq_printf(s, "width: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH));
+		seq_printf(s, "height: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT));
+		seq_printf(s, "htotal: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC) +
+			   t7_hdmirx_core_read16(rx, T7_RX_COR_HFRONT_BACK));
+		seq_printf(s, "vtotal: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC) +
+			   t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT_BACK));
+		seq_printf(s, "frame_ticks: %u\n", ticks);
+	}
 	if (rx->phy_active) {
 		u32 cable = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
 		u32 tmds = readl(rx->top + T7_RX_TOP_METER_HDMI_STAT);
@@ -449,6 +640,8 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 
 	if (phy_test && !edid_firmware)
 		return dev_err_probe(dev, -EINVAL, "PHY trial requires an EDID firmware\n");
+	if (core_test && !phy_test)
+		return dev_err_probe(dev, -EINVAL, "Core trial requires PHY initialization\n");
 	rx = devm_kzalloc(dev, sizeof(*rx), GFP_KERNEL);
 	if (!rx)
 		return -ENOMEM;
@@ -461,6 +654,9 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 	rx->phy = devm_platform_ioremap_resource_byname(pdev, "phy");
 	if (IS_ERR(rx->phy))
 		return PTR_ERR(rx->phy);
+	rx->cor = devm_platform_ioremap_resource_byname(pdev, "cor");
+	if (IS_ERR(rx->cor))
+		return PTR_ERR(rx->cor);
 	for (i = 0; i < ARRAY_SIZE(rx->clocks); i++)
 		rx->clocks[i].id = names[i];
 	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(rx->clocks), rx->clocks);
@@ -516,6 +712,14 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 					     rx->cable_hz, readl(rx->phy + T7_RX_PHY_APLL0));
 		t7_hdmirx_phy_equalize(rx);
 	}
+	if (core_test) {
+		ret = devm_add_action_or_reset(dev, t7_hdmirx_core_stop, rx);
+		if (ret)
+			return ret;
+		ret = t7_hdmirx_core_start(rx);
+		if (ret)
+			return dev_err_probe(dev, ret, "Cannot initialize receiver core\n");
+	}
 	debugfs = debugfs_create_dir(dev_name(dev), NULL);
 	if (IS_ERR(debugfs))
 		return PTR_ERR(debugfs);
@@ -543,7 +747,20 @@ static struct platform_driver t7_hdmirx_driver = {
 		.of_match_table = t7_hdmirx_match,
 	},
 };
-module_platform_driver(t7_hdmirx_driver);
+
+static int __init t7_hdmirx_init(void)
+{
+	/* A faulted VDIN consumer must retain its supplier until reboot. */
+	t7_hdmirx_driver.driver.suppress_bind_attrs = core_test;
+	return platform_driver_register(&t7_hdmirx_driver);
+}
+module_init(t7_hdmirx_init);
+
+static void __exit t7_hdmirx_exit(void)
+{
+	platform_driver_unregister(&t7_hdmirx_driver);
+}
+module_exit(t7_hdmirx_exit);
 
 MODULE_DESCRIPTION("Amlogic T7 HDMI receiver bring-up");
 MODULE_LICENSE("GPL");

@@ -9,7 +9,7 @@ defines = '\n'.join(line for line in source.splitlines() if line.startswith('#de
 types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
                source.index('static int t7_hdmirx_validate_edid')]
 functions = source[source.index('static u32 t7_hdmirx_meter_hz'):
-                   source.index('static int t7_hdmirx_status')]
+                   source.index('static void t7_hdmirx_core_stop')]
 for signature in ('static int t7_hdmirx_validate_edid(',
                   'static int t7_hdmirx_validate_phy_edid('):
     start = source.index(signature)

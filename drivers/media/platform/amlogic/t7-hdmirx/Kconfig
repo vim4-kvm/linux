@@ -7,7 +7,18 @@ config VIDEO_MESON_T7_HDMIRX
 	  Manage the T7 HDMI receiver power domain and clocks, and expose
 	  read-only cable and register status through debugfs. This initial
 	  driver supports resource, cable detection and firmware EDID/DDC/HPD
-	  bring-up, plus an opt-in fixed-rate input PLL trial. Automatic PHY
-	  tuning and VDIN capture require further implementation.
+	  bring-up, plus opt-in fixed-rate PHY and TMDS core initialization.
+	  Automatic PHY tuning and production V4L2 capture need further work;
+	  the separate VDIN experiment can obtain progressive 1080p60 snapshots.
 
 	  To compile this driver as a module, choose M here.
+
+config VIDEO_MESON_T7_VDIN_TEST
+	tristate "Amlogic T7 VDIN snapshot experiment"
+	depends on VIDEO_MESON_T7_HDMIRX
+	depends on OF && HAS_DMA
+	help
+	  Exclusive 1080p60 RGB snapshot experiment for the dedicated VIM4
+	  receiver DTB. Owns the VPU register window while DRM is disabled.
+	  Exposes a read-only debugfs frame after write completion and DMA idle;
+	  this is not a production V4L2 capture interface.
