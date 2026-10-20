@@ -5,7 +5,8 @@
 &periphs_pinctrl {
 	hdmirx_b_detect_pins: hdmirx-b-detect-pins {
 		mux {
-			groups = "hdmirx_b_det";
+			groups = "hdmirx_b_det", "hdmirx_b_hpd",
+				 "hdmirx_b_sda", "hdmirx_b_sck";
 			function = "hdmirx_b";
 			bias-disable;
 		};
