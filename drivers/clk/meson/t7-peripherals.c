@@ -30,6 +30,10 @@
 #define ANAKIN_CLK_CTRL		0xac
 #define MIPI_CSI_PHY_CLK_CTRL	0x10c
 #define MIPI_ISP_CLK_CTRL	0x110
+#define HRX_CLK_CTRL0		0x128
+#define HRX_CLK_CTRL1		0x12c
+#define HRX_CLK_CTRL2		0x130
+#define HRX_CLK_CTRL3		0x134
 #define TS_CLK_CTRL		0x158
 #define MALI_CLK_CTRL		0x15c
 #define ETH_CLK_CTRL		0x164
@@ -929,6 +933,41 @@ static T7_COMP_SEL(pwm_ao_h, PWM_CLK_AO_GH_CTRL, 25, 0x3, t7_pwm_parents);
 static T7_COMP_DIV(pwm_ao_h, PWM_CLK_AO_GH_CTRL, 16, 8);
 static T7_COMP_GATE(pwm_ao_h, PWM_CLK_AO_GH_CTRL, 24, 0);
 
+static const struct clk_parent_data t7_hdmirx_parents[] = {
+	{ .fw_name = "xtal" },
+	{ .fw_name = "fdiv4" },
+	{ .fw_name = "fdiv3" },
+	{ .fw_name = "fdiv5" },
+};
+
+static T7_COMP_SEL(hdmirx_5m, HRX_CLK_CTRL0, 9, 0x3, t7_hdmirx_parents);
+static T7_COMP_DIV(hdmirx_5m, HRX_CLK_CTRL0, 0, 7);
+static T7_COMP_GATE(hdmirx_5m, HRX_CLK_CTRL0, 8, 0);
+
+static T7_COMP_SEL(hdmirx_2m, HRX_CLK_CTRL0, 25, 0x3, t7_hdmirx_parents);
+static T7_COMP_DIV(hdmirx_2m, HRX_CLK_CTRL0, 16, 7);
+static T7_COMP_GATE(hdmirx_2m, HRX_CLK_CTRL0, 24, 0);
+
+static T7_COMP_SEL(hdmirx_cfg, HRX_CLK_CTRL1, 9, 0x3, t7_hdmirx_parents);
+static T7_COMP_DIV(hdmirx_cfg, HRX_CLK_CTRL1, 0, 7);
+static T7_COMP_GATE(hdmirx_cfg, HRX_CLK_CTRL1, 8, 0);
+
+static T7_COMP_SEL(hdmirx_hdcp, HRX_CLK_CTRL1, 25, 0x3, t7_hdmirx_parents);
+static T7_COMP_DIV(hdmirx_hdcp, HRX_CLK_CTRL1, 16, 7);
+static T7_COMP_GATE(hdmirx_hdcp, HRX_CLK_CTRL1, 24, 0);
+
+static T7_COMP_SEL(hdmirx_aud_pll, HRX_CLK_CTRL2, 9, 0x3, t7_hdmirx_parents);
+static T7_COMP_DIV(hdmirx_aud_pll, HRX_CLK_CTRL2, 0, 7);
+static T7_COMP_GATE(hdmirx_aud_pll, HRX_CLK_CTRL2, 8, 0);
+
+static T7_COMP_SEL(hdmirx_acr, HRX_CLK_CTRL2, 25, 0x3, t7_hdmirx_parents);
+static T7_COMP_DIV(hdmirx_acr, HRX_CLK_CTRL2, 16, 7);
+static T7_COMP_GATE(hdmirx_acr, HRX_CLK_CTRL2, 24, 0);
+
+static T7_COMP_SEL(hdmirx_meter, HRX_CLK_CTRL3, 9, 0x3, t7_hdmirx_parents);
+static T7_COMP_DIV(hdmirx_meter, HRX_CLK_CTRL3, 0, 7);
+static T7_COMP_GATE(hdmirx_meter, HRX_CLK_CTRL3, 8, 0);
+
 static const struct clk_parent_data t7_sys_pclk_parents = { .fw_name = "sys" };
 
 #define T7_SYS_PCLK(_name, _reg, _bit, _flags) \
@@ -1243,6 +1282,27 @@ static struct clk_hw *t7_peripherals_hw_clks[] = {
 	[CLKID_SYS_PWM_AB]		= &t7_sys_pwm_ab.hw,
 	[CLKID_SYS_PWM_CD]		= &t7_sys_pwm_cd.hw,
 	[CLKID_SYS_PWM_EF]		= &t7_sys_pwm_ef.hw,
+	[CLKID_HDMIRX_5M_SEL]		= &t7_hdmirx_5m_sel.hw,
+	[CLKID_HDMIRX_5M_DIV]		= &t7_hdmirx_5m_div.hw,
+	[CLKID_HDMIRX_5M]		= &t7_hdmirx_5m.hw,
+	[CLKID_HDMIRX_2M_SEL]		= &t7_hdmirx_2m_sel.hw,
+	[CLKID_HDMIRX_2M_DIV]		= &t7_hdmirx_2m_div.hw,
+	[CLKID_HDMIRX_2M]		= &t7_hdmirx_2m.hw,
+	[CLKID_HDMIRX_CFG_SEL]		= &t7_hdmirx_cfg_sel.hw,
+	[CLKID_HDMIRX_CFG_DIV]		= &t7_hdmirx_cfg_div.hw,
+	[CLKID_HDMIRX_CFG]		= &t7_hdmirx_cfg.hw,
+	[CLKID_HDMIRX_HDCP_SEL]		= &t7_hdmirx_hdcp_sel.hw,
+	[CLKID_HDMIRX_HDCP_DIV]		= &t7_hdmirx_hdcp_div.hw,
+	[CLKID_HDMIRX_HDCP]		= &t7_hdmirx_hdcp.hw,
+	[CLKID_HDMIRX_AUD_PLL_SEL]	= &t7_hdmirx_aud_pll_sel.hw,
+	[CLKID_HDMIRX_AUD_PLL_DIV]	= &t7_hdmirx_aud_pll_div.hw,
+	[CLKID_HDMIRX_AUD_PLL]		= &t7_hdmirx_aud_pll.hw,
+	[CLKID_HDMIRX_ACR_SEL]		= &t7_hdmirx_acr_sel.hw,
+	[CLKID_HDMIRX_ACR_DIV]		= &t7_hdmirx_acr_div.hw,
+	[CLKID_HDMIRX_ACR]		= &t7_hdmirx_acr.hw,
+	[CLKID_HDMIRX_METER_SEL]		= &t7_hdmirx_meter_sel.hw,
+	[CLKID_HDMIRX_METER_DIV]		= &t7_hdmirx_meter_div.hw,
+	[CLKID_HDMIRX_METER]		= &t7_hdmirx_meter.hw,
 };
 
 static const struct meson_clkc_data t7_peripherals_data = {
