@@ -19,3 +19,22 @@
 	pinctrl-names = "default";
 	status = "okay";
 };
+
+/ {
+	vdin_test: video-capture@ff000000 {
+		compatible = "amlogic,t7-vdin-test";
+		reg = <0x0 0xff000000 0x0 0x40000>;
+		interrupts = <GIC_SPI 213 IRQ_TYPE_EDGE_RISING>;
+		power-domains = <&pwrc PWRC_T7_VPU_HDMI_ID>,
+				<&pwrc PWRC_T7_VI_CLK1_ID>, <&pwrc PWRC_T7_VI_CLK2_ID>;
+		clocks = <&clkc_periphs CLKID_SYS_VPU_INTR>,
+			 <&clkc_periphs CLKID_VPU>, <&clkc_periphs CLKID_VAPB>,
+			 <&clkc_periphs CLKID_VPU_CLKB>, <&clkc_periphs CLKID_VDIN_MEAS>;
+		clock-names = "pclk", "vpu", "vapb", "clkb", "measure";
+		amlogic,receiver = <&hdmirx>;
+	};
+};
+
+&vpu {
+	status = "disabled";
+};
