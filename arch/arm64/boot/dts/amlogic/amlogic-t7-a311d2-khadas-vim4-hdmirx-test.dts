@@ -21,6 +21,24 @@
 };
 
 / {
+	wave_test: video-codec@fe310000 {
+		compatible = "amlogic,t7-wave521c";
+		reg = <0x0 0xfe310000 0x0 0x10000>;
+		interrupts = <GIC_SPI 94 IRQ_TYPE_EDGE_RISING>;
+		/* The secure power controller owns the NIC3 AXI bridge reset. */
+		power-domains = <&pwrc PWRC_T7_DOS_WAVE_ID>;
+		clocks = <&clkc_periphs CLKID_SYS_DOS>,
+			 <&clkc_periphs CLKID_VAPB>,
+			 <&clkc_periphs CLKID_WAVE_A>,
+			 <&clkc_periphs CLKID_WAVE_B>,
+			 <&clkc_periphs CLKID_WAVE_C>;
+		clock-names = "pclk", "apb", "axi", "bpu", "vce";
+		assigned-clocks = <&clkc_periphs CLKID_WAVE_A>,
+				  <&clkc_periphs CLKID_WAVE_B>,
+				  <&clkc_periphs CLKID_WAVE_C>;
+		assigned-clock-rates = <666666666>, <666666666>, <666666666>;
+	};
+
 	vdin_test: video-capture@ff000000 {
 		compatible = "amlogic,t7-vdin-test";
 		reg = <0x0 0xff000000 0x0 0x40000>;
