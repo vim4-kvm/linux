@@ -1034,6 +1034,7 @@ static T7_SYS_PCLK(sys_i2c_m_f,		SYS_CLK_EN0_REG2, 3,	0);
 static T7_SYS_PCLK(sys_hdmitx_apb,	SYS_CLK_EN0_REG2, 4,	0);
 static T7_SYS_PCLK(sys_i2c_s_a,		SYS_CLK_EN0_REG2, 5,	0);
 static T7_SYS_PCLK(sys_hdmirx_pclk,	SYS_CLK_EN0_REG2, 8,	0);
+static T7_SYS_PCLK(sys_hdmirx,		SYS_CLK_EN0_REG2, 9,	0);
 static T7_SYS_PCLK(sys_mmc_apb,		SYS_CLK_EN0_REG2, 11,	CLK_IGNORE_UNUSED);
 static T7_SYS_PCLK(sys_mipi_isp_pclk,	SYS_CLK_EN0_REG2, 17,	0);
 static T7_SYS_PCLK(sys_rsa,		SYS_CLK_EN0_REG2, 18,	0);
@@ -1303,6 +1304,7 @@ static struct clk_hw *t7_peripherals_hw_clks[] = {
 	[CLKID_HDMIRX_METER_SEL]		= &t7_hdmirx_meter_sel.hw,
 	[CLKID_HDMIRX_METER_DIV]		= &t7_hdmirx_meter_div.hw,
 	[CLKID_HDMIRX_METER]		= &t7_hdmirx_meter.hw,
+	[CLKID_SYS_HDMIRX]		= &t7_sys_hdmirx.hw,
 };
 
 static const struct meson_clkc_data t7_peripherals_data = {
