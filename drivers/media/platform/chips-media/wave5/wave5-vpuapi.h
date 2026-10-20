@@ -8,6 +8,7 @@
 #ifndef VPUAPI_H_INCLUDED
 #define VPUAPI_H_INCLUDED
 
+#include <linux/atomic.h>
 #include <linux/kfifo.h>
 #include <linux/idr.h>
 #include <linux/genalloc.h>
@@ -621,6 +622,7 @@ struct enc_param {
 	struct enc_code_opt code_option;
 	u64 pts; /* presentation timestamp (PTS) of the input source */
 	bool src_end_flag;
+	bool force_keyframe;
 };
 
 struct enc_output_info {
@@ -845,6 +847,7 @@ struct vpu_instance {
 	unsigned int rc_enable;
 	unsigned int bit_rate;
 	unsigned int encode_aud;
+	atomic_t force_keyframe;
 	struct enc_wave_param enc_param;
 };
 
