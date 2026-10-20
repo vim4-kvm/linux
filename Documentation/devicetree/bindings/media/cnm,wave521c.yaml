@@ -75,11 +75,11 @@ allOf:
             - const: axi
             - const: bpu
             - const: vce
+        resets: false
       required:
         - clock-names
         - interrupts
         - power-domains
-        - resets
     else:
       properties:
         clocks:
