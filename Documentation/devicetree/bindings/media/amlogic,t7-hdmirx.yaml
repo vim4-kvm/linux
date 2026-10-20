@@ -23,11 +23,13 @@ properties:
     items:
       - description: Receiver TOP controls and EDID RAM
       - description: Analog PHY and input PLL
+      - description: Byte-addressed receiver core and timing detector
 
   reg-names:
     items:
       - const: top
       - const: phy
+      - const: cor
 
   clocks:
     maxItems: 6
@@ -67,8 +69,9 @@ examples:
 
     hdmi-receiver@fe398000 {
         compatible = "amlogic,t7-hdmirx";
-        reg = <0xfe398000 0x4000>, <0xfe39c000 0x50>;
-        reg-names = "top", "phy";
+        reg = <0xfe398000 0x4000>, <0xfe39c000 0x50>,
+              <0xfe3a0000 0x8000>;
+        reg-names = "top", "phy", "cor";
         power-domains = <&pwrc PWRC_T7_HDMIRX_ID>;
         clocks = <&clkc_periphs CLKID_SYS_HDMIRX_PCLK>,
                  <&clkc_periphs CLKID_SYS_HDMIRX>,
