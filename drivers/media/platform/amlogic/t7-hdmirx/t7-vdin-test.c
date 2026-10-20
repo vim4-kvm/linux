@@ -6,6 +6,7 @@
 #include <linux/completion.h>
 #include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
+#include <linux/dma-buf.h>
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/kref.h>
@@ -30,6 +31,10 @@
 static bool nv12;
 module_param(nv12, bool, 0400);
 MODULE_PARM_DESC(nv12, "Capture BT.709 limited-range NV12 instead of RGB24");
+
+static bool direct_dma;
+module_param(direct_dma, bool, 0400);
+MODULE_PARM_DESC(direct_dma, "Capture into leased coherent vb2 buffers without a CPU frame copy");
 
 /* VCBUS word indices; the accessors alone convert them to byte offsets. */
 #define VDIN_COM_CTRL0		0x1202
@@ -80,11 +85,15 @@ struct t7_vdin_slot {
 	enum t7_vdin_slot_state state;
 	u64 timestamp;
 	u32 sequence;
+	struct t7_vdin_buffer *buffer;
 };
 
 struct t7_vdin_buffer {
 	struct vb2_v4l2_buffer vb;
 	struct list_head list;
+	struct dma_buf *lease;
+	dma_addr_t dma;
+	bool hardware_used;
 };
 
 struct t7_vdin_snapshot {
@@ -96,6 +105,7 @@ struct t7_vdin {
 	unsigned int width, height, stride, frame_size, allocation_size;
 	u32 pixel_format;
 	bool nv12;
+	bool direct_dma;
 	struct kref ref;
 	struct device *dev;
 	struct device *receiver;
@@ -135,6 +145,7 @@ struct t7_vdin {
 	unsigned int active_slot;
 	u32 ring_sequence;
 	u32 ring_pauses;
+	u64 copied_bytes;
 };
 
 static u32 t7_vdin_read(struct t7_vdin *vdin, u32 reg)
@@ -152,15 +163,28 @@ static void t7_vdin_update(struct t7_vdin *vdin, u32 reg, u32 mask, u32 value)
 	t7_vdin_write(vdin, reg, (t7_vdin_read(vdin, reg) & ~mask) | (value & mask));
 }
 
+static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin);
+
 /* Caller holds irq_lock and has proved that no request targets the old slot. */
 static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
 {
+	struct t7_vdin_slot *slot = &vdin->slots[index];
+	dma_addr_t address = slot->dma;
+
+	if (vdin->direct_dma) {
+		if (!slot->buffer)
+			slot->buffer = t7_vdin_next_buffer(vdin);
+		if (!slot->buffer)
+			return;
+		slot->buffer->hardware_used = true;
+		address = slot->buffer->dma;
+	}
 	vdin->slots[index].state = VDIN_SLOT_WRITING;
 	vdin->active_slot = index;
-	t7_vdin_write(vdin, VDIN_WR_BADDR, vdin->slots[index].dma >> 4);
+	t7_vdin_write(vdin, VDIN_WR_BADDR, address >> 4);
 	if (vdin->nv12)
 		t7_vdin_write(vdin, VDIN_WR_CHROMA,
-			      (vdin->slots[index].dma + vdin->stride * vdin->height) >> 4);
+			      (address + vdin->stride * vdin->height) >> 4);
 	vdin->dma_idle = false;
 	vdin->ring_running = true;
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR,
@@ -205,7 +229,7 @@ static void t7_vdin_ring_done(struct t7_vdin *vdin)
 		next = t7_vdin_ring_free_slot(vdin);
 		if (next >= 0)
 			t7_vdin_ring_arm(vdin, next);
-		else
+		if (!vdin->ring_running)
 			vdin->ring_pauses++;
 	}
 	if (!vdin->ring_running)
@@ -472,6 +496,7 @@ static void t7_vdin_ring_begin(struct t7_vdin *vdin)
 	vdin->ring_discard = true;
 	vdin->ring_sequence = 0;
 	vdin->ring_pauses = 0;
+	vdin->copied_bytes = 0;
 	vdin->frame_irqs = 0;
 	t7_vdin_configure(vdin);
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_DONE_CLEAR, VDIN_DONE_CLEAR);
@@ -543,6 +568,8 @@ static void t7_vdin_ring_release(struct t7_vdin *vdin, struct t7_vdin_slot *slot
 	unsigned long flags;
 
 	spin_lock_irqsave(&vdin->irq_lock, flags);
+	if (vdin->direct_dma)
+		slot->buffer = NULL;
 	slot->state = VDIN_SLOT_FREE;
 	if (!vdin->ring_running && !vdin->ring_stopping && !vdin->ring_error &&
 	    !kthread_should_stop()) {
@@ -567,8 +594,10 @@ static int t7_vdin_thread(void *data)
 		ready = wait_event_interruptible_timeout(vdin->buffer_wait,
 							 kthread_should_stop() ||
 							 READ_ONCE(vdin->ring_error) ||
-							 (t7_vdin_has_buffer(vdin) &&
-							  t7_vdin_ring_ready(vdin)),
+							 (vdin->direct_dma ?
+							  (t7_vdin_ring_ready(vdin) ||
+							   (!READ_ONCE(vdin->ring_running) && t7_vdin_has_buffer(vdin))) :
+							  (t7_vdin_has_buffer(vdin) && t7_vdin_ring_ready(vdin))),
 							 msecs_to_jiffies(1000));
 		if (kthread_should_stop())
 			break;
@@ -577,23 +606,44 @@ static int t7_vdin_thread(void *data)
 			break;
 		}
 		ret = READ_ONCE(vdin->ring_error);
-		if (!ready && t7_vdin_has_buffer(vdin))
+		if (!ready && (t7_vdin_has_buffer(vdin) ||
+			       (vdin->direct_dma && READ_ONCE(vdin->ring_running))))
 			ret = -ETIMEDOUT;
 		if (ret)
 			break;
 		if (!ready)
 			continue;
 		slot = t7_vdin_ring_take(vdin);
-		if (!slot)
+		if (!slot) {
+			if (vdin->direct_dma) {
+				unsigned long flags;
+				int next;
+
+				spin_lock_irqsave(&vdin->irq_lock, flags);
+				next = t7_vdin_ring_free_slot(vdin);
+				if (next >= 0 && !vdin->ring_running && !vdin->ring_stopping &&
+				    !vdin->ring_error) {
+					vdin->ring_discard = true;
+					t7_vdin_ring_arm(vdin, next);
+				}
+				spin_unlock_irqrestore(&vdin->irq_lock, flags);
+			}
 			continue;
-		buffer = t7_vdin_next_buffer(vdin);
+		}
+		buffer = vdin->direct_dma ? slot->buffer : t7_vdin_next_buffer(vdin);
 		mutex_lock(&vdin->lock);
 		ret = t7_hdmirx_check_video_now(vdin->receiver);
-		dma_sync_single_for_cpu(vdin->dev, slot->dma, vdin->frame_size, DMA_FROM_DEVICE);
+		if (!vdin->direct_dma)
+			dma_sync_single_for_cpu(vdin->dev, slot->dma, vdin->frame_size, DMA_FROM_DEVICE);
 		if (!ret) {
-			/* Hardware never addresses vb2 memory, even on a stop timeout. */
-			memcpy(vb2_plane_vaddr(&buffer->vb.vb2_buf, 0),
-			       slot->data, vdin->frame_size);
+			if (vdin->direct_dma) {
+				/* The IRQ proved final AXI completion before publishing READY. */
+				dma_rmb();
+			} else {
+				memcpy(vb2_plane_vaddr(&buffer->vb.vb2_buf, 0),
+				       slot->data, vdin->frame_size);
+				vdin->copied_bytes += vdin->frame_size;
+			}
 			/* Publish CPU writes to the coherent output before handing it off. */
 			dma_wmb();
 			ret = t7_hdmirx_check_video_now(vdin->receiver);
@@ -601,7 +651,8 @@ static int t7_vdin_thread(void *data)
 			buffer->vb.sequence = slot->sequence;
 			buffer->vb.field = V4L2_FIELD_NONE;
 		}
-		dma_sync_single_for_device(vdin->dev, slot->dma, vdin->frame_size, DMA_FROM_DEVICE);
+		if (!vdin->direct_dma)
+			dma_sync_single_for_device(vdin->dev, slot->dma, vdin->frame_size, DMA_FROM_DEVICE);
 		if (ret) {
 			unsigned long flags;
 
@@ -618,6 +669,21 @@ static int t7_vdin_thread(void *data)
 	}
 	if (t7_vdin_ring_stop(vdin))
 		ret = -EIO;
+	if (vdin->direct_dma) {
+		unsigned int i;
+
+		/* STREAMOFF joins us before vb2 may destroy its buffer objects. On
+		 * a stop fault, buf_cleanup retains their pre-acquired DMA leases.
+		 */
+		for (i = 0; i < VDIN_DMA_SLOTS; i++) {
+			struct t7_vdin_buffer *buffer = vdin->slots[i].buffer;
+
+			if (buffer) {
+				vdin->slots[i].buffer = NULL;
+				vb2_buffer_done(&buffer->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+			}
+		}
+	}
 	if (ret) {
 		vb2_queue_error(&vdin->queue);
 		t7_vdin_return_buffers(vdin, VB2_BUF_STATE_ERROR);
@@ -638,6 +704,42 @@ static int t7_vdin_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
 	*planes = 1;
 	sizes[0] = vdin->allocation_size;
 	return 0;
+}
+
+static int t7_vdin_buffer_init(struct vb2_buffer *vb)
+{
+	struct t7_vdin *vdin = vb2_get_drv_priv(vb->vb2_queue);
+	struct t7_vdin_buffer *buffer = container_of(to_vb2_v4l2_buffer(vb),
+						   struct t7_vdin_buffer, vb);
+
+	if (!vdin->direct_dma)
+		return 0;
+	/* Acquire before any IRQ can use the address. This independent allocator
+	 * reference survives STREAMOFF, orphaned mappings and REQBUFS(0).
+	 */
+	buffer->lease = vb->vb2_queue->mem_ops->get_dmabuf(vb, vb->planes[0].mem_priv, O_RDWR);
+	if (IS_ERR_OR_NULL(buffer->lease)) {
+		buffer->lease = NULL;
+		return -ENOMEM;
+	}
+	buffer->dma = vb2_dma_contig_plane_dma_addr(vb, 0);
+	return 0;
+}
+
+static void t7_vdin_buffer_cleanup(struct vb2_buffer *vb)
+{
+	struct t7_vdin *vdin = vb2_get_drv_priv(vb->vb2_queue);
+	struct t7_vdin_buffer *buffer = container_of(to_vb2_v4l2_buffer(vb),
+						   struct t7_vdin_buffer, vb);
+
+	/* Never free/reallocate memory a failed-stop MIF might still address.
+	 * The existing fault path pins the module, clocks and private allocations;
+	 * retain used direct buffers too, until hardware reboot. ERROR contents are
+	 * invalid and the faulted queue cannot restart. Unused buffers may be freed.
+	 */
+	if (buffer->lease && !(vdin->faulted && buffer->hardware_used))
+		dma_buf_put(buffer->lease);
+	buffer->lease = NULL;
 }
 
 static int t7_vdin_buffer_prepare(struct vb2_buffer *vb)
@@ -700,6 +802,8 @@ static void t7_vdin_stop_streaming(struct vb2_queue *queue)
 
 static const struct vb2_ops t7_vdin_queue_ops = {
 	.queue_setup = t7_vdin_queue_setup,
+	.buf_init = t7_vdin_buffer_init,
+	.buf_cleanup = t7_vdin_buffer_cleanup,
 	.buf_prepare = t7_vdin_buffer_prepare,
 	.buf_queue = t7_vdin_buffer_queue,
 	.start_streaming = t7_vdin_start_streaming,
@@ -886,6 +990,8 @@ static int t7_vdin_status(struct seq_file *s, void *unused)
 	seq_printf(s, "frame_irqs: %u\n", vdin->frame_irqs);
 	seq_printf(s, "faulted: %u\n", vdin->faulted);
 	seq_printf(s, "dma_idle: %u\n", vdin->dma_idle);
+	seq_printf(s, "direct_dma: %u\n", vdin->direct_dma);
+	seq_printf(s, "stream_copy_bytes: %llu\n", READ_ONCE(vdin->copied_bytes));
 	seq_printf(s, "stream_frames: %u\n", vdin->ring_sequence);
 	seq_printf(s, "stream_pauses: %u\n", vdin->ring_pauses);
 	seq_printf(s, "stream_error: %d\n", vdin->ring_error);
@@ -961,6 +1067,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	if (!vdin)
 		return -ENOMEM;
 	kref_init(&vdin->ref);
+	vdin->direct_dma = direct_dma;
 	ret = devm_add_action_or_reset(dev, t7_vdin_put, vdin);
 	if (ret)
 		return ret;
@@ -1107,3 +1214,4 @@ module_platform_driver(t7_vdin_driver);
 
 MODULE_DESCRIPTION("Amlogic T7 VDIN0 capture experiment");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("DMA_BUF");
