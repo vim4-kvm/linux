@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
-/* Exclusive T7 VDIN0 raw snapshot experiment; DRM must remain disabled. */
+/* Exclusive T7 VDIN0 capture experiment; DRM must remain disabled. */
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
@@ -8,6 +8,8 @@
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
+#include <linux/kref.h>
+#include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -17,6 +19,11 @@
 #include <linux/pm_runtime.h>
 #include <linux/seq_file.h>
 #include <linux/vmalloc.h>
+
+#include <media/v4l2-device.h>
+#include <media/v4l2-fh.h>
+#include <media/v4l2-ioctl.h>
+#include <media/videobuf2-vmalloc.h>
 
 #include "t7-hdmirx.h"
 
@@ -57,7 +64,13 @@
 #define VDIN_STRIDE		(VDIN_WIDTH * 3)
 #define VDIN_FRAME_SIZE		(VDIN_STRIDE * VDIN_HEIGHT)
 
+struct t7_vdin_buffer {
+	struct vb2_v4l2_buffer vb;
+	struct list_head list;
+};
+
 struct t7_vdin {
+	struct kref ref;
 	struct device *dev;
 	struct device *receiver;
 	struct device *domains[3];
@@ -75,6 +88,17 @@ struct t7_vdin {
 	void *frame;
 	dma_addr_t frame_dma;
 	bool memory_on;
+	u64 frame_timestamp;
+	struct v4l2_device v4l2;
+	struct video_device video;
+	struct vb2_queue queue;
+	struct mutex video_lock; /* V4L2 ioctls; never acquired by the worker. */
+	spinlock_t queue_lock;
+	struct list_head queued;
+	wait_queue_head_t buffer_wait;
+	struct task_struct *thread;
+	bool streaming; /* Protected by lock, including debugfs exclusion. */
+	u32 sequence;
 };
 
 static u32 t7_vdin_read(struct t7_vdin *vdin, u32 reg)
@@ -106,6 +130,7 @@ static irqreturn_t t7_vdin_write_done(int irq, void *data)
 		t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR, 0);
 		t7_vdin_read(vdin, VDIN_WR_CTRL);
 		vdin->armed = false;
+		vdin->frame_timestamp = ktime_get_ns();
 		complete(&vdin->done);
 	}
 	spin_unlock_irqrestore(&vdin->irq_lock, flags);
@@ -235,7 +260,7 @@ static int t7_vdin_frame_open(struct inode *inode, struct file *file)
 	ret = mutex_lock_interruptible(&vdin->lock);
 	if (ret)
 		goto free_snapshot;
-	ret = t7_vdin_capture(vdin);
+	ret = vdin->streaming ? -EBUSY : t7_vdin_capture(vdin);
 	if (!ret)
 		memcpy(snapshot, vdin->frame, VDIN_FRAME_SIZE);
 	mutex_unlock(&vdin->lock);
@@ -270,6 +295,319 @@ static const struct file_operations t7_vdin_frame_fops = {
 	.read = t7_vdin_frame_read,
 	.release = t7_vdin_frame_release,
 };
+
+static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)
+{
+	struct t7_vdin_buffer *buffer = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vdin->queue_lock, flags);
+	if (!list_empty(&vdin->queued)) {
+		buffer = list_first_entry(&vdin->queued, struct t7_vdin_buffer, list);
+		list_del(&buffer->list);
+	}
+	spin_unlock_irqrestore(&vdin->queue_lock, flags);
+	return buffer;
+}
+
+static bool t7_vdin_has_buffer(struct t7_vdin *vdin)
+{
+	unsigned long flags;
+	bool ready;
+
+	spin_lock_irqsave(&vdin->queue_lock, flags);
+	ready = !list_empty(&vdin->queued);
+	spin_unlock_irqrestore(&vdin->queue_lock, flags);
+	return ready;
+}
+
+static void t7_vdin_return_buffers(struct t7_vdin *vdin, enum vb2_buffer_state state)
+{
+	struct t7_vdin_buffer *buffer;
+
+	while ((buffer = t7_vdin_next_buffer(vdin)))
+		vb2_buffer_done(&buffer->vb.vb2_buf, state);
+}
+
+static int t7_vdin_thread(void *data)
+{
+	struct t7_vdin *vdin = data;
+
+	while (!kthread_should_stop()) {
+		struct t7_vdin_buffer *buffer;
+		int ret;
+
+		wait_event_interruptible(vdin->buffer_wait,
+					 kthread_should_stop() || t7_vdin_has_buffer(vdin));
+		if (kthread_should_stop())
+			break;
+		buffer = t7_vdin_next_buffer(vdin);
+		if (!buffer)
+			continue;
+		mutex_lock(&vdin->lock);
+		ret = t7_vdin_capture(vdin);
+		if (!ret) {
+			/* Hardware never addresses vb2 memory, even on a stop timeout. */
+			memcpy(vb2_plane_vaddr(&buffer->vb.vb2_buf, 0),
+			       vdin->frame, VDIN_FRAME_SIZE);
+			buffer->vb.vb2_buf.timestamp = vdin->frame_timestamp;
+			buffer->vb.sequence = vdin->sequence++;
+			buffer->vb.field = V4L2_FIELD_NONE;
+		}
+		mutex_unlock(&vdin->lock);
+		vb2_buffer_done(&buffer->vb.vb2_buf,
+				ret ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
+		if (ret) {
+			vb2_queue_error(&vdin->queue);
+			t7_vdin_return_buffers(vdin, VB2_BUF_STATE_ERROR);
+			/* Keep the task alive until STREAMOFF joins it. */
+			wait_event_interruptible(vdin->buffer_wait, kthread_should_stop());
+			break;
+		}
+	}
+	return 0;
+}
+
+static int t7_vdin_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
+			       unsigned int *planes, unsigned int sizes[],
+			       struct device *alloc_devs[])
+{
+	if (*planes)
+		return *planes == 1 && sizes[0] >= VDIN_FRAME_SIZE ? 0 : -EINVAL;
+	*planes = 1;
+	sizes[0] = VDIN_FRAME_SIZE;
+	return 0;
+}
+
+static int t7_vdin_buffer_prepare(struct vb2_buffer *vb)
+{
+	if (vb2_plane_size(vb, 0) < VDIN_FRAME_SIZE)
+		return -EINVAL;
+	vb2_set_plane_payload(vb, 0, VDIN_FRAME_SIZE);
+	return 0;
+}
+
+static void t7_vdin_buffer_queue(struct vb2_buffer *vb)
+{
+	struct t7_vdin *vdin = vb2_get_drv_priv(vb->vb2_queue);
+	struct t7_vdin_buffer *buffer = container_of(to_vb2_v4l2_buffer(vb),
+						   struct t7_vdin_buffer, vb);
+	unsigned long flags;
+
+	spin_lock_irqsave(&vdin->queue_lock, flags);
+	list_add_tail(&buffer->list, &vdin->queued);
+	spin_unlock_irqrestore(&vdin->queue_lock, flags);
+	wake_up(&vdin->buffer_wait);
+}
+
+static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
+{
+	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
+	int ret;
+
+	mutex_lock(&vdin->lock);
+	ret = vdin->faulted ? -EIO : t7_hdmirx_check_1080p(vdin->receiver);
+	if (!ret) {
+		vdin->streaming = true;
+		vdin->sequence = 0;
+		vdin->thread = kthread_run(t7_vdin_thread, vdin, "t7-vdin-capture");
+		if (IS_ERR(vdin->thread)) {
+			ret = PTR_ERR(vdin->thread);
+			vdin->thread = NULL;
+			vdin->streaming = false;
+		}
+	}
+	mutex_unlock(&vdin->lock);
+	if (ret)
+		t7_vdin_return_buffers(vdin, VB2_BUF_STATE_QUEUED);
+	return ret;
+}
+
+static void t7_vdin_stop_streaming(struct vb2_queue *queue)
+{
+	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
+
+	/* Finish the bounded capture and CPU copy before returning any buffer. */
+	kthread_stop(vdin->thread);
+	vdin->thread = NULL;
+	t7_vdin_return_buffers(vdin, VB2_BUF_STATE_ERROR);
+	mutex_lock(&vdin->lock);
+	vdin->streaming = false;
+	mutex_unlock(&vdin->lock);
+}
+
+static const struct vb2_ops t7_vdin_queue_ops = {
+	.queue_setup = t7_vdin_queue_setup,
+	.buf_prepare = t7_vdin_buffer_prepare,
+	.buf_queue = t7_vdin_buffer_queue,
+	.start_streaming = t7_vdin_start_streaming,
+	.stop_streaming = t7_vdin_stop_streaming,
+};
+
+static int t7_vdin_querycap(struct file *file, void *priv, struct v4l2_capability *cap)
+{
+	strscpy(cap->driver, "t7-vdin-test", sizeof(cap->driver));
+	strscpy(cap->card, "T7 HDMI capture experiment", sizeof(cap->card));
+	return 0;
+}
+
+static int t7_vdin_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *fmt)
+{
+	if (fmt->index)
+		return -EINVAL;
+	fmt->pixelformat = V4L2_PIX_FMT_RGB24;
+	return 0;
+}
+
+static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
+{
+	fmt->fmt.pix = (struct v4l2_pix_format) {
+		.width = VDIN_WIDTH,
+		.height = VDIN_HEIGHT,
+		.pixelformat = V4L2_PIX_FMT_RGB24,
+		.field = V4L2_FIELD_NONE,
+		.bytesperline = VDIN_STRIDE,
+		.sizeimage = VDIN_FRAME_SIZE,
+		.colorspace = V4L2_COLORSPACE_SRGB,
+		.xfer_func = V4L2_XFER_FUNC_SRGB,
+		.quantization = V4L2_QUANTIZATION_FULL_RANGE,
+	};
+	return 0;
+}
+
+static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
+{
+	struct t7_vdin *vdin = video_drvdata(file);
+
+	if (vb2_is_busy(&vdin->queue))
+		return -EBUSY;
+	return t7_vdin_get_fmt(file, priv, fmt);
+}
+
+static int t7_vdin_enum_input(struct file *file, void *priv, struct v4l2_input *input)
+{
+	struct t7_vdin *vdin = video_drvdata(file);
+
+	if (input->index)
+		return -EINVAL;
+	strscpy(input->name, "HDMI", sizeof(input->name));
+	input->type = V4L2_INPUT_TYPE_CAMERA;
+	input->capabilities = 0;
+	if (t7_hdmirx_check_1080p(vdin->receiver))
+		input->status = V4L2_IN_ST_NO_SYNC;
+	return 0;
+}
+
+static int t7_vdin_get_input(struct file *file, void *priv, unsigned int *input)
+{
+	*input = 0;
+	return 0;
+}
+
+static int t7_vdin_set_input(struct file *file, void *priv, unsigned int input)
+{
+	return input ? -EINVAL : 0;
+}
+
+static const struct v4l2_ioctl_ops t7_vdin_ioctl_ops = {
+	.vidioc_querycap = t7_vdin_querycap,
+	.vidioc_enum_fmt_vid_cap = t7_vdin_enum_fmt,
+	.vidioc_g_fmt_vid_cap = t7_vdin_get_fmt,
+	.vidioc_try_fmt_vid_cap = t7_vdin_get_fmt,
+	.vidioc_s_fmt_vid_cap = t7_vdin_set_fmt,
+	.vidioc_enum_input = t7_vdin_enum_input,
+	.vidioc_g_input = t7_vdin_get_input,
+	.vidioc_s_input = t7_vdin_set_input,
+	.vidioc_reqbufs = vb2_ioctl_reqbufs,
+	.vidioc_create_bufs = vb2_ioctl_create_bufs,
+	.vidioc_prepare_buf = vb2_ioctl_prepare_buf,
+	.vidioc_querybuf = vb2_ioctl_querybuf,
+	.vidioc_qbuf = vb2_ioctl_qbuf,
+	.vidioc_dqbuf = vb2_ioctl_dqbuf,
+	.vidioc_streamon = vb2_ioctl_streamon,
+	.vidioc_streamoff = vb2_ioctl_streamoff,
+};
+
+static const struct v4l2_file_operations t7_vdin_video_fops = {
+	.owner = THIS_MODULE,
+	.open = v4l2_fh_open,
+	.release = vb2_fop_release,
+	.poll = vb2_fop_poll,
+	.mmap = vb2_fop_mmap,
+	.unlocked_ioctl = video_ioctl2,
+};
+
+static void t7_vdin_release(struct kref *ref)
+{
+	kfree(container_of(ref, struct t7_vdin, ref));
+}
+
+static void t7_vdin_put(void *data)
+{
+	struct t7_vdin *vdin = data;
+
+	kref_put(&vdin->ref, t7_vdin_release);
+}
+
+static void t7_vdin_video_release(struct video_device *video)
+{
+	t7_vdin_put(video_get_drvdata(video));
+}
+
+static void t7_vdin_video_unregister(void *data)
+{
+	struct t7_vdin *vdin = data;
+
+	vb2_video_unregister_device(&vdin->video);
+	v4l2_device_unregister(&vdin->v4l2);
+}
+
+static int t7_vdin_video_register(struct t7_vdin *vdin)
+{
+	struct vb2_queue *queue = &vdin->queue;
+	struct video_device *video = &vdin->video;
+	int ret;
+
+	ret = v4l2_device_register(vdin->dev, &vdin->v4l2);
+	if (ret)
+		return ret;
+	queue->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	queue->io_modes = VB2_MMAP;
+	queue->drv_priv = vdin;
+	queue->buf_struct_size = sizeof(struct t7_vdin_buffer);
+	queue->ops = &t7_vdin_queue_ops;
+	queue->mem_ops = &vb2_vmalloc_memops;
+	queue->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC |
+				 V4L2_BUF_FLAG_TSTAMP_SRC_EOF;
+	queue->min_queued_buffers = 2;
+	queue->lock = &vdin->video_lock;
+	queue->dev = vdin->dev;
+	ret = vb2_queue_init(queue);
+	if (ret)
+		goto unregister_v4l2;
+	strscpy(video->name, "t7-vdin-test", sizeof(video->name));
+	video->v4l2_dev = &vdin->v4l2;
+	video->fops = &t7_vdin_video_fops;
+	video->ioctl_ops = &t7_vdin_ioctl_ops;
+	video->release = t7_vdin_video_release;
+	video->lock = &vdin->video_lock;
+	video->queue = queue;
+	video->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
+	video_set_drvdata(video, vdin);
+	/* Open files can outlive platform removal; vb2 memory has no DMA owner. */
+	kref_get(&vdin->ref);
+	ret = video_register_device(video, VFL_TYPE_VIDEO, -1);
+	if (ret) {
+		t7_vdin_put(vdin);
+		vb2_queue_release(queue);
+		goto unregister_v4l2;
+	}
+	return devm_add_action_or_reset(vdin->dev, t7_vdin_video_unregister, vdin);
+
+unregister_v4l2:
+	v4l2_device_unregister(&vdin->v4l2);
+	return ret;
+}
 
 static int t7_vdin_status(struct seq_file *s, void *unused)
 {
@@ -340,12 +678,20 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	unsigned int i;
 	int ret;
 
-	vdin = devm_kzalloc(dev, sizeof(*vdin), GFP_KERNEL);
+	vdin = kzalloc_obj(*vdin);
 	if (!vdin)
 		return -ENOMEM;
+	kref_init(&vdin->ref);
+	ret = devm_add_action_or_reset(dev, t7_vdin_put, vdin);
+	if (ret)
+		return ret;
 	vdin->dev = dev;
 	mutex_init(&vdin->lock);
+	mutex_init(&vdin->video_lock);
 	spin_lock_init(&vdin->irq_lock);
+	spin_lock_init(&vdin->queue_lock);
+	INIT_LIST_HEAD(&vdin->queued);
+	init_waitqueue_head(&vdin->buffer_wait);
 	init_completion(&vdin->done);
 	platform_set_drvdata(pdev, vdin);
 	node = of_parse_phandle(dev->of_node, "amlogic,receiver", 0);
@@ -434,7 +780,10 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	ret = devm_add_action_or_reset(dev, t7_vdin_debugfs_remove, debugfs);
 	if (ret)
 		return ret;
-	dev_info(dev, "exclusive 1080p snapshot ready; production capture not implemented\n");
+	ret = t7_vdin_video_register(vdin);
+	if (ret)
+		return ret;
+	dev_info(dev, "exclusive 1080p RGB24 capture ready at /dev/video%d\n", vdin->video.num);
 	return 0;
 }
 
@@ -454,5 +803,5 @@ static struct platform_driver t7_vdin_driver = {
 };
 module_platform_driver(t7_vdin_driver);
 
-MODULE_DESCRIPTION("Amlogic T7 VDIN0 snapshot experiment");
+MODULE_DESCRIPTION("Amlogic T7 VDIN0 capture experiment");
 MODULE_LICENSE("GPL");
