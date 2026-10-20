@@ -37,7 +37,7 @@ properties:
 
   clocks:
     minItems: 6
-    maxItems: 8
+    maxItems: 9
 
   clock-names:
     minItems: 6
@@ -50,6 +50,7 @@ properties:
       - const: 5m
       - const: audio-pll
       - const: frhdmirx
+      - const: acr
 
   "#sound-dai-cells":
     const: 0
@@ -81,9 +82,9 @@ allOf:
         reg-names:
           minItems: 4
         clocks:
-          minItems: 8
+          minItems: 9
         clock-names:
-          minItems: 8
+          minItems: 9
     else:
       properties:
         reg:
