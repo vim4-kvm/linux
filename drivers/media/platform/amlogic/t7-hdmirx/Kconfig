@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_MESON_T7_HDMIRX
+	tristate "Amlogic T7 HDMI receiver bring-up"
+	depends on ARCH_MESON || COMPILE_TEST
+	depends on PM && DEBUG_FS
+	help
+	  Manage the T7 HDMI receiver power domain and clocks, and expose
+	  read-only cable and register status through debugfs. This initial
+	  driver supports resource and cable detection bring-up. PHY tuning,
+	  EDID/HPD programming and VDIN capture require further implementation.
+
+	  To compile this driver as a module, choose M here.
