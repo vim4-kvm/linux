@@ -100,7 +100,9 @@ int main(void)
     assert(t7_hdmirx_core_start(&rx) == -EIO);
     t7_hdmirx_core_stop(&rx); readback_error = false;
     assert(!t7_hdmirx_core_start(&rx)); timing();
-    assert(pcs_resets == 2 && !readl(top + T7_RX_TOP_SW_RESET));
+    assert(!pcs_resets);
+    t7_hdmirx_reset_pcs(&rx);
+    assert(pcs_resets == 1 && !readl(top + T7_RX_TOP_SW_RESET));
     assert(rx.core_active && !t7_hdmirx_check_1080p(&dev));
     core[T7_RX_COR_COLOR_DEPTH] = 5;
     assert(t7_hdmirx_check_1080p(&dev) == -ERANGE);
@@ -121,6 +123,14 @@ int main(void)
     t7_hdmirx_core_stop(&rx); before = writes;
     assert(!rx.core_active && !core[0x20a3] && !core[0x20a4] && !core[0x20a5]);
     t7_hdmirx_core_stop(&rx); assert(writes == before);
+    core[T7_RX_COR_SYS_CTRL] = 3;
+    core[T7_RX_COR_PHY_CLOCK1] = 255;
+    core[T7_RX_COR_PHY_CLOCK2] = 63;
+    core[T7_RX_COR_PHY_CLOCK3] = 1;
+    assert(!t7_hdmirx_core_start(&rx));
+    t7_hdmirx_core_stop(&rx);
+    assert(core[T7_RX_COR_SYS_CTRL] == 3 && core[T7_RX_COR_PHY_CLOCK1] == 255);
+    assert(core[T7_RX_COR_PHY_CLOCK2] == 63 && core[T7_RX_COR_PHY_CLOCK3] == 1);
     puts("Core access, stable progressive timing, signal loss and idempotent cleanup passed");
 }
 '''

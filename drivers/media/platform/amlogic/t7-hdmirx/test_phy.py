@@ -38,7 +38,7 @@ struct debugfs_blob_wrapper { void *data; unsigned long size; };
 mmio = r'''
 static u8 top[0x4000], phy[0x50];
 static struct t7_hdmirx receiver;
-static bool lock_pll, jitter;
+static bool lock_pll, jitter, delayed_source;
 static unsigned int delays, meter_reads, pll_attempts, writes;
 static u32 raw_read(void *address)
 {
@@ -57,6 +57,7 @@ static u32 readl(void *address)
     assert(bounded(address));
     if (address == top + T7_RX_TOP_METER_CABLE_STAT) {
         meter_reads++;
+        if (delayed_source && meter_reads <= 200) return 0;
         if (jitter) return BIT(31) | (meter_reads % 2 ? 50500 : 50800);
     }
     if (address == phy + T7_RX_PHY_APLL0 && lock_pll &&
@@ -88,7 +89,7 @@ static void reset(void)
     memset(top, 0, sizeof(top));
     memset(phy, 0, sizeof(phy));
     receiver = (struct t7_hdmirx) { .top = top, .phy = phy, .port = 1 };
-    lock_pll = jitter = false;
+    lock_pll = jitter = delayed_source = false;
     delays = meter_reads = pll_attempts = writes = 0;
     writel(BIT(21) | BIT(1), top + T7_RX_TOP_HPD_PWR5V);
 }
@@ -144,7 +145,11 @@ int main(void)
     /* A valid-looking but unstable input must never reach PLL programming. */
     reset(); jitter = true;
     assert(t7_hdmirx_wait_cable(&receiver, 24000000) == -ETIMEDOUT);
-    assert(meter_reads == 150 && !pll_attempts);
+    assert(meter_reads == 500 && !pll_attempts);
+    /* Source reconnection may take more than three seconds after HPD. */
+    reset(); delayed_source = true;
+    writel(BIT(31) | 50688, top + T7_RX_TOP_METER_CABLE_STAT);
+    assert(!t7_hdmirx_wait_cable(&receiver, 24000000) && meter_reads == 204);
     reset(); writel(BIT(31) | 101376, top + T7_RX_TOP_METER_CABLE_STAT);
     assert(t7_hdmirx_wait_cable(&receiver, 24000000) == -ETIMEDOUT);
     assert(receiver.cable_hz == 297000000 && !pll_attempts);

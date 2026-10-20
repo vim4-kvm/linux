@@ -150,6 +150,10 @@ struct t7_hdmirx {
 	bool phy_active;
 	bool core_active;
 	unsigned long core_smc_result;
+	u8 core_saved_aon_reset;
+	u8 core_saved_power;
+	u8 core_saved_sys;
+	u8 core_saved_phyck[3];
 	u32 phy_top_saved[ARRAY_SIZE(t7_hdmirx_phy_top_regs)];
 	u32 cable_hz;
 	u8 edid[T7_RX_EDID_CAPACITY];
@@ -358,7 +362,8 @@ static int t7_hdmirx_wait_cable(struct t7_hdmirx *rx, unsigned long reference_hz
 	u32 previous = 0, sample_hz, status;
 	unsigned int i, stable = 0;
 
-	for (i = 0; i < 150; i++) {
+	/* EDID reconnects on the source can outlast the initial three seconds. */
+	for (i = 0; i < 500; i++) {
 		if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)))
 			return -ENOLINK;
 		status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
@@ -437,12 +442,25 @@ static void t7_hdmirx_core_stop(void *data)
 	writeb(0x1a, rx->cor + 0x1005);
 	writeb(1, rx->cor + T7_RX_COR_AON_RESET);
 	writeb(1, rx->cor + T7_RX_COR_POWER_CTRL);
-	writeb(0, rx->cor + T7_RX_COR_SYS_CTRL);
-	writeb(0, rx->cor + T7_RX_COR_PHY_CLOCK1);
-	writeb(0, rx->cor + T7_RX_COR_PHY_CLOCK2);
-	writeb(0, rx->cor + T7_RX_COR_PHY_CLOCK3);
+	/* Restore firmware isolation/clock state for a later PHY-only trial. */
+	writeb(rx->core_saved_sys, rx->cor + T7_RX_COR_SYS_CTRL);
+	writeb(rx->core_saved_phyck[0], rx->cor + T7_RX_COR_PHY_CLOCK1);
+	writeb(rx->core_saved_phyck[1], rx->cor + T7_RX_COR_PHY_CLOCK2);
+	writeb(rx->core_saved_phyck[2], rx->cor + T7_RX_COR_PHY_CLOCK3);
+	writeb(rx->core_saved_power, rx->cor + T7_RX_COR_POWER_CTRL);
+	writeb(rx->core_saved_aon_reset, rx->cor + T7_RX_COR_AON_RESET);
 	readb(rx->cor + T7_RX_COR_PHY_CLOCK3);
 	rx->core_active = false;
+}
+
+static void t7_hdmirx_reset_pcs(struct t7_hdmirx *rx)
+{
+	/* Re-align the PCS after the input PLL and equalizer have settled. */
+	writel(BIT(13) | BIT(7), rx->top + T7_RX_TOP_SW_RESET);
+	readl(rx->top + T7_RX_TOP_SW_RESET);
+	usleep_range(1, 5);
+	writel(0, rx->top + T7_RX_TOP_SW_RESET);
+	readl(rx->top + T7_RX_TOP_SW_RESET);
 }
 
 static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
@@ -454,6 +472,12 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 	rx->core_smc_result = res.a0;
 	if (res.a0)
 		return -EIO;
+	rx->core_saved_aon_reset = readb(rx->cor + T7_RX_COR_AON_RESET);
+	rx->core_saved_power = readb(rx->cor + T7_RX_COR_POWER_CTRL);
+	rx->core_saved_sys = readb(rx->cor + T7_RX_COR_SYS_CTRL);
+	rx->core_saved_phyck[0] = readb(rx->cor + T7_RX_COR_PHY_CLOCK1);
+	rx->core_saved_phyck[1] = readb(rx->cor + T7_RX_COR_PHY_CLOCK2);
+	rx->core_saved_phyck[2] = readb(rx->cor + T7_RX_COR_PHY_CLOCK3);
 	rx->core_active = true;
 	/* Hold AON reset while removing TMDS isolation and selecting PHY lanes. */
 	writeb(1, rx->cor + T7_RX_COR_AON_RESET);
@@ -493,11 +517,6 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 	writel(BIT(21) | BIT(20) | BIT(7), rx->top + T7_RX_TOP_VID_CNTL);
 	writel(0x0a, rx->top + T7_RX_TOP_VID_CNTL2);
 	writel(0, rx->top + T7_RX_TOP_OUTPUT_OVERRIDE);
-	/* Re-align the PCS after lane and video setup; lock alone is insufficient. */
-	writel(BIT(13) | BIT(7), rx->top + T7_RX_TOP_SW_RESET);
-	readl(rx->top + T7_RX_TOP_SW_RESET);
-	usleep_range(1, 5);
-	writel(0, rx->top + T7_RX_TOP_SW_RESET);
 	if (readb(rx->cor + T7_RX_COR_SYS_CTRL) != 3 ||
 	    readb(rx->cor + T7_RX_COR_PHY_CLOCK1) != 0xff)
 		return -EIO;
@@ -704,6 +723,15 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 		if (ret)
 			return ret;
 		t7_hdmirx_phy_prepare(rx);
+		if (core_test) {
+			ret = devm_add_action_or_reset(dev, t7_hdmirx_core_stop, rx);
+			if (ret)
+				return ret;
+			/* Core isolation must be removed before cable clock qualification. */
+			ret = t7_hdmirx_core_start(rx);
+			if (ret)
+				return dev_err_probe(dev, ret, "Cannot initialize receiver core\n");
+		}
 		ret = t7_hdmirx_wait_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
 		if (!ret)
 			ret = t7_hdmirx_phy_pll(rx);
@@ -711,14 +739,8 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, ret, "PHY trial failed, cable %u Hz, APLL %#x\n",
 					     rx->cable_hz, readl(rx->phy + T7_RX_PHY_APLL0));
 		t7_hdmirx_phy_equalize(rx);
-	}
-	if (core_test) {
-		ret = devm_add_action_or_reset(dev, t7_hdmirx_core_stop, rx);
-		if (ret)
-			return ret;
-		ret = t7_hdmirx_core_start(rx);
-		if (ret)
-			return dev_err_probe(dev, ret, "Cannot initialize receiver core\n");
+		if (core_test)
+			t7_hdmirx_reset_pcs(rx);
 	}
 	debugfs = debugfs_create_dir(dev_name(dev), NULL);
 	if (IS_ERR(debugfs))
