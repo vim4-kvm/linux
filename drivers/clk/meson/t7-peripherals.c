@@ -38,6 +38,8 @@
 #define HRX_CLK_CTRL1		0x12c
 #define HRX_CLK_CTRL2		0x130
 #define HRX_CLK_CTRL3		0x134
+#define WAVE521_CLK_CTRL		0x150
+#define WAVE521_CLK_CTRL2		0x154
 #define TS_CLK_CTRL		0x158
 #define MALI_CLK_CTRL		0x15c
 #define ETH_CLK_CTRL		0x164
@@ -972,6 +974,27 @@ static T7_COMP_SEL(hdmirx_meter, HRX_CLK_CTRL3, 9, 0x3, t7_hdmirx_parents);
 static T7_COMP_DIV(hdmirx_meter, HRX_CLK_CTRL3, 0, 7);
 static T7_COMP_GATE(hdmirx_meter, HRX_CLK_CTRL3, 8, 0);
 
+static const struct clk_parent_data t7_wave_parents[] = {
+	{ .fw_name = "xtal" },
+	{ .fw_name = "fdiv4" },
+	{ .fw_name = "fdiv3" },
+	{ .fw_name = "fdiv5" },
+	{ .fw_name = "fdiv7" },
+	{ .fw_name = "mpll2" },
+	{ .fw_name = "mpll3" },
+	{ .fw_name = "gp1" },
+};
+
+static T7_COMP_SEL(wave_a, WAVE521_CLK_CTRL2, 9, 0x7, t7_wave_parents);
+static T7_COMP_DIV(wave_a, WAVE521_CLK_CTRL2, 0, 7);
+static T7_COMP_GATE(wave_a, WAVE521_CLK_CTRL2, 8, 0);
+static T7_COMP_SEL(wave_b, WAVE521_CLK_CTRL, 9, 0x7, t7_wave_parents);
+static T7_COMP_DIV(wave_b, WAVE521_CLK_CTRL, 0, 7);
+static T7_COMP_GATE(wave_b, WAVE521_CLK_CTRL, 8, 0);
+static T7_COMP_SEL(wave_c, WAVE521_CLK_CTRL, 25, 0x7, t7_wave_parents);
+static T7_COMP_DIV(wave_c, WAVE521_CLK_CTRL, 16, 7);
+static T7_COMP_GATE(wave_c, WAVE521_CLK_CTRL, 24, 0);
+
 static const struct clk_parent_data t7_vpu_parents[] = {
 	{ .fw_name = "fdiv3" },
 	{ .fw_name = "fdiv4" },
@@ -1432,6 +1455,15 @@ static struct clk_hw *t7_peripherals_hw_clks[] = {
 	[CLKID_VDIN_MEAS_SEL]		= &t7_vdin_meas_sel.hw,
 	[CLKID_VDIN_MEAS_DIV]		= &t7_vdin_meas_div.hw,
 	[CLKID_VDIN_MEAS]			= &t7_vdin_meas.hw,
+	[CLKID_WAVE_A_SEL]		= &t7_wave_a_sel.hw,
+	[CLKID_WAVE_A_DIV]		= &t7_wave_a_div.hw,
+	[CLKID_WAVE_A]			= &t7_wave_a.hw,
+	[CLKID_WAVE_B_SEL]		= &t7_wave_b_sel.hw,
+	[CLKID_WAVE_B_DIV]		= &t7_wave_b_div.hw,
+	[CLKID_WAVE_B]			= &t7_wave_b.hw,
+	[CLKID_WAVE_C_SEL]		= &t7_wave_c_sel.hw,
+	[CLKID_WAVE_C_DIV]		= &t7_wave_c_div.hw,
+	[CLKID_WAVE_C]			= &t7_wave_c.hw,
 };
 
 static const struct meson_clkc_data t7_peripherals_data = {
