@@ -141,6 +141,11 @@ invalid_state_switch:
 	return -EINVAL;
 }
 
+static dma_addr_t wave5_vpu_enc_source_addr(struct vb2_buffer *vb, unsigned int plane)
+{
+	return vb2_dma_contig_plane_dma_addr(vb, plane) + vb->planes[plane].data_offset;
+}
+
 static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 {
 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
@@ -190,22 +195,22 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 	} else {
 		if (inst->src_fmt.num_planes == 1) {
 			frame_buf.buf_y =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
+				wave5_vpu_enc_source_addr(&src_buf->vb2_buf, 0);
 			frame_buf.buf_cb = frame_buf.buf_y + luma_size;
 			frame_buf.buf_cr = frame_buf.buf_cb + chroma_size;
 		} else if (inst->src_fmt.num_planes == 2) {
 			frame_buf.buf_y =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
+				wave5_vpu_enc_source_addr(&src_buf->vb2_buf, 0);
 			frame_buf.buf_cb =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1);
+				wave5_vpu_enc_source_addr(&src_buf->vb2_buf, 1);
 			frame_buf.buf_cr = frame_buf.buf_cb + chroma_size;
 		} else if (inst->src_fmt.num_planes == 3) {
 			frame_buf.buf_y =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
+				wave5_vpu_enc_source_addr(&src_buf->vb2_buf, 0);
 			frame_buf.buf_cb =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1);
+				wave5_vpu_enc_source_addr(&src_buf->vb2_buf, 1);
 			frame_buf.buf_cr =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 2);
+				wave5_vpu_enc_source_addr(&src_buf->vb2_buf, 2);
 		}
 		frame_buf.stride = stride;
 		pic_param.src_idx = src_buf->vb2_buf.index;
@@ -1121,6 +1126,29 @@ static int wave5_vpu_enc_queue_setup(struct vb2_queue *q, unsigned int *num_buff
 	return 0;
 }
 
+static int wave5_vpu_enc_buf_prepare(struct vb2_buffer *vb)
+{
+	struct vpu_instance *inst = vb2_get_drv_priv(vb->vb2_queue);
+	unsigned int i;
+
+	if (vb->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+		return 0;
+
+	/* Imported planes may share an allocation with different data offsets. */
+	for (i = 0; i < inst->src_fmt.num_planes; i++) {
+		u32 offset = vb->planes[i].data_offset;
+		u32 required = inst->src_fmt.plane_fmt[i].sizeimage;
+
+		if (offset > vb2_plane_size(vb, i) ||
+		    required > vb2_plane_size(vb, i) - offset ||
+		    vb2_get_plane_payload(vb, i) < offset ||
+		    required > vb2_get_plane_payload(vb, i) - offset)
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 static void wave5_vpu_enc_buf_queue(struct vb2_buffer *vb)
 {
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
@@ -1490,6 +1518,7 @@ static void wave5_vpu_enc_stop_streaming(struct vb2_queue *q)
 static const struct vb2_ops wave5_vpu_enc_vb2_ops = {
 	.queue_setup = wave5_vpu_enc_queue_setup,
 	.buf_queue = wave5_vpu_enc_buf_queue,
+	.buf_prepare = wave5_vpu_enc_buf_prepare,
 	.start_streaming = wave5_vpu_enc_start_streaming,
 	.stop_streaming = wave5_vpu_enc_stop_streaming,
 };
