@@ -16,9 +16,12 @@
 		 <&clkc_periphs CLKID_HDMIRX_2M>,
 		 <&clkc_periphs CLKID_HDMIRX_5M>,
 		 <&clkc_periphs CLKID_HDMIRX_AUD_PLL>,
-		 <&clkc_audio AUD_CLKID_FRHDMIRX>;
+		 <&clkc_audio AUD_CLKID_FRHDMIRX>,
+		 <&clkc_periphs CLKID_HDMIRX_ACR>;
 	clock-names = "pclk", "sys", "cfg", "meter", "2m", "5m",
-		      "audio-pll", "frhdmirx";
+		      "audio-pll", "frhdmirx", "acr";
+	assigned-clocks = <&clkc_periphs CLKID_HDMIRX_ACR>;
+	assigned-clock-rates = <500000000>;
 };
 
 &toddr_a {
