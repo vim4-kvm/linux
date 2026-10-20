@@ -52,6 +52,17 @@ int main(void)
     assert(wave5_vpu_enc_buf_prepare(&vb) == -EINVAL);
     vb.planes[1].data_offset = UINT32_MAX;
     assert(wave5_vpu_enc_buf_prepare(&vb) == -EINVAL);
+    /* 1080 visible rows need 1088-row capacity, but UV stays after active Y. */
+    inst.src_fmt.plane_fmt[0].sizeimage = 1920 * 1088;
+    inst.src_fmt.plane_fmt[1].sizeimage = 1920 * 1088 / 2;
+    vb.planes[0].size = vb.planes[1].size = 1920 * 1080 * 3 / 2;
+    vb.planes[0].payload = 1920 * 1088;
+    vb.planes[1].data_offset = 1920 * 1080;
+    vb.planes[1].payload = 1920 * 1080 + 1920 * 1088 / 2;
+    assert(wave5_vpu_enc_buf_prepare(&vb) == -EINVAL);
+    vb.planes[0].size = vb.planes[1].size = 1920 * 1088 * 3 / 2;
+    assert(!wave5_vpu_enc_buf_prepare(&vb));
+    assert(wave5_vpu_enc_source_addr(&vb, 1) == 0x40000000 + 1920 * 1080);
     vb.type = 9;
     assert(!wave5_vpu_enc_buf_prepare(&vb));
     puts("Wave5 shared DMA plane offsets and bounds passed");

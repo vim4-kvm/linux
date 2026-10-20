@@ -217,6 +217,7 @@ static void setup(struct t7_vdin_buffer b[4]) {
     receiver.queue.priv=&receiver; receiver.regs=registers;
     receiver.width=1920; receiver.height=1080; receiver.stride=5760;
     receiver.frame_size=VDIN_FRAME_SIZE;
+    receiver.allocation_size=VDIN_FRAME_SIZE;
     started=entered=permits=completed=pins=stop_waiting=0;
     stopping=fail_timing=expire=false;
     for (int i=0;i<VDIN_DMA_SLOTS;i++) {
@@ -240,6 +241,17 @@ static void teardown(struct t7_vdin_buffer b[4]) {
 }
 int main(void) {
     struct t7_vdin_buffer b[4]; pthread_t stop;
+    /* Import tail capacity must not enlarge the visible bytesused payload. */
+    receiver.queue.priv=&receiver;
+    receiver.frame_size=1920*1080*3/2;
+    receiver.allocation_size=1920*1088*3/2;
+    struct vb2_buffer padded={.vb2_queue=&receiver.queue,.size=receiver.frame_size};
+    assert(t7_vdin_buffer_prepare(&padded)==-EINVAL);
+    padded.size=receiver.allocation_size;
+    assert(!t7_vdin_buffer_prepare(&padded) && padded.payload==receiver.frame_size);
+    unsigned int planes=0,count=4,sizes[1]={0};
+    assert(!t7_vdin_queue_setup(&receiver.queue,&count,&planes,sizes,NULL));
+    assert(planes==1 && sizes[0]==receiver.allocation_size);
     /* Hardware fills the ring while CPU copy is blocked, without reusing COPYING. */
     setup(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
     step(1,false); step(2,false); await(&entered,1);
