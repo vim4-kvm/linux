@@ -6,6 +6,7 @@
 /* This driver implements the frontend capture DAI of AXG based SoCs */
 
 #include <linux/bitfield.h>
+#include <linux/io.h>
 #include <linux/clk.h>
 #include <linux/regmap.h>
 #include <linux/module.h>
@@ -325,7 +326,126 @@ static const struct axg_fifo_match_data sm1_toddr_match_data = {
 	.dai_drv		= &g12a_toddr_dai_drv
 };
 
+static int t7_toddr_dai_hw_params(struct snd_pcm_substream *substream,
+				struct snd_pcm_hw_params *params,
+				struct snd_soc_dai *dai)
+{
+	struct axg_fifo *fifo = snd_soc_dai_get_drvdata(dai);
+	u32 source, value;
+	int ret;
+
+	ret = regmap_read(fifo->map, FIFO_CTRL1, &source);
+	if (ret)
+		return ret;
+	source = (source >> 26) & 0x1f;
+	if (source == 8) {
+		/* FRHDMIRX SPDIF samples occupy [27:4], with channel tags below.
+		 * T7's type 0 packs cropped S16 values; the older AXG type 2
+		 * and [31:16] alignment would mix metadata into the samples.
+		 */
+		if (params_format(params) != SNDRV_PCM_FORMAT_S16_LE)
+			return -EINVAL;
+		ret = regmap_update_bits(fifo->map, FIFO_CTRL0,
+			CTRL0_TODDR_TYPE | CTRL0_TODDR_MSB_POS | CTRL0_TODDR_LSB_POS,
+			FIELD_PREP(CTRL0_TODDR_MSB_POS, 27) |
+			FIELD_PREP(CTRL0_TODDR_LSB_POS, 12));
+	} else {
+		ret = axg_toddr_dai_hw_params(substream, params, dai);
+	}
+	if (ret)
+		return ret;
+	value = readl(fifo->chsync);
+	writel((value & ~GENMASK(7, 0)) | (params_channels(params) - 1) | BIT(31),
+	       fifo->chsync);
+	return 0;
+}
+
+static void t7_toddr_dai_shutdown(struct snd_pcm_substream *substream,
+				struct snd_soc_dai *dai)
+{
+	struct axg_fifo *fifo = snd_soc_dai_get_drvdata(dai);
+
+	writel(readl(fifo->chsync) & ~BIT(31), fifo->chsync);
+	axg_toddr_dai_shutdown(substream, dai);
+}
+
+static const struct snd_soc_dai_ops t7_toddr_ops = {
+	.prepare = g12a_toddr_dai_prepare,
+	.hw_params = t7_toddr_dai_hw_params,
+	.startup = g12a_toddr_dai_startup,
+	.shutdown = t7_toddr_dai_shutdown,
+	.pcm_new = axg_toddr_pcm_new,
+};
+
+static struct snd_soc_dai_driver t7_toddr_dai_drv = {
+	.name = "TODDR",
+	.capture = {
+		.stream_name = "Capture", .channels_min = 1, .channels_max = AXG_FIFO_CH_MAX,
+		.rates = SNDRV_PCM_RATE_CONTINUOUS, .rate_min = 5515, .rate_max = 768000,
+		.formats = AXG_FIFO_FORMATS,
+	},
+	.ops = &t7_toddr_ops,
+};
+
+/* T7 moves the source selector below bit 31 and widens it to five bits.
+ * Keep the known first sixteen sources; clear all five hardware bits so a
+ * previous boot cannot leave the FIFO connected to a different input.
+ */
+static const struct soc_enum t7_toddr_sel_enum = {
+	.reg = FIFO_CTRL1, .shift_l = 26, .shift_r = 26,
+	.items = ARRAY_SIZE(sm1_toddr_sel_texts),
+	.texts = sm1_toddr_sel_texts, .mask = 0x1f,
+};
+
+static const struct snd_kcontrol_new t7_toddr_in_mux =
+	SOC_DAPM_ENUM("Input Source", t7_toddr_sel_enum);
+
+static const struct snd_soc_dapm_widget t7_toddr_dapm_widgets[] = {
+	SND_SOC_DAPM_MUX("SRC SEL", SND_SOC_NOPM, 0, 0, &t7_toddr_in_mux),
+	SND_SOC_DAPM_AIF_IN("IN 0", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 1", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 2", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 3", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 4", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 5", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 6", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 7", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 8", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 9", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 10", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 11", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 12", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 13", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 14", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 15", NULL, 0, SND_SOC_NOPM, 0, 0),
+};
+
+static const struct snd_soc_component_driver t7_toddr_component_drv = {
+	.dapm_widgets = t7_toddr_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(t7_toddr_dapm_widgets),
+	.dapm_routes = sm1_toddr_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(sm1_toddr_dapm_routes),
+	.open = axg_fifo_pcm_open,
+	.close = axg_fifo_pcm_close,
+	.hw_params = g12a_fifo_pcm_hw_params,
+	.hw_free = axg_fifo_pcm_hw_free,
+	.pointer = axg_fifo_pcm_pointer,
+	.trigger = axg_fifo_pcm_trigger,
+	.legacy_dai_naming = 1,
+};
+
+static const struct axg_fifo_match_data t7_toddr_match_data = {
+	.has_chsync = true,
+	.field_threshold = REG_FIELD(FIFO_CTRL1, 12, 23),
+	.component_drv = &t7_toddr_component_drv,
+	.dai_drv = &t7_toddr_dai_drv,
+};
+
 static const struct of_device_id axg_toddr_of_match[] = {
+	{
+		.compatible = "amlogic,t7-toddr",
+		.data = &t7_toddr_match_data,
+	},
 	{
 		.compatible = "amlogic,axg-toddr",
 		.data = &axg_toddr_match_data,
