@@ -10,9 +10,9 @@ maintainers:
   - localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 
 description: |
-  Initial receiver resource and cable detection interface. The TOP register
-  window includes the input 5V and HPD request registers. PHY initialization,
-  EDID programming and VDIN capture are separate bring-up stages.
+  The receiver TOP window contains input 5V/HPD controls and per-port EDID RAM.
+  The APB and receiver system gates are separate clocks; both are required for
+  access to the DDC controller.
 
 properties:
   compatible:
@@ -26,11 +26,12 @@ properties:
       - const: top
 
   clocks:
-    maxItems: 5
+    maxItems: 6
 
   clock-names:
     items:
       - const: pclk
+      - const: sys
       - const: cfg
       - const: meter
       - const: 2m
@@ -66,10 +67,11 @@ examples:
         reg-names = "top";
         power-domains = <&pwrc PWRC_T7_HDMIRX_ID>;
         clocks = <&clkc_periphs CLKID_SYS_HDMIRX_PCLK>,
+                 <&clkc_periphs CLKID_SYS_HDMIRX>,
                  <&clkc_periphs CLKID_HDMIRX_CFG>,
                  <&clkc_periphs CLKID_HDMIRX_METER>,
                  <&clkc_periphs CLKID_HDMIRX_2M>,
                  <&clkc_periphs CLKID_HDMIRX_5M>;
-        clock-names = "pclk", "cfg", "meter", "2m", "5m";
+        clock-names = "pclk", "sys", "cfg", "meter", "2m", "5m";
         amlogic,input-port = <1>;
     };
