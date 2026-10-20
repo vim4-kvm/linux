@@ -13,7 +13,7 @@ def function(signature):
 
 
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define T7_RX_'))
-types = source[source.index('enum t7_hdmirx_clock'):source.index('static int t7_hdmirx_validate_edid')]
+types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):source.index('static int t7_hdmirx_validate_edid')]
 functions = '\n'.join(function(name) for name in [
     'static int t7_hdmirx_validate_edid(', 'static void t7_hdmirx_set_hpd(',
     'static void t7_hdmirx_ddc_stop(', 'static int t7_hdmirx_ddc_start('])
@@ -28,6 +28,7 @@ typedef uint8_t u8;
 typedef uint32_t u32;
 #define __iomem
 #define BIT(n) (1U << (n))
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define GENMASK(h, l) ((~0U >> (31 - (h))) & (~0U << (l)))
 struct clk_bulk_data { int unused; };
 struct debugfs_blob_wrapper { void *data; unsigned long size; };

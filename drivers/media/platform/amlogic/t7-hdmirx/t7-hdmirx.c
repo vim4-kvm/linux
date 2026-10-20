@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Amlogic T7 HDMI receiver resource and cable detection bring-up. */
+/* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
 #include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -20,7 +22,39 @@
 #define T7_RX_TOP_EDID_GEN_CNTL	(0x004 * 4)
 #define T7_RX_TOP_EDID_GEN_STAT	(0x008 * 4)
 #define T7_RX_TOP_INTR_MASKN	(0x009 * 4)
+#define T7_RX_TOP_METER_HDMI_CNTL	(0x011 * 4)
+#define T7_RX_TOP_METER_HDMI_STAT	(0x012 * 4)
+#define T7_RX_TOP_CHAN_SWITCH_0	(0x028 * 4)
+#define T7_RX_TOP_TMDS_ALIGN_STAT	(0x02b * 4)
 #define T7_RX_TOP_INFILTER_I2C0	(0x02d * 4)
+#define T7_RX_TOP_METER_CABLE_CNTL (0x03a * 4)
+#define T7_RX_TOP_METER_CABLE_STAT (0x03b * 4)
+#define T7_RX_TOP_CHAN_SWITCH_1	(0x03c * 4)
+#define T7_RX_TOP_PHYIF_CNTL0	(0x080 * 4)
+#define T7_RX_TOP_MISC_STAT0	(0x084 * 4)
+#define T7_RX_METER_VALID		BIT(31)
+#define T7_RX_METER_COUNT		GENMASK(23, 0)
+#define T7_RX_METER_REF_CYCLES	8192
+#define T7_RX_PHY_APLL0		0x00
+#define T7_RX_PHY_APLL1		0x04
+#define T7_RX_PHY_APLL2		0x08
+#define T7_RX_PHY_APLL3		0x0c
+#define T7_RX_PHY_APLL4		0x10
+#define T7_RX_PHY_MISC0		0x14
+#define T7_RX_PHY_MISC1		0x18
+#define T7_RX_PHY_MISC2		0x1c
+#define T7_RX_PHY_MISC3		0x20
+#define T7_RX_PHY_DCHA0		0x24
+#define T7_RX_PHY_DCHA1		0x28
+#define T7_RX_PHY_DCHA2		0x2c
+#define T7_RX_PHY_DCHA3		0x30
+#define T7_RX_PHY_DCHD0		0x34
+#define T7_RX_PHY_DCHD1		0x38
+#define T7_RX_PHY_DCHD2		0x3c
+#define T7_RX_PHY_DCHD3		0x40
+#define T7_RX_PHY_DCHD4		0x44
+#define T7_RX_PHY_DCHD_STAT	0x4c
+#define T7_RX_PHY_PLL_LOCK		BIT(31)
 #define T7_RX_TOP_5V_MASK		GENMASK(22, 20)
 #define T7_RX_TOP_HPD_MASK	GENMASK(2, 0)
 #define T7_RX_TOP_HPD_OVERRIDE	BIT(4)
@@ -34,6 +68,16 @@ static char *edid_firmware;
 module_param(edid_firmware, charp, 0400);
 MODULE_PARM_DESC(edid_firmware, "Optional validated EDID file in /lib/firmware for DDC bring-up");
 
+static bool phy_test;
+module_param(phy_test, bool, 0400);
+MODULE_PARM_DESC(phy_test, "Opt-in 148.5 MHz input PLL/equalizer trial; requires EDID firmware");
+
+static const u32 t7_hdmirx_phy_top_regs[] = {
+	T7_RX_TOP_CLK_CNTL, T7_RX_TOP_PORT_SEL, T7_RX_TOP_PHYIF_CNTL0,
+	T7_RX_TOP_CHAN_SWITCH_0, T7_RX_TOP_CHAN_SWITCH_1,
+	T7_RX_TOP_METER_HDMI_CNTL, T7_RX_TOP_METER_CABLE_CNTL,
+};
+
 enum t7_hdmirx_clock {
 	T7_RX_PCLK,
 	T7_RX_SYS,
@@ -46,11 +90,15 @@ enum t7_hdmirx_clock {
 
 struct t7_hdmirx {
 	void __iomem *top;
+	void __iomem *phy;
 	struct clk_bulk_data clocks[T7_RX_NUM_CLOCKS];
 	u32 port;
 	u32 saved_reset;
 	u32 saved_port_sel;
 	bool ddc_active;
+	bool phy_active;
+	u32 phy_top_saved[ARRAY_SIZE(t7_hdmirx_phy_top_regs)];
+	u32 cable_hz;
 	u8 edid[T7_RX_EDID_CAPACITY];
 	struct debugfs_blob_wrapper edid_blob;
 };
@@ -89,6 +137,19 @@ static void t7_hdmirx_set_hpd(struct t7_hdmirx *rx, bool high)
 		value |= BIT(rx->port);
 	writel(value, rx->top + T7_RX_TOP_HPD_PWR5V);
 	readl(rx->top + T7_RX_TOP_HPD_PWR5V);
+}
+
+static int t7_hdmirx_validate_phy_edid(const u8 *edid, size_t size)
+{
+	int ret = t7_hdmirx_validate_edid(edid, size);
+
+	if (ret)
+		return ret;
+	/* No CTA/SCDC negotiation: 594 MHz at 1:40 also presents a 148.5 MHz clock. */
+	if (size != T7_RX_EDID_BLOCK_SIZE || !(edid[20] & BIT(7)) ||
+	    (edid[54] | (edid[55] << 8)) != 14850)
+		return -EOPNOTSUPP;
+	return 0;
 }
 
 static void t7_hdmirx_ddc_stop(void *data)
@@ -149,6 +210,170 @@ static int t7_hdmirx_ddc_start(struct t7_hdmirx *rx, const u8 *edid, size_t size
 	return 0;
 }
 
+static u32 t7_hdmirx_meter_hz(u32 status, unsigned long reference_hz)
+{
+	u64 frequency;
+
+	if (!(status & T7_RX_METER_VALID))
+		return 0;
+	frequency = div_u64((u64)FIELD_GET(T7_RX_METER_COUNT, status) * reference_hz,
+			    T7_RX_METER_REF_CYCLES);
+	return frequency <= U32_MAX ? frequency : 0;
+}
+
+static void t7_hdmirx_phy_update(struct t7_hdmirx *rx, u32 reg, u32 mask, u32 value)
+{
+	u32 data = readl(rx->phy + reg);
+
+	writel((data & ~mask) | (value & mask), rx->phy + reg);
+}
+
+static void t7_hdmirx_phy_stop(void *data)
+{
+	struct t7_hdmirx *rx = data;
+	unsigned int i;
+
+	if (!rx->phy_active)
+		return;
+	t7_hdmirx_set_hpd(rx, false);
+	/* Power down the PLL, termination and data channels before gating clocks. */
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_APLL0, GENMASK(29, 28), BIT(29));
+	writel(0x00800800, rx->phy + T7_RX_PHY_MISC0);
+	/* Keep the boot-provided termination trim for the next probe. */
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_MISC2, BIT(29) | BIT(30), BIT(29) | BIT(30));
+	writel(0, rx->phy + T7_RX_PHY_MISC3);
+	writel(0x10000000, rx->phy + T7_RX_PHY_DCHA0);
+	for (i = T7_RX_PHY_DCHA1; i <= T7_RX_PHY_DCHD4; i += 4)
+		writel(0, rx->phy + i);
+	readl(rx->phy + T7_RX_PHY_DCHD4);
+	for (i = 0; i < ARRAY_SIZE(t7_hdmirx_phy_top_regs); i++)
+		writel(rx->phy_top_saved[i], rx->top + t7_hdmirx_phy_top_regs[i]);
+	rx->phy_active = false;
+}
+
+static void t7_hdmirx_phy_prepare(struct t7_hdmirx *rx)
+{
+	u32 trim = readl(rx->phy + T7_RX_PHY_MISC1);
+	u32 misc0;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(t7_hdmirx_phy_top_regs); i++)
+		rx->phy_top_saved[i] = readl(rx->top + t7_hdmirx_phy_top_regs[i]);
+	rx->phy_active = true;
+	writel(0, rx->top + T7_RX_TOP_CLK_CNTL);
+	writel((rx->saved_port_sel & ~GENMASK(2, 0)) | BIT(4) | BIT(rx->port),
+	       rx->top + T7_RX_TOP_PORT_SEL);
+	writel(BIT(1), rx->top + T7_RX_TOP_PHYIF_CNTL0);
+	writel(0x24000001, rx->top + T7_RX_TOP_CHAN_SWITCH_0);
+	writel(0x03000007, rx->top + T7_RX_TOP_CHAN_SWITCH_1);
+	writel(BIT(28) | T7_RX_METER_REF_CYCLES, rx->top + T7_RX_TOP_METER_CABLE_CNTL);
+	writel(BIT(28) | T7_RX_METER_REF_CYCLES, rx->top + T7_RX_TOP_METER_HDMI_CNTL);
+	/* Discard meter state left by the previous receiver instance. */
+	writel(BIT(5) | BIT(6), rx->top + T7_RX_TOP_SW_RESET);
+	readl(rx->top + T7_RX_TOP_SW_RESET);
+	writel(0, rx->top + T7_RX_TOP_SW_RESET);
+	/* Fixed PHY_BW_2 analog settings; other input rates must not program APLL. */
+	writel(0x200773f8, rx->phy + T7_RX_PHY_MISC0);
+	usleep_range(5, 10);
+	if (trim & BIT(0))
+		trim = (0x000c01c0 & ~(GENMASK(15, 12) | BIT(0))) |
+		       (trim & (GENMASK(15, 12) | BIT(0)));
+	else
+		trim = 0x000c01c0;
+	writel(trim, rx->phy + T7_RX_PHY_MISC1);
+	writel(0, rx->phy + T7_RX_PHY_MISC2);
+	writel(0x817, rx->phy + T7_RX_PHY_MISC3);
+	writel(0x17270fff, rx->phy + T7_RX_PHY_DCHA0);
+	writel(0x45ff4b58, rx->phy + T7_RX_PHY_DCHA1);
+	writel(0x01ff28c9, rx->phy + T7_RX_PHY_DCHA2);
+	writel(0x630, rx->phy + T7_RX_PHY_DCHA3);
+	writel(0xe3372103 & ~(BIT(28) | GENMASK(25, 24)), rx->phy + T7_RX_PHY_DCHD0);
+	writel(0x40009000, rx->phy + T7_RX_PHY_DCHD1);
+	writel(0x0d422222 & ~BIT(26), rx->phy + T7_RX_PHY_DCHD2);
+	writel(0x10000000, rx->phy + T7_RX_PHY_DCHD3);
+	writel(0x3001, rx->phy + T7_RX_PHY_DCHD4);
+	writel(0x817 | (BIT(rx->port) << 6), rx->phy + T7_RX_PHY_MISC3);
+	usleep_range(5, 10);
+	misc0 = (0x200773f8 & ~(BIT(10) | GENMASK(9, 7))) | BIT(rx->port);
+	writel(misc0, rx->phy + T7_RX_PHY_MISC0);
+	usleep_range(5, 10);
+	writel(misc0 | BIT(10) | GENMASK(9, 7), rx->phy + T7_RX_PHY_MISC0);
+}
+
+static int t7_hdmirx_wait_cable(struct t7_hdmirx *rx, unsigned long reference_hz)
+{
+	u32 previous = 0, sample_hz, status;
+	unsigned int i, stable = 0;
+
+	for (i = 0; i < 150; i++) {
+		if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)))
+			return -ENOLINK;
+		status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
+		sample_hz = t7_hdmirx_meter_hz(status, reference_hz);
+		rx->cable_hz = sample_hz;
+		/* This trial only supports 1080p60 RGB 8-bit's 148.5 MHz TMDS clock. */
+		if (sample_hz >= 146500000 && sample_hz <= 150500000 && previous &&
+		    abs((int)sample_hz - (int)previous) <= 500000)
+			stable++;
+		else
+			stable = 0;
+		if (stable == 3)
+			return 0;
+		previous = sample_hz;
+		usleep_range(20000, 21000);
+	}
+	return -ETIMEDOUT;
+}
+
+static int t7_hdmirx_phy_pll(struct t7_hdmirx *rx)
+{
+	unsigned int attempt;
+
+	/* PHY_BW_2 / PLL_BW_2: M=40, N=1, TMDS output divide by 8. */
+	for (attempt = 0; attempt < 3; attempt++) {
+		writel(0x20090428, rx->phy + T7_RX_PHY_APLL0);
+		usleep_range(5, 10);
+		writel(0x30090428, rx->phy + T7_RX_PHY_APLL0);
+		usleep_range(5, 10);
+		writel(0, rx->phy + T7_RX_PHY_APLL1);
+		writel(0x00001118, rx->phy + T7_RX_PHY_APLL2);
+		usleep_range(5, 10);
+		writel(0x10058f30, rx->phy + T7_RX_PHY_APLL3);
+		writel(0x0b0130c0, rx->phy + T7_RX_PHY_APLL4);
+		usleep_range(5, 10);
+		writel(0x0b8130c0, rx->phy + T7_RX_PHY_APLL4);
+		usleep_range(5, 10);
+		writel(0x34090428, rx->phy + T7_RX_PHY_APLL0);
+		usleep_range(5, 10);
+		writel(0x14090428, rx->phy + T7_RX_PHY_APLL0);
+		usleep_range(5, 10);
+		writel(0x0000301c, rx->phy + T7_RX_PHY_APLL2);
+		usleep_range(100, 110);
+		if (readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK)
+			return 0;
+	}
+	return -ETIMEDOUT;
+}
+
+static void t7_hdmirx_phy_equalize(struct t7_hdmirx *rx)
+{
+	/* 10-bit CDR mode, then release the CDR/EQ reset and free-running gate. */
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(31) | GENMASK(2, 0), BIT(31) | 3);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0,
+			     BIT(30) | BIT(28) | GENMASK(25, 24), 0);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, BIT(31) | BIT(26), 0);
+	usleep_range(100, 110);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, GENMASK(25, 24), GENMASK(25, 24));
+	usleep_range(100, 110);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(30), BIT(30));
+	usleep_range(10000, 10100);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, BIT(27), BIT(27));
+	usleep_range(10, 20);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, BIT(26), BIT(26));
+	usleep_range(100, 110);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(28), BIT(28));
+}
+
 static int t7_hdmirx_status(struct seq_file *s, void *unused)
 {
 	struct device *dev = s->private;
@@ -172,6 +397,22 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 	seq_printf(s, "edid_bytes: %lu\n", rx->edid_blob.size);
 	seq_printf(s, "top_edid_gen_stat: %#010x\n",
 		   readl(rx->top + T7_RX_TOP_EDID_GEN_STAT));
+	seq_printf(s, "phy_active: %u\n", rx->phy_active);
+	if (rx->phy_active) {
+		u32 cable = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
+		u32 tmds = readl(rx->top + T7_RX_TOP_METER_HDMI_STAT);
+		unsigned long reference = clk_get_rate(rx->clocks[T7_RX_METER].clk);
+
+		seq_printf(s, "cable_meter: %#010x\n", cable);
+		seq_printf(s, "tmds_meter: %#010x\n", tmds);
+		seq_printf(s, "cable_hz: %u\n", t7_hdmirx_meter_hz(cable, reference));
+		seq_printf(s, "tmds_hz: %u\n", t7_hdmirx_meter_hz(tmds, reference));
+		seq_printf(s, "phy_pll_locked: %u\n",
+			   !!(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK));
+		seq_printf(s, "phy_sqo: %u\n", readl(rx->top + T7_RX_TOP_MISC_STAT0) & 1);
+		seq_printf(s, "tmds_aligned: %u\n",
+			   readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & 1);
+	}
 	for (i = 0; i < ARRAY_SIZE(rx->clocks); i++)
 		seq_printf(s, "%s_hz: %lu\n", rx->clocks[i].id,
 			   clk_get_rate(rx->clocks[i].clk));
@@ -206,6 +447,8 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 	unsigned int i;
 	int ret;
 
+	if (phy_test && !edid_firmware)
+		return dev_err_probe(dev, -EINVAL, "PHY trial requires an EDID firmware\n");
 	rx = devm_kzalloc(dev, sizeof(*rx), GFP_KERNEL);
 	if (!rx)
 		return -ENOMEM;
@@ -215,6 +458,9 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 	rx->top = devm_platform_ioremap_resource_byname(pdev, "top");
 	if (IS_ERR(rx->top))
 		return PTR_ERR(rx->top);
+	rx->phy = devm_platform_ioremap_resource_byname(pdev, "phy");
+	if (IS_ERR(rx->phy))
+		return PTR_ERR(rx->phy);
 	for (i = 0; i < ARRAY_SIZE(rx->clocks); i++)
 		rx->clocks[i].id = names[i];
 	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(rx->clocks), rx->clocks);
@@ -250,10 +496,25 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 		ret = request_firmware(&firmware, edid_firmware, dev);
 		if (ret)
 			return dev_err_probe(dev, ret, "Cannot load EDID firmware\n");
-		ret = t7_hdmirx_ddc_start(rx, firmware->data, firmware->size);
+		ret = phy_test ? t7_hdmirx_validate_phy_edid(firmware->data, firmware->size) : 0;
+		if (!ret)
+			ret = t7_hdmirx_ddc_start(rx, firmware->data, firmware->size);
 		release_firmware(firmware);
 		if (ret)
 			return dev_err_probe(dev, ret, "Cannot publish EDID\n");
+	}
+	if (phy_test) {
+		ret = devm_add_action_or_reset(dev, t7_hdmirx_phy_stop, rx);
+		if (ret)
+			return ret;
+		t7_hdmirx_phy_prepare(rx);
+		ret = t7_hdmirx_wait_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
+		if (!ret)
+			ret = t7_hdmirx_phy_pll(rx);
+		if (ret)
+			return dev_err_probe(dev, ret, "PHY trial failed, cable %u Hz, APLL %#x\n",
+					     rx->cable_hz, readl(rx->phy + T7_RX_PHY_APLL0));
+		t7_hdmirx_phy_equalize(rx);
 	}
 	debugfs = debugfs_create_dir(dev_name(dev), NULL);
 	if (IS_ERR(debugfs))
