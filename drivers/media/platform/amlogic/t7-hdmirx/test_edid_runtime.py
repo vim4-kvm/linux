@@ -26,20 +26,25 @@ typedef uint32_t u32;
 #define min(a,b) ((a)<(b)?(a):(b))
 struct link { int lock; unsigned int users; };
 struct t7_hdmirx { struct link *link; struct { size_t size; } edid_blob;
-    u8 edid[512]; u32 saved_reset, saved_port_sel; };
+    u8 edid[512]; u32 saved_reset, saved_port_sel;
+    bool ddc_active, core_active, uhd60; };
 struct device { struct t7_hdmirx *data; };
 struct v4l2_edid { unsigned int pad, start_block, blocks; u8 *edid; };
 static int depth, programs, failures, stops;
+static bool hpd = true;
+static void t7_hdmirx_set_hpd(struct t7_hdmirx *rx, bool high) { (void)rx; hpd=high; }
 static void *dev_get_drvdata(struct device *dev) { return dev->data; }
 static void mutex_lock(int *lock) { (void)lock; assert(!depth); depth++; }
 static void mutex_unlock(int *lock) { (void)lock; assert(depth==1); depth--; }
 static int t7_hdmirx_ddc_start(struct t7_hdmirx *rx, const u8 *data, size_t size) {
     assert(depth==1); programs++; rx->saved_reset=999; rx->saved_port_sel=999;
-    rx->edid_blob.size=0;
-    if (failures) { failures--; return -EIO; }
+    rx->edid_blob.size=0; rx->ddc_active=true; hpd=false;
+    if (failures) { failures--; rx->ddc_active=false; return -EIO; }
     memcpy(rx->edid,data,size); rx->edid_blob.size=size; return 0;
 }
-static void t7_hdmirx_ddc_stop(struct t7_hdmirx *rx) { stops++; rx->edid_blob.size=0; }
+static void t7_hdmirx_ddc_stop(struct t7_hdmirx *rx) {
+    stops++; rx->edid_blob.size=0; rx->ddc_active=false; hpd=false;
+}
 '''
 checks = r'''
 static void checksum(u8 *data) {
@@ -50,7 +55,8 @@ int main(void) {
     const u8 header[]={0,255,255,255,255,255,255,0};
     memcpy(table,header,8); table[126]=1; checksum(table); checksum(table+128);
     struct link link={.users=1};
-    struct t7_hdmirx rx={.link=&link,.edid_blob.size=256,.saved_reset=3,.saved_port_sel=7};
+    struct t7_hdmirx rx={.link=&link,.edid_blob.size=256,.saved_reset=3,.saved_port_sel=7,
+                        .ddc_active=true,.core_active=true,.uhd60=true};
     memcpy(rx.edid,table,256);
     struct device dev={.data=&rx};
     struct v4l2_edid request={.blocks=2,.edid=table};
@@ -59,10 +65,12 @@ int main(void) {
     assert(t7_hdmirx_set_edid(&dev,&request)==-EBUSY && programs==0);
     link.users=0;
     assert(t7_hdmirx_set_edid(&dev,&request)==0 && programs==1);
+    assert(hpd);
     assert(rx.saved_reset==3 && rx.saved_port_sel==7 && !memcmp(rx.edid,changed,256));
     request.edid=table; failures=1;
     assert(t7_hdmirx_set_edid(&dev,&request)==-EIO && programs==3);
     assert(rx.edid_blob.size==256 && !memcmp(rx.edid,changed,256));
+    assert(hpd);
     assert(rx.saved_reset==3 && rx.saved_port_sel==7);
     struct v4l2_edid read={0};
     assert(t7_hdmirx_get_edid(&dev,&read)==0 && read.blocks==2);
@@ -76,6 +84,11 @@ int main(void) {
     request.blocks=0; link.users=1;
     assert(t7_hdmirx_set_edid(&dev,&request)==-EBUSY && stops==0);
     link.users=0; assert(t7_hdmirx_set_edid(&dev,&request)==0 && stops==1);
+    assert(!hpd);
+    request.blocks=2; request.edid=changed;
+    assert(t7_hdmirx_set_edid(&dev,&request)==0 && hpd);
+    table[127]^=1; request.edid=table; failures=2;
+    assert(t7_hdmirx_set_edid(&dev,&request)==-EIO && !hpd && !rx.ddc_active);
     assert(!depth); return 0;
 }
 '''

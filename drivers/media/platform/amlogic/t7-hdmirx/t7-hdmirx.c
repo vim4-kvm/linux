@@ -1198,6 +1198,11 @@ int t7_hdmirx_set_edid(struct device *dev, const struct v4l2_edid *edid)
 	ret = t7_hdmirx_ddc_start(rx, edid->edid, size);
 	if (ret && previous_size)
 		t7_hdmirx_ddc_start(rx, previous, previous_size);
+	/* Boot defers UHD HPD until core_start has enabled SCDC. Runtime
+	 * replacement already has that core, so finish the disconnect pulse.
+	 */
+	if (rx->ddc_active && (!rx->uhd60 || rx->core_active))
+		t7_hdmirx_set_hpd(rx, true);
 	/* Runtime updates must not replace the pre-probe teardown snapshot. */
 	rx->saved_reset = saved_reset;
 	rx->saved_port_sel = saved_port;
