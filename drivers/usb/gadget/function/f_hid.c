@@ -1163,8 +1163,10 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
 	/* maybe allocate device-global string IDs, and patch descriptors */
 	us = usb_gstrings_attach(c->cdev, ct_func_strings,
 				 ARRAY_SIZE(ct_func_string_defs));
-	if (IS_ERR(us))
-		return PTR_ERR(us);
+	if (IS_ERR(us)) {
+		status = PTR_ERR(us);
+		goto fail;
+	}
 	hidg_interface_desc.iInterface = us[CT_FUNC_HID_IDX].id;
 
 	/* allocate instance-specific interface IDs, and patch descriptors */
@@ -1588,6 +1590,14 @@ static void hidg_unbind(struct usb_configuration *c, struct usb_function *f)
 
 	cdev_device_del(hidg->cdev, &hidg->dev);
 	destroy_workqueue(hidg->workqueue);
+	/* disable() only releases a request waiting for a userspace report.
+	 * The idle EP0 request still belongs to this binding, even if the
+	 * function instance is retained for a later configfs rebind.
+	 */
+	if (hidg->get_req) {
+		usb_ep_free_request(c->cdev->gadget->ep0, hidg->get_req);
+		hidg->get_req = NULL;
+	}
 	usb_free_all_descriptors(f);
 }
 
