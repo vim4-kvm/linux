@@ -19,6 +19,29 @@ Debugfs exposes raw AVI/DRM candidates, without a freshness or HDR-readiness
 claim. YCbCr/deep-colour frames remain rejected before a capture lease is
 acquired. This is receiver characterization, not HDR capture or tone mapping.
 
+With the additional `hdr_capture=1`, HDR10 PQ / BT.2020 limited YCbCr420
+10-bit VIC97 can acquire an NV12 capture lease. The RX output mapper performs
+420/deep-colour unpacking; its half-width timing counters are normalized to
+3840x2160. Other YUV/deep formats still fail qualification. A valid DRM packet
+must have arrived through the new-packet latch within one second; packet IRQ
+mode bit 4 requests every receipt rather than only content changes. Both the
+packet selection and IRQ mode are restored on shutdown. AVI/DRM checksums and
+double reads reject malformed/torn packets; link loss clears metadata.
+
+The stream lease also records HDR/SDR classification. A change invalidates
+capture even at unchanged geometry, allowing the existing loss/recovery path
+to rebuild without publishing PQ bytes as SDR. VDIN HDR2 performs PQ EOTF,
+BT.2020-to-709 gamut conversion, 203/1000-nit tone mapping and sRGB OETF before
+limited BT.709 NV12 output. Packed RGB HDR, HLG, HDR10+ dynamic metadata and
+Dolby Vision are unsupported. The default options remain off.
+
+The platform device's write-only `hdr_curve` accepts the gain and OETF as two
+149-value CSV lines in one write. Invalid or incomplete transactions keep the
+previous curve. The IRQ applies a pending pair with write requests gated at
+an AXI-complete frame boundary and discards the following frame. SDR bypass
+does not load pending curves. This reuses vim4-hdr-curve and the existing
+manager white/peak controls without shared writable vendor globals.
+
 `VIDIOC_QUERY_DV_TIMINGS` and `VIDIOC_G_PARM` report a live measurement for the
 qualified profile, including fractional rates near 60 Hz. Frame period comes
 from the RX reference-clock counter, not from the capture buffer dimensions.
