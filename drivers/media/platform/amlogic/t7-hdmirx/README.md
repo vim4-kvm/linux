@@ -18,6 +18,11 @@ Capture holds a receiver lease from before DMA starts until the MIF is stopped.
 The worker never reconfigures a PHY with outstanding leases. Stop quarantine
 retains that lease until reboot. Audio PLL and DDC registers are not part of the
 video relock sequence. Status exposes `link_ready` and `capture_users`.
+Stopping first gates write requests and synchronizes the IRQ, then polls the
+MIF's final-AXI-response write-done flag. A source can stop before an IRQ arrives;
+hardware-confirmed drain releases its lease without publishing that partial
+frame. A genuinely busy MIF still quarantines buffers until reboot, and a faulted
+queue rejects new buffer allocation before it can consume more CMA memory.
 `python3 test_link.py` covers delayed/absent source, PLL failure, late alignment,
 source changes during qualification and DMA lease exclusion using actual code.
 
