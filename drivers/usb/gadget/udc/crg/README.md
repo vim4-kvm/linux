@@ -33,3 +33,8 @@ python3 drivers/usb/gadget/udc/crg/test_probe_failures.py
 The tests compile actual driver functions with controlled completions/allocation
 failures. They cover EP0 ownership across SETUP/reset/unbind, allocation failures
 and IRQ error propagation; they do not emulate the controller or validate DMA.
+
+Disconnect halts DMA and rejects new submissions before retiring outstanding
+requests while function completion contexts still exist. Waiting until
+udc_stop is too late: the gadget core has already unbound the functions then.
+Class-specific EP0 transfers can remain pending without composite setup_pending.

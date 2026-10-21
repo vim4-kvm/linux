@@ -2107,6 +2107,11 @@ crg_udc_ep_queue(struct usb_ep *_ep, struct usb_request *_req,
 
 	spin_lock_irqsave(&crg_udc->udc_lock, flags);
 
+	if (!crg_udc->pullup_enabled) {
+		spin_unlock_irqrestore(&crg_udc->udc_lock, flags);
+		return -ESHUTDOWN;
+	}
+
 	if (!udc_ep_ptr->first_trb ||
 		!udc_req_ptr->usb_req.complete ||
 		!udc_req_ptr->usb_req.buf ||
@@ -3033,6 +3038,8 @@ static int crg_gadget_pullup(struct usb_gadget *g, int is_on)
 
 	spin_lock_irqsave(&udc->udc_lock, flags);
 	udc->pullup_enabled = !!is_on;
+	if (!is_on)
+		udc->device_state = USB_STATE_ATTACHED;
 	if (is_on) {
 		/* RUN also enables port events when VBUS arrives after binding. */
 		crg_udc_start(udc);
@@ -3040,8 +3047,20 @@ static int crg_gadget_pullup(struct usb_gadget *g, int is_on)
 	}
 	spin_unlock_irqrestore(&udc->udc_lock, flags);
 	if (!is_on) {
+		unsigned int i;
+
 		if (!crg_stop_controller(udc))
 			return -ETIMEDOUT;
+		/*
+		 * The gadget core unbinds functions before udc_stop(). Retire even
+		 * function-owned EP0 transfers here, while their completion context
+		 * still exists, after the controller has stopped accessing DMA.
+		 */
+		spin_lock_irqsave(&udc->udc_lock, flags);
+		for (i = 0; i < ARRAY_SIZE(udc->udc_ep); i++)
+			if (udc->udc_ep[i].desc)
+				nuke(&udc->udc_ep[i], -ESHUTDOWN, flags);
+		spin_unlock_irqrestore(&udc->udc_lock, flags);
 		usb_gadget_set_state(g, USB_STATE_NOTATTACHED);
 	}
 	return 0;
