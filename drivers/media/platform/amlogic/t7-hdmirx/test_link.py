@@ -45,6 +45,7 @@ struct device { void *data; };
 '''
 stubs = r'''
 static bool signal_valid, source_present, hdmi2 = true, pll_fail, late_alignment, lose_during_wait;
+static bool unsupported_signal;
 static unsigned int pll_calls, pcs_calls, queued, canceled, last_delay, meter_resets;
 static unsigned int profile_changes;
 static u32 meter_reset;
@@ -55,6 +56,7 @@ static void mutex_lock(struct mutex *lock) { assert(!lock->held); lock->held = t
 static void mutex_unlock(struct mutex *lock) { assert(lock->held); lock->held = false; }
 static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 {
+    if (unsupported_signal) return -ERANGE;
     return signal_valid && (!rx->dynamic_modes || rx->uhd60==hdmi2) ? 0 : -ENOLINK;
 }
 static int t7_hdmirx_check_video(struct device *dev)
@@ -64,6 +66,8 @@ static int t7_hdmirx_check_video(struct device *dev)
 }
 static u32 readl(void *address)
 {
+    if (address == receiver.phy + T7_RX_PHY_APLL0) return T7_RX_PHY_PLL_LOCK;
+    if (address == receiver.top + T7_RX_TOP_TMDS_ALIGN_STAT) return BIT(0);
     if (address == receiver.top + T7_RX_TOP_SW_RESET) return meter_reset;
     if (address == receiver.top + T7_RX_TOP_HPD_PWR5V)
         return source_present ? BIT(20 + receiver.port) : 0;
@@ -161,6 +165,26 @@ int main(void)
     assert(link.ready && receiver.uhd60 && profile_changes==2);
     memcpy(&audio_div,phy+T7_RX_AUD_PLL3,4); assert(audio_div==0);
     assert(t7_hdmirx_stream_get(&dev,1920,1080)==-EPIPE && !link.users);
+    /* Observing an HDR cable must not enable capture or reset a locked link
+     * on each polling tick. Disabled probes still reject the extra clock.
+     */
+    assert(!t7_hdmirx_cable_supported(&receiver,92812500,true));
+    receiver.hdr_probe=true;
+    assert(t7_hdmirx_cable_supported(&receiver,92812500,true));
+    assert(!t7_hdmirx_cable_supported(&receiver,92812500,false));
+    assert(!t7_hdmirx_cable_supported(&receiver,90812499,true));
+    assert(!t7_hdmirx_cable_supported(&receiver,94812501,true));
+    assert(!t7_hdmirx_cable_supported(&receiver,0,true));
+    assert(!t7_hdmirx_cable_supported(&receiver,297000000,true));
+    cable_hz=92812500; unsupported_signal=true; link.configured=false;
+    link.stable_samples=0; link.previous_cable=0;
+    unsigned int before_probe=pll_calls;
+    tick(&link,4);
+    assert(link.configured && !link.ready && pll_calls==before_probe+1);
+    tick(&link,100);
+    assert(!link.ready && pll_calls==before_probe+1);
+    assert(t7_hdmirx_stream_get(&dev,3840,2160)==-ENOLINK && !link.users);
+    unsupported_signal=false; tick(&link,1); assert(link.ready);
     t7_hdmirx_link_stop(&link);
     assert(canceled == 1 && !link.ready);
     puts("Receiver recovery: absent/delayed source, DMA leases, PLL failure and late alignment passed");
