@@ -865,8 +865,11 @@ static int t7_vdin_enum_input(struct file *file, void *priv, struct v4l2_input *
 	strscpy(input->name, "HDMI", sizeof(input->name));
 	input->type = V4L2_INPUT_TYPE_CAMERA;
 	input->capabilities = 0;
-	if (t7_hdmirx_check_video(vdin->receiver))
-		input->status = V4L2_IN_ST_NO_SYNC;
+	/* Polling status must not hold the capture queue lock across the 20ms
+	 * stability wait. STREAMON still performs the two-sample qualification.
+	 */
+	input->status = t7_hdmirx_check_video_now(vdin->receiver) ?
+			V4L2_IN_ST_NO_SYNC : 0;
 	return 0;
 }
 
