@@ -319,6 +319,16 @@ static void check_direct(void) {
     assert(!pthread_create(&stop,NULL,stop_stream,NULL)); await(&stop_waiting,1);
     assert(!completed); step(1,false); pthread_join(stop,NULL);
     assert(completed==4 && !pins); teardown(b); assert(!live_leases);
+    /* Source loss may suppress the IRQ even after the final AXI response. */
+    setup_direct(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+    u32 drained = BIT(0);
+    memcpy(registers+VDIN_WR_STATUS*4,&drained,4);
+    assert(!receiver.dma_idle);
+    __atomic_store_n(&expire,true,__ATOMIC_RELEASE); wake_up(&receiver.buffer_wait);
+    await(&completed,4); t7_vdin_stop_streaming(&receiver.queue);
+    assert(!receiver.faulted && !pins && !receiver.receiver_lease);
+    for (int i=0;i<4;i++) assert(b[i].vb.vb2_buf.state==VB2_BUF_STATE_ERROR);
+    teardown(b); assert(!live_leases);
     /* Busy IRQ / missing IRQ: retain used allocator memory despite vb2 cleanup. */
     for (int missing=0;missing<2;missing++) {
         setup_direct(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
@@ -326,6 +336,9 @@ static void check_direct(void) {
         else step(1,true);
         await(&completed,4); t7_vdin_stop_streaming(&receiver.queue);
         assert(receiver.faulted && pins==1 && receiver.queue.error);
+        unsigned int buffers=4, planes=0, sizes[1]={0};
+        for (int retry=0;retry<16;retry++)
+            assert(t7_vdin_queue_setup(&receiver.queue,&buffers,&planes,sizes,NULL)==-EIO);
         struct dma_buf *quarantined=b[0].lease;
         for (int i=0;i<4;i++) assert(b[i].vb.vb2_buf.state==VB2_BUF_STATE_ERROR);
         teardown(b); assert(live_leases==1 && quarantined->allocation->refs==1);

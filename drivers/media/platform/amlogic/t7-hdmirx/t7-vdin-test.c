@@ -277,10 +277,15 @@ static int t7_vdin_stop_dma(struct t7_vdin *vdin)
 	t7_vdin_read(vdin, VDIN_WR_CTRL);
 	spin_unlock_irqrestore(&vdin->irq_lock, flags);
 	synchronize_irq(vdin->irq);
-	/* T7's integrated MIF uses write-done, not the older VPU arbiter bits. */
+	/* With requests gated, T7's final-AXI-response write-done proves drain.
+	 * Source loss may suppress the IRQ: software completion is required to
+	 * publish a frame, but must not veto hardware-confirmed DMA shutdown.
+	 */
 	ret = readl_poll_timeout(vdin->regs + VDIN_WR_STATUS * 4, idle,
-				 vdin->dma_idle && (idle & BIT(0)),
+				 idle & BIT(0),
 				 10, 100000);
+	if (!ret)
+		vdin->dma_idle = true;
 	if (ret) {
 		/* Keep DMA memory, clocks and binding alive until a hardware reboot. */
 		if (!vdin->faulted)
@@ -708,6 +713,9 @@ static int t7_vdin_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
 {
 	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
 
+	/* Reject retries before vb2 can allocate a new CMA-backed buffer pool. */
+	if (vdin->faulted)
+		return -EIO;
 	if (*planes)
 		return *planes == 1 && sizes[0] >= vdin->allocation_size ? 0 : -EINVAL;
 	*planes = 1;

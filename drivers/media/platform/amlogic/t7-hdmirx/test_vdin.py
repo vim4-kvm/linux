@@ -53,7 +53,7 @@ static uint8_t registers[0x40000], frame[3840U * 2160U * 3U + 16];
 static struct t7_vdin receiver;
 static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)
 { assert(!vdin->direct_dma); return NULL; }
-static unsigned int pins, requests, timing_checks;
+static unsigned int pins, requests, timing_checks, receiver_users;
 static bool timeout, busy, bad_timing, change_timing;
 static u32 readl(void *address)
 {
@@ -100,6 +100,18 @@ static int t7_hdmirx_check_video(struct device *dev)
     timing_checks++;
     return bad_timing || (change_timing && timing_checks == 2) ? -ERANGE : 0;
 }
+static int t7_hdmirx_stream_get(struct device *dev)
+{
+    int ret = t7_hdmirx_check_video(dev);
+    if (!ret) receiver_users++;
+    return ret;
+}
+static void t7_hdmirx_stream_put(struct device *dev)
+{
+    (void)dev;
+    assert(receiver_users && !receiver.armed && receiver.dma_idle);
+    receiver_users--;
+}
 static unsigned long wait_for_completion_timeout(struct completion *done, unsigned long limit);
 '''
 checks = r'''
@@ -131,7 +143,7 @@ static void reset(void)
     receiver = (struct t7_vdin) { .regs = registers, .frame = frame,
                                .frame_dma = 0x10000000, .width = 1920, .height = 1080,
                                .stride = VDIN_STRIDE, .frame_size = VDIN_FRAME_SIZE };
-    pins = requests = timing_checks = 0;
+    pins = requests = timing_checks = receiver_users = 0;
     timeout = busy = bad_timing = change_timing = false;
 }
 int main(void)
@@ -141,6 +153,7 @@ int main(void)
     assert(!t7_vdin_capture(&receiver));
     assert((readl(registers + VDIN_LFIFO_CTRL * 4) & 0xc0000000) == 0xc0000000);
     assert(receiver.snapshots == 1 && receiver.frame_irqs == 2 && !receiver.armed);
+    assert(!receiver_users);
     assert(requests == 1 && timing_checks == 2 && frame[receiver.frame_size - 1] == 0x5a);
     assert(frame[receiver.frame_size] == 0xa5);
     assert(!t7_vdin_capture(&receiver) && receiver.snapshots == 2);
@@ -158,6 +171,7 @@ int main(void)
     reset(); timeout = true;
     assert(t7_vdin_capture(&receiver) == -ETIMEDOUT);
     assert(!receiver.armed && receiver.faulted && pins == 1 && !receiver.snapshots);
+    assert(receiver_users == 1);
     assert(!(readl(registers + VDIN_WR_CTRL * 4) & VDIN_WR_REQ));
     reset(); change_timing = true;
     assert(t7_vdin_capture(&receiver) == -ERANGE && !receiver.snapshots);
