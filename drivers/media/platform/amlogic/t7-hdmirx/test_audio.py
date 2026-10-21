@@ -17,6 +17,8 @@ prefix = r'''
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+struct mutex { int unused; };
+struct delayed_work { int unused; };
 typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;

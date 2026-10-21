@@ -135,6 +135,7 @@ struct t7_vdin {
 	wait_queue_head_t buffer_wait;
 	struct task_struct *thread;
 	bool streaming; /* Protected by lock, including debugfs exclusion. */
+	bool receiver_lease;
 	/* Private cached DMA ring; all ownership transitions use irq_lock. */
 	struct t7_vdin_slot slots[VDIN_DMA_SLOTS];
 	bool ring_mode;
@@ -360,7 +361,7 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 
 	if (vdin->faulted)
 		return -EIO;
-	ret = t7_hdmirx_check_video(vdin->receiver);
+	ret = t7_hdmirx_stream_get(vdin->receiver);
 	if (ret)
 		return ret;
 	memset(vdin->frame, 0xa5, vdin->frame_size);
@@ -384,12 +385,14 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 		dev_err(vdin->dev, "capture timeout: IRQs %u, pixels %#x, lines %#x, WR %#x\n",
 			vdin->frame_irqs, t7_vdin_read(vdin, VDIN_ACTIVE_PIXELS),
 			t7_vdin_read(vdin, VDIN_LCNT_STATUS), t7_vdin_read(vdin, VDIN_WR_STATUS));
+		t7_hdmirx_stream_put(vdin->receiver);
 		return -ETIMEDOUT;
 	}
 	dma_rmb();
 	ret = t7_hdmirx_check_video(vdin->receiver);
 	if (!ret)
 		vdin->snapshots++;
+	t7_hdmirx_stream_put(vdin->receiver);
 	return ret;
 }
 
@@ -669,6 +672,12 @@ static int t7_vdin_thread(void *data)
 	}
 	if (t7_vdin_ring_stop(vdin))
 		ret = -EIO;
+	mutex_lock(&vdin->lock);
+	if (vdin->receiver_lease && !vdin->faulted) {
+		t7_hdmirx_stream_put(vdin->receiver);
+		vdin->receiver_lease = false;
+	}
+	mutex_unlock(&vdin->lock);
 	if (vdin->direct_dma) {
 		unsigned int i;
 
@@ -771,14 +780,17 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	int ret;
 
 	mutex_lock(&vdin->lock);
-	ret = vdin->faulted ? -EIO : t7_hdmirx_check_video(vdin->receiver);
+	ret = vdin->faulted ? -EIO : t7_hdmirx_stream_get(vdin->receiver);
 	if (!ret) {
+		vdin->receiver_lease = true;
 		vdin->streaming = true;
 		vdin->thread = kthread_run(t7_vdin_thread, vdin, "t7-vdin-capture");
 		if (IS_ERR(vdin->thread)) {
 			ret = PTR_ERR(vdin->thread);
 			vdin->thread = NULL;
 			vdin->streaming = false;
+			t7_hdmirx_stream_put(vdin->receiver);
+			vdin->receiver_lease = false;
 		}
 	}
 	mutex_unlock(&vdin->lock);

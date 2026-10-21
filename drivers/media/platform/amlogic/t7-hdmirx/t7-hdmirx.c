@@ -11,10 +11,12 @@
 #include <linux/iopoll.h>
 #include <linux/math64.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
 #include <linux/seq_file.h>
+#include <linux/workqueue.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
@@ -190,7 +192,20 @@ enum t7_hdmirx_clock {
 	T7_RX_NUM_CLOCKS,
 };
 
+struct t7_hdmirx;
+struct t7_hdmirx_link {
+	struct mutex lock;
+	struct delayed_work work;
+	struct t7_hdmirx *rx;
+	unsigned int users;
+	u32 previous_cable;
+	unsigned int stable_samples;
+	bool ready;
+	bool configured;
+};
+
 struct t7_hdmirx {
+	struct t7_hdmirx_link *link;
 	bool uhd60;
 	u8 saved_ddc_switch, saved_sink_version, saved_tmds_config;
 	void __iomem *top;
@@ -623,12 +638,13 @@ static u32 t7_hdmirx_core_read16(struct t7_hdmirx *rx, u32 offset)
 	return readb(rx->cor + offset) | (readb(rx->cor + offset + 1) << 8);
 }
 
-int t7_hdmirx_check_video_now(struct device *dev)
+static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 {
-	struct t7_hdmirx *rx = dev_get_drvdata(dev);
 	u32 ticks, reference;
 
 	if (!rx || !rx->core_active)
+		return -ENOLINK;
+	if (rx->link && !(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK))
 		return -ENOLINK;
 	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
 	    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
@@ -651,6 +667,14 @@ int t7_hdmirx_check_video_now(struct device *dev)
 	if (!ticks || ticks < reference / 61 || ticks > reference / 59)
 		return -ERANGE;
 	return 0;
+}
+int t7_hdmirx_check_video_now(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+
+	if (rx && rx->link && !READ_ONCE(rx->link->ready))
+		return -ENOLINK;
+	return t7_hdmirx_video_status(rx);
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_check_video_now);
 
@@ -872,6 +896,104 @@ static int t7_hdmirx_audio_register(struct platform_device *pdev, struct t7_hdmi
 					     &t7_hdmirx_audio_dai, 1);
 }
 
+int t7_hdmirx_stream_get(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	int ret;
+
+	if (!rx || !rx->link)
+		return -ENOLINK;
+	mutex_lock(&rx->link->lock);
+	ret = t7_hdmirx_check_video(dev);
+	if (!ret)
+		rx->link->users++;
+	mutex_unlock(&rx->link->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_stream_get);
+
+void t7_hdmirx_stream_put(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+
+	mutex_lock(&rx->link->lock);
+	if (WARN_ON(!rx->link->users)) {
+		mutex_unlock(&rx->link->lock);
+		return;
+	}
+	rx->link->users--;
+	mutex_unlock(&rx->link->lock);
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_stream_put);
+
+static void t7_hdmirx_link_work(struct work_struct *work)
+{
+	struct t7_hdmirx_link *link = container_of(to_delayed_work(work),
+						struct t7_hdmirx_link, work);
+	struct t7_hdmirx *rx = link->rx;
+	u32 cable;
+	int ret;
+
+	mutex_lock(&link->lock);
+	ret = t7_hdmirx_video_status(rx);
+	if (!ret && link->configured) {
+		if (!READ_ONCE(link->ready)) {
+			usleep_range(20000, 21000);
+			ret = t7_hdmirx_video_status(rx);
+		}
+		WRITE_ONCE(link->ready, !ret);
+		goto out;
+	}
+	WRITE_ONCE(link->ready, false);
+	/* A live or quarantined MIF owns its receiver until DMA is safe. */
+	if (link->users)
+		goto out;
+	cable = t7_hdmirx_meter_hz(readl(rx->top + T7_RX_TOP_METER_CABLE_STAT),
+				 clk_get_rate(rx->clocks[T7_RX_METER].clk));
+	rx->cable_hz = cable;
+	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
+	    (!!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1)) != rx->uhd60) ||
+	    cable < 146500000 || cable > 150500000) {
+		link->stable_samples = 0;
+		link->previous_cable = 0;
+		link->configured = false;
+		goto out;
+	}
+	if (link->previous_cable &&
+	    abs((int)cable - (int)link->previous_cable) <= 500000)
+		link->stable_samples++;
+	else
+		link->stable_samples = 0;
+	link->previous_cable = cable;
+	if (link->stable_samples < 3)
+		goto out;
+	link->stable_samples = 0;
+	ret = t7_hdmirx_phy_pll(rx);
+	if (ret)
+		goto out;
+	/* Video PLL/PCS only: keep DDC/HPD and the audio PLL configuration. */
+	t7_hdmirx_phy_equalize(rx);
+	t7_hdmirx_reset_pcs(rx);
+	link->configured = true;
+	ret = t7_hdmirx_video_status(rx);
+	if (!ret) {
+		usleep_range(20000, 21000);
+		ret = t7_hdmirx_video_status(rx);
+	}
+	WRITE_ONCE(link->ready, !ret);
+out:
+	mutex_unlock(&link->lock);
+	schedule_delayed_work(&link->work, msecs_to_jiffies(250));
+}
+
+static void t7_hdmirx_link_stop(void *data)
+{
+	struct t7_hdmirx_link *link = data;
+
+	cancel_delayed_work_sync(&link->work);
+	WRITE_ONCE(link->ready, false);
+}
+
 static int t7_hdmirx_status(struct seq_file *s, void *unused)
 {
 	struct device *dev = s->private;
@@ -897,6 +1019,10 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 		   readl(rx->top + T7_RX_TOP_EDID_GEN_STAT));
 	seq_printf(s, "phy_active: %u\n", rx->phy_active);
 	seq_printf(s, "core_active: %u\n", rx->core_active);
+	if (rx->link) {
+		seq_printf(s, "link_ready: %u\n", READ_ONCE(rx->link->ready));
+		seq_printf(s, "capture_users: %u\n", READ_ONCE(rx->link->users));
+	}
 	if (rx->core_active) {
 		u32 ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
 			    (readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
@@ -1052,15 +1178,25 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 			if (ret)
 				return dev_err_probe(dev, ret, "Cannot initialize receiver core\n");
 		}
-		ret = t7_hdmirx_wait_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
-		if (!ret)
-			ret = t7_hdmirx_phy_pll(rx);
-		if (ret)
-			return dev_err_probe(dev, ret, "PHY trial failed, cable %u Hz, APLL %#x\n",
-					     rx->cable_hz, readl(rx->phy + T7_RX_PHY_APLL0));
-		t7_hdmirx_phy_equalize(rx);
-		if (core_test)
-			t7_hdmirx_reset_pcs(rx);
+		if (core_test) {
+			rx->link = devm_kzalloc(dev, sizeof(*rx->link), GFP_KERNEL);
+			if (!rx->link)
+				return -ENOMEM;
+			rx->link->rx = rx;
+			mutex_init(&rx->link->lock);
+			INIT_DELAYED_WORK(&rx->link->work, t7_hdmirx_link_work);
+			ret = devm_add_action_or_reset(dev, t7_hdmirx_link_stop, rx->link);
+			if (ret)
+				return ret;
+			schedule_delayed_work(&rx->link->work, 0);
+		} else {
+			ret = t7_hdmirx_wait_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
+			if (!ret)
+				ret = t7_hdmirx_phy_pll(rx);
+			if (ret)
+				return dev_err_probe(dev, ret, "PHY trial failed\n");
+			t7_hdmirx_phy_equalize(rx);
+		}
 	}
 	ret = t7_hdmirx_audio_register(pdev, rx);
 	if (ret)
@@ -1074,7 +1210,7 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 	ret = devm_add_action_or_reset(dev, t7_hdmirx_debugfs_remove, debugfs);
 	if (ret)
 		return ret;
-	dev_info(dev, "receiver resources ready, input port %u; capture not implemented\n",
+	dev_info(dev, "receiver ready, input port %u; waiting for a stable source\n",
 		 rx->port);
 	return 0;
 }
