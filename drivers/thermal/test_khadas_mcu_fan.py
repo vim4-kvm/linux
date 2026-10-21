@@ -51,7 +51,7 @@ static struct thermal_zone_device *thermal_zone_get_zone_by_name(const char *nam
 static int thermal_zone_get_temp(struct thermal_zone_device *zone, int *temp)
 {
     reads++; *temp = temperatures[zone->index];
-    return zone->index == unreadable ? -1 : 0;
+    return unreadable == -2 || zone->index == unreadable ? -1 : 0;
 }
 static int regmap_write(void *map, unsigned int reg, unsigned int value)
 {
@@ -88,7 +88,7 @@ int main(void)
     for (int temp = -20000; temp <= 130000; temp += 1000) {
         int speed = khadas_vim4_fan_target(temp, false);
         assert(speed >= previous && speed <= 100);
-        assert(khadas_vim4_fan_target(temp, true) == 100);
+        assert(khadas_vim4_fan_target(temp, true) == max(speed, 15));
         if (temp < 45000) assert(speed == 0);
         if (temp >= 100000) assert(speed == 100);
         previous = speed;
@@ -116,10 +116,10 @@ int main(void)
     for (int i = 0; i < 6; i++) temperatures[i] = 50000;
     missing = 5;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
-    assert(ctx.level == 100 && ctx.sensor_fault && !ctx.quiet_started);
+    assert(ctx.level == 15 && ctx.sensor_fault && !ctx.quiet_started);
     assert(delay == 1000);
     khadas_vim4_fan_work(&ctx.quiet_work.work);
-    assert(ctx.level == 100 && !ctx.quiet_started && delay == 1000);
+    assert(ctx.level == 15 && !ctx.quiet_started && delay == 1000);
     missing = -1; reads = 0;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 15 && !ctx.sensor_fault && ctx.quiet_started);
@@ -129,15 +129,34 @@ int main(void)
     assert(ctx.level == 20 && ctx.temperature == 90000);
     unreadable = 5;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
-    assert(ctx.level == 100 && ctx.sensor_fault);
+    assert(ctx.level == 15 && ctx.sensor_fault);
     assert(delay == 1000);
+    /* A missing early sensor must not hide another zone's valid hot sample. */
+    unreadable = -1; missing = 0;
+    khadas_vim4_fan_work(&ctx.quiet_work.work);
+    assert(ctx.level == 85 && ctx.sensor_fault && delay == 1000);
+    temperatures[5] = 100000;
+    khadas_vim4_fan_work(&ctx.quiet_work.work);
+    assert(ctx.level == 100 && ctx.sensor_fault);
+    /* All temperatures unknown: use the requested fallback and keep retrying. */
+    missing = -1; unreadable = -2;
+    khadas_vim4_fan_work(&ctx.quiet_work.work);
+    assert(ctx.level == 15 && ctx.sensor_fault && delay == 1000);
+    /* Recovery adopts a valid hot target immediately, without a 30s ramp. */
+    unreadable = -1; temperatures[5] = 90000;
+    khadas_vim4_fan_work(&ctx.quiet_work.work);
+    assert(ctx.level == 85 && !ctx.sensor_fault && delay == 30000);
+    unreadable = 5;
+    khadas_vim4_fan_work(&ctx.quiet_work.work);
+    assert(ctx.level == 15 && ctx.sensor_fault && delay == 1000);
     unreadable = -1; temperatures[5] = 50000;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
-    assert(ctx.level == 95 && !ctx.sensor_fault);
+    assert(ctx.level == 15 && !ctx.sensor_fault);
     assert(delay == 30000);
+    temperatures[5] = 90000;
     write_error = -1;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
-    assert(ctx.level == 95 && requested == 90 && delay == 1000);
+    assert(ctx.level == 15 && requested == 20 && delay == 1000);
     write_error = 0; temperatures[2] = 100000;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 100);
