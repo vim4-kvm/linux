@@ -19,6 +19,9 @@ prefix = r'''
 #include <stddef.h>
 #include <limits.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/types.h>
+#include <errno.h>
 #define ARRAY_SIZE(a) ((int)(sizeof(a) / sizeof((a)[0])))
 #define WRITE_ONCE(a, b) ((a) = (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
@@ -28,9 +31,14 @@ prefix = r'''
 #define msecs_to_jiffies(ms) (ms)
 #define dev_err_ratelimited(...) ((void)0)
 #define dev_warn_ratelimited(...) ((void)0)
+struct mutex { int unused; };
+static void mutex_lock(struct mutex *lock) { (void)lock; }
+static void mutex_unlock(struct mutex *lock) { (void)lock; }
 struct work_struct { int unused; };
 struct delayed_work { struct work_struct work; };
 struct device { void *data; };
+struct device_attribute { int unused; };
+static void *system_wq;
 struct regulator { int unused; };
 struct khadas_mcu { void *regmap; };
 struct thermal_zone_device { int index; };
@@ -62,6 +70,10 @@ static void schedule_delayed_work(struct delayed_work *work, int milliseconds)
 {
     (void)work; queued++; delay = milliseconds;
 }
+static void mod_delayed_work(void *queue, struct delayed_work *work, int milliseconds)
+{
+    (void)queue; schedule_delayed_work(work, milliseconds);
+}
 static void cancel_delayed_work_sync(struct delayed_work *work)
 {
     (void)work; canceled++; cancel_order = ++sequence;
@@ -76,10 +88,11 @@ prefix = prefix.replace('/* SENSOR_NAMES */',
 start = source.index('struct khadas_mcu_fan_ctx {')
 context = source[start:source.index('\n};', start) + 3]
 functions = '\n'.join(function(signature) for signature in (
-    'static int khadas_vim4_fan_lerp(', 'static int khadas_vim4_fan_target(',
+    'static int khadas_vim4_fan_lerp(', 'static int khadas_vim4_fan_target_curve(', 'static int khadas_vim4_fan_target(',
     'static unsigned int khadas_vim4_fan_next(', 'static int khadas_mcu_fan_set_level(',
     'static void khadas_vim4_fan_work(', 'static void khadas_vim4_fan_stop(',
     'static int khadas_mcu_fan_suspend(', 'static int khadas_mcu_fan_resume(',
+    'static ssize_t trigger_temperatures_store(',
 ))
 checks = r'''
 int main(void)
@@ -110,8 +123,24 @@ int main(void)
         }
     struct khadas_mcu mcu = {0};
     struct khadas_mcu_fan_ctx ctx = {.mcu = &mcu, .quiet = true,
-                                    .max_level = 100, .level = 100};
+                                    .max_level = 100, .level = 100,
+                                    .trigger_low = 60, .trigger_mid = 80, .trigger_high = 100};
     struct device dev = {.data = &ctx};
+    int old_queued = queued;
+    const char *invalid[] = {"34 60 90", "81 90 100", "60 64 100",
+                            "60 80 84", "60 80 101", "60 80 100 junk",
+                            "-1 80 100", "60 80", "4294967295 80 100"};
+    for (unsigned int i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        assert(trigger_temperatures_store(&dev, NULL, invalid[i], strlen(invalid[i])) == -EINVAL);
+        assert(ctx.trigger_low == 60 && ctx.trigger_mid == 80 && ctx.trigger_high == 100);
+        assert(queued == old_queued);
+    }
+    ctx.quiet_started = true;
+    assert(trigger_temperatures_store(&dev, NULL, "55 75 95\n", 9) == 9);
+    assert(ctx.trigger_low == 55 && ctx.trigger_mid == 75 && ctx.trigger_high == 95);
+    assert(!ctx.quiet_started && queued == old_queued + 1 && delay == 0);
+    ctx.trigger_low = 60; ctx.trigger_mid = 80; ctx.trigger_high = 100;
+    queued = old_queued;
     struct regulator power = {0};
     for (int i = 0; i < 6; i++) temperatures[i] = 50000;
     missing = 5;
@@ -160,6 +189,11 @@ int main(void)
     write_error = 0; temperatures[2] = 100000;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 100);
+    /* A custom quiet curve delays ordinary cooling, never emergency cooling. */
+    assert(khadas_vim4_fan_target_curve(49000, false, 65000, 85000, 100000) == 0);
+    assert(khadas_vim4_fan_target_curve(65000, false, 65000, 85000, 100000) == 35);
+    assert(khadas_vim4_fan_target_curve(100000, false, 65000, 85000, 100000) == 100);
+    assert(khadas_vim4_fan_target_curve(49000, true, 65000, 85000, 100000) == 15);
     ctx.level = 20;
     khadas_vim4_fan_stop(&ctx);
     assert(ctx.level == 100 && cancel_order < write_order);
@@ -184,6 +218,6 @@ int main(void)
 with tempfile.TemporaryDirectory(prefix='khadas-fan-test-') as directory:
     path = Path(directory)
     (path / 'test.c').write_text(prefix + context + functions + checks)
-    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra',
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Wno-unused-parameter',
                     '-Werror', str(path / 'test.c'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
