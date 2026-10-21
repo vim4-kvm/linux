@@ -92,8 +92,8 @@ static void timing(void)
     memcpy(top + T7_RX_TOP_HPD_PWR5V, &value, 4);
     value = 1; memcpy(top + T7_RX_TOP_TMDS_ALIGN_STAT, &value, 4);
     word(0x188c, 1920); word(0x188e, 1080);
-    word(0x1890, 44); word(0x1892, 2156);
-    word(0x1898, 5); word(0x189a, 1120);
+    word(0x1890, 2156); word(0x1892, 44);
+    word(0x1898, 1120); word(0x189a, 5);
     word(0x1888, 2777780 & 0xffff); core[0x188a] = 2777780 >> 16;
     core[0x1881] = 3;
 }
@@ -154,8 +154,8 @@ int main(void)
     rx.core_active = true; timing(); rx.uhd60 = true;
     assert(t7_hdmirx_check_video(&dev) == -ERANGE);
     word(0x188c, 3840); word(0x188e, 2160);
-    word(0x1890, 88); word(0x1892, 4312);
-    word(0x1898, 10); word(0x189a, 2240);
+    word(0x1890, 4312); word(0x1892, 88);
+    word(0x1898, 2240); word(0x189a, 10);
     assert(!t7_hdmirx_check_video(&dev));
     word(0x188e, 1080);
     assert(t7_hdmirx_check_video(&dev) == -ERANGE);
