@@ -146,6 +146,8 @@ static unsigned long wait_for_completion_timeout(struct completion *done, unsign
 }
 static void reset(void)
 {
+    memcpy(receiver.hdr_gain,t7_hdr_gain,sizeof(t7_hdr_gain));
+    memcpy(receiver.hdr_oetf,t7_hdr_srgb,sizeof(t7_hdr_srgb));
     memset(registers, 0, sizeof(registers));
     memset(frame, 0xa5, sizeof(frame));
     receiver = (struct t7_vdin) { .regs = registers, .frame = frame,

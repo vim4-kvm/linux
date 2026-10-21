@@ -137,6 +137,7 @@
 #define T7_RX_COR_UNREC_CTRL	0x115e
 #define T7_RX_COR_UNREC_TYPE	0x115f
 #define T7_RX_COR_UNREC_PACKET	0x11c0
+#define T7_RX_COR_PACKET_IRQ_MODE	0x1120
 
 static char *edid_firmware;
 module_param(edid_firmware, charp, 0400);
@@ -232,6 +233,7 @@ struct t7_hdmirx {
 	bool lease_hdr;
 	unsigned long long drm_received_ns;
 	u8 saved_unrec_ctrl, saved_unrec_type;
+	u8 saved_packet_irq_mode;
 	struct mutex audio_lock;
 	u8 saved_ddc_switch, saved_sink_version, saved_tmds_config;
 	void __iomem *top;
@@ -596,6 +598,9 @@ static void t7_hdmirx_core_stop(void *data)
 		writeb(rx->saved_unrec_type, rx->cor + T7_RX_COR_UNREC_TYPE);
 		writeb(rx->saved_unrec_ctrl, rx->cor + T7_RX_COR_UNREC_CTRL);
 	}
+	if (rx->hdr_capture)
+		writeb(rx->saved_packet_irq_mode, rx->cor + T7_RX_COR_PACKET_IRQ_MODE);
+	WRITE_ONCE(rx->drm_received_ns, 0);
 	rx->core_active = false;
 }
 
@@ -631,6 +636,8 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 		rx->saved_unrec_ctrl = readb(rx->cor + T7_RX_COR_UNREC_CTRL);
 		rx->saved_unrec_type = readb(rx->cor + T7_RX_COR_UNREC_TYPE);
 	}
+	if (rx->hdr_capture)
+		rx->saved_packet_irq_mode = readb(rx->cor + T7_RX_COR_PACKET_IRQ_MODE);
 	rx->core_active = true;
 	/* Hold AON reset while removing TMDS isolation and selecting PHY lanes. */
 	writeb(1, rx->cor + T7_RX_COR_AON_RESET);
@@ -681,6 +688,14 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 		/* Capture static metadata in the byte register bank, without packet DMA. */
 		writeb(0x87, rx->cor + T7_RX_COR_UNREC_TYPE);
 		writeb(1, rx->cor + T7_RX_COR_UNREC_CTRL);
+	}
+	if (rx->hdr_capture) {
+		/* Default is content-change IRQs. Freshness needs every DRM receipt,
+		 * including identical static metadata. This does not unmask an IRQ.
+		 */
+		writeb(rx->saved_packet_irq_mode | BIT(4),
+		       rx->cor + T7_RX_COR_PACKET_IRQ_MODE);
+		writeb(BIT(4), rx->cor + 0x1134);
 	}
 	if (rx->uhd60)
 		t7_hdmirx_set_hpd(rx, true);

@@ -67,6 +67,22 @@ static const u32 t7_hdr_srgb[149] = {
 	3861, 3921, 3980, 4038, 4095,
 };
 
+static void t7_vdin_hdr_reload(struct t7_vdin *vdin)
+{
+	unsigned int i;
+
+	t7_vdin_write(vdin, 0x12a6, 0);
+	for (i = 0; i < 148; i += 2)
+		t7_vdin_write(vdin, 0x12a7, vdin->hdr_gain[i] | (vdin->hdr_gain[i + 1] << 16));
+	t7_vdin_write(vdin, 0x12a7, vdin->hdr_gain[148]);
+	t7_vdin_write(vdin, 0x12a0, 0);
+	for (i = 0; i < 148; i += 2)
+		t7_vdin_write(vdin, 0x12a1,
+			      (vdin->hdr_oetf[i] >> 2) | ((vdin->hdr_oetf[i + 1] >> 2) << 16));
+	t7_vdin_write(vdin, 0x12a1, vdin->hdr_oetf[148] >> 2);
+	vdin->hdr_curve_pending = false;
+}
+
 static void t7_vdin_hdr_matrix(struct t7_vdin *vdin, u32 base, const int *coef)
 {
 	unsigned int i;
@@ -115,15 +131,7 @@ static void t7_vdin_hdr_configure(struct t7_vdin *vdin)
 	t7_vdin_write(vdin, 0x129e, 0);
 	for (i = 0; i < 143; i++)
 		t7_vdin_write(vdin, 0x129f, t7_hdr_pq[i]);
-	t7_vdin_write(vdin, 0x12a6, 0);
-	for (i = 0; i < 148; i += 2)
-		t7_vdin_write(vdin, 0x12a7, t7_hdr_gain[i] | (t7_hdr_gain[i + 1] << 16));
-	t7_vdin_write(vdin, 0x12a7, t7_hdr_gain[148]);
-	t7_vdin_write(vdin, 0x12a0, 0);
-	for (i = 0; i < 148; i += 2)
-		t7_vdin_write(vdin, 0x12a1,
-			      (t7_hdr_srgb[i] >> 2) | ((t7_hdr_srgb[i + 1] >> 2) << 16));
-	t7_vdin_write(vdin, 0x12a1, t7_hdr_srgb[148] >> 2);
+	t7_vdin_hdr_reload(vdin);
 	t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 1);
 	t7_vdin_write(vdin, VDIN_HDR_MATRIX_OUT, 1);
 	t7_vdin_write(vdin, VDIN_HDR_CTRL, BIT(15) | BIT(14) | BIT(13) |
