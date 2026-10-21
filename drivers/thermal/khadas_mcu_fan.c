@@ -50,17 +50,23 @@ static int khadas_vim4_fan_lerp(int temp, int low, int high,
 
 static int khadas_vim4_fan_target(int temp, bool sensor_fault)
 {
-	if (sensor_fault || temp >= 100000)
-		return 100;
-	if (temp < 45000)
-		return 0;
-	if (temp < 55000)
-		return khadas_vim4_fan_lerp(temp, 45000, 55000, 5, 25);
-	if (temp < 60000)
-		return khadas_vim4_fan_lerp(temp, 55000, 60000, 25, 35);
-	if (temp < 80000)
-		return khadas_vim4_fan_lerp(temp, 60000, 80000, 35, 70);
-	return khadas_vim4_fan_lerp(temp, 80000, 100000, 70, 100);
+	int target;
+
+	if (temp >= 100000)
+		target = 100;
+	else if (temp < 45000)
+		target = 0;
+	else if (temp < 55000)
+		target = khadas_vim4_fan_lerp(temp, 45000, 55000, 5, 25);
+	else if (temp < 60000)
+		target = khadas_vim4_fan_lerp(temp, 55000, 60000, 25, 35);
+	else if (temp < 80000)
+		target = khadas_vim4_fan_lerp(temp, 60000, 80000, 35, 70);
+	else
+		target = khadas_vim4_fan_lerp(temp, 80000, 100000, 70, 100);
+
+	/* Unknown sensors must not override another sensor's valid hot reading. */
+	return sensor_fault ? max(target, 15) : target;
 }
 
 static unsigned int khadas_vim4_fan_next(unsigned int current_speed,
@@ -96,6 +102,7 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 					struct khadas_mcu_fan_ctx, quiet_work);
 	int hottest = INT_MIN;
 	bool fault = false;
+	bool was_fault = ctx->sensor_fault;
 	unsigned int target;
 	int i, ret;
 
@@ -107,14 +114,15 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 		zone = thermal_zone_get_zone_by_name(khadas_vim4_fan_sensors[i]);
 		if (IS_ERR(zone) || thermal_zone_get_temp(zone, &temperature)) {
 			fault = true;
-			break;
+			continue;
 		}
 		hottest = max(hottest, temperature);
 	}
 	WRITE_ONCE(ctx->temperature, hottest);
 	WRITE_ONCE(ctx->sensor_fault, fault);
 	target = khadas_vim4_fan_target(hottest, fault);
-	if (ctx->quiet_started)
+	/* Fault handling and its first valid sample bypass the normal ramp. */
+	if (ctx->quiet_started && !fault && !was_fault)
 		target = khadas_vim4_fan_next(ctx->level, target);
 	ret = khadas_mcu_fan_set_level(ctx, target);
 	if (ret)
@@ -122,7 +130,8 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 	else if (!fault)
 		ctx->quiet_started = true;
 	if (fault)
-		dev_warn_ratelimited(ctx->dev, "Fan temperature unavailable; requesting full speed\n");
+		dev_warn_ratelimited(ctx->dev,
+			"Fan temperature unavailable; requesting %u%% output\n", target);
 
 	/* Thermal zones may register after the first boot-time sample. */
 	schedule_delayed_work(&ctx->quiet_work,
@@ -270,7 +279,8 @@ static int khadas_mcu_fan_probe(struct platform_device *pdev)
 		/* The quiet worker is the sole owner; do not bind step_wise too. */
 		INIT_DELAYED_WORK(&ctx->quiet_work, khadas_vim4_fan_work);
 		ctx->sensor_fault = true;
-		ret = khadas_mcu_fan_set_level(ctx, ctx->max_level);
+		ret = khadas_mcu_fan_set_level(ctx,
+					    khadas_vim4_fan_target(INT_MIN, true));
 		if (ret)
 			return ret;
 		ret = devm_add_action_or_reset(dev, khadas_vim4_fan_stop, ctx);
