@@ -8,7 +8,9 @@ source = Path(__file__).with_name('t7-hdmirx.c').read_text()
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define T7_RX_'))
 types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
                source.index('static int t7_hdmirx_validate_edid')]
-functions = source[source.index('int t7_hdmirx_stream_get('):
+start = source.index('static u32 t7_hdmirx_sample_cable(')
+functions = source[start:source.index('\n}', start) + 2] + '\n'
+functions += source[source.index('int t7_hdmirx_stream_get('):
                    source.index('static int t7_hdmirx_status(')]
 prefix = r'''
 #include <assert.h>
@@ -42,7 +44,8 @@ struct device { void *data; };
 '''
 stubs = r'''
 static bool signal_valid, source_present, hdmi2 = true, pll_fail, late_alignment, lose_during_wait;
-static unsigned int pll_calls, pcs_calls, queued, canceled, last_delay;
+static unsigned int pll_calls, pcs_calls, queued, canceled, last_delay, meter_resets;
+static u32 meter_reset;
 static u32 cable_hz;
 static struct t7_hdmirx receiver;
 static void *dev_get_drvdata(struct device *dev) { return dev->data; }
@@ -59,10 +62,18 @@ static int t7_hdmirx_check_video(struct device *dev)
 }
 static u32 readl(void *address)
 {
+    if (address == receiver.top + T7_RX_TOP_SW_RESET) return meter_reset;
     if (address == receiver.top + T7_RX_TOP_HPD_PWR5V)
         return source_present ? BIT(20 + receiver.port) : 0;
     assert(address == receiver.top + T7_RX_TOP_METER_CABLE_STAT);
     return cable_hz;
+}
+static void writel(u32 value, void *address)
+{
+    assert(address == receiver.top + T7_RX_TOP_SW_RESET && !receiver.link->users);
+    assert(!value || value == (BIT(5) | BIT(6)));
+    meter_reset = value;
+    if (value) meter_resets++;
 }
 static u8 readb(void *address)
 {
@@ -114,8 +125,9 @@ int main(void)
     tick(&link, 1); assert(pll_calls == 1 && pcs_calls == 1 && link.ready);
     tick(&link, 100); assert(pll_calls == 1);
     assert(!t7_hdmirx_stream_get(&dev) && !t7_hdmirx_stream_get(&dev) && link.users == 2);
+    unsigned int resets_before = meter_resets;
     signal_valid = false; tick(&link, 10);
-    assert(!link.ready && pll_calls == 1);
+    assert(!link.ready && pll_calls == 1 && meter_resets == resets_before);
     t7_hdmirx_stream_put(&dev); tick(&link, 10); assert(pll_calls == 1);
     t7_hdmirx_stream_put(&dev); tick(&link, 4); assert(link.ready && pll_calls == 2);
     signal_valid = false; source_present = false; tick(&link, 10);

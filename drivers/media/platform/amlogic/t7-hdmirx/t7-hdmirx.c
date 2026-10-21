@@ -371,6 +371,18 @@ static u32 t7_hdmirx_meter_hz(u32 status, unsigned long reference_hz)
 	return frequency <= U32_MAX ? frequency : 0;
 }
 
+static u32 t7_hdmirx_sample_cable(struct t7_hdmirx *rx, unsigned long reference_hz)
+{
+	u32 status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
+
+	/* Completed counts latch; arm the next measurement without resetting PCS. */
+	writel(BIT(5) | BIT(6), rx->top + T7_RX_TOP_SW_RESET);
+	readl(rx->top + T7_RX_TOP_SW_RESET);
+	writel(0, rx->top + T7_RX_TOP_SW_RESET);
+	readl(rx->top + T7_RX_TOP_SW_RESET);
+	return t7_hdmirx_meter_hz(status, reference_hz);
+}
+
 static void t7_hdmirx_phy_update(struct t7_hdmirx *rx, u32 reg, u32 mask, u32 value)
 {
 	u32 data = readl(rx->phy + reg);
@@ -453,15 +465,14 @@ static void t7_hdmirx_phy_prepare(struct t7_hdmirx *rx)
 
 static int t7_hdmirx_wait_cable(struct t7_hdmirx *rx, unsigned long reference_hz)
 {
-	u32 previous = 0, sample_hz, status;
+	u32 previous = 0, sample_hz;
 	unsigned int i, stable = 0;
 
 	/* EDID reconnects on the source can outlast the initial three seconds. */
 	for (i = 0; i < 500; i++) {
 		if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)))
 			return -ENOLINK;
-		status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
-		sample_hz = t7_hdmirx_meter_hz(status, reference_hz);
+		sample_hz = t7_hdmirx_sample_cable(rx, reference_hz);
 		rx->cable_hz = sample_hz;
 		/* Both profiles have a 148.5 MHz cable clock; SCDC distinguishes 1:40. */
 		if ((!!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1)) == rx->uhd60) &&
@@ -948,8 +959,7 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	/* A live or quarantined MIF owns its receiver until DMA is safe. */
 	if (link->users)
 		goto out;
-	cable = t7_hdmirx_meter_hz(readl(rx->top + T7_RX_TOP_METER_CABLE_STAT),
-				 clk_get_rate(rx->clocks[T7_RX_METER].clk));
+	cable = t7_hdmirx_sample_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
 	rx->cable_hz = cable;
 	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
 	    (!!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1)) != rx->uhd60) ||
