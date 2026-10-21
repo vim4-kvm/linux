@@ -216,10 +216,24 @@ int main(void)
     assert(t7_hdmirx_sdr420_input(&rx) && !t7_hdmirx_video_status(&rx));
     struct t7_hdmirx_link lease={.users=1};
     u32 pll=T7_RX_PHY_PLL_LOCK;rx.phy=core;memcpy(core+T7_RX_PHY_APLL0,&pll,4);
-    rx.link=&lease;rx.lease_yuv=true;rx.lease_hdr=true;
+    rx.link=&lease;rx.lease_yuv=true;rx.lease_hdr=true;rx.lease_420=true;
     assert(t7_hdmirx_video_status(&rx)==-ENOLINK); /* HDR -> SDR, same geometry */
     rx.lease_hdr=false;assert(!t7_hdmirx_video_status(&rx));
     rx.lease_yuv=false;assert(t7_hdmirx_video_status(&rx)==-ENOLINK);
+    unsigned char sdr444[17]={0x82,2,13,0x14,0x52,0xa8,0,0x61};
+    memcpy(core+0x1140,sdr444,sizeof(sdr444));core[T7_RX_COR_COLOR_DEPTH]=0;
+    word(T7_RX_COR_WIDTH,3840);word(T7_RX_COR_HSYNC_LOW,4312);word(T7_RX_COR_HSYNC_HIGH,88);
+    assert(t7_hdmirx_sdr444_input(&rx));
+    rx.lease_yuv=true;assert(t7_hdmirx_video_status(&rx)==-ENOLINK); /* 420 -> 444 */
+    rx.lease_420=false;assert(!t7_hdmirx_video_status(&rx));
+    core[T7_RX_COR_COLOR_DEPTH]=5;assert(!t7_hdmirx_sdr444_input(&rx));
+    core[T7_RX_COR_COLOR_DEPTH]=4;assert(t7_hdmirx_sdr444_input(&rx));
+    core[0x1140+8]=0x40;core[0x1140+3]-=0x40;
+    assert(!t7_hdmirx_sdr444_input(&rx)); /* full-range YCbCr needs a different matrix */
+    memcpy(core+0x1140,sdr444,sizeof(sdr444));core[0x1140+3]^=1;
+    assert(!t7_hdmirx_sdr444_input(&rx)); /* corrupt AVI */
+    word(T7_RX_COR_WIDTH,1920);word(T7_RX_COR_HSYNC_LOW,2156);word(T7_RX_COR_HSYNC_HIGH,44);
+    core[T7_RX_COR_COLOR_DEPTH]=5;
     rx.link=NULL;memcpy(core+0x1140,avi,sizeof(avi));
     core[0x1134]=BIT(4);t7_hdmirx_update_drm(&rx);
     core[0x1140+3]^=1;assert(!t7_hdmirx_hdr_input(&rx));
