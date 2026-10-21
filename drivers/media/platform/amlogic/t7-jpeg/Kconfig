@@ -1,0 +1,8 @@
+config VIDEO_MESON_T7_JPEG
+	tristate "Amlogic T7 HCODEC JPEG encoder"
+	depends on ARCH_MESON || COMPILE_TEST
+	depends on ARM64 && PM
+	select DMA_SHARED_BUFFER
+	help
+	  JPEG 4:2:0 hardware encoding of linear NV12/NV21 buffers on T7.
+	  Provides the jpegenc DMA import ABI used by vim4jpegenc.

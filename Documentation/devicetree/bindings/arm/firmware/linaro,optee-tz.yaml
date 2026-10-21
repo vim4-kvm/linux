@@ -22,7 +22,11 @@ properties:
     const: optee
 
   compatible:
-    const: linaro,optee-tz
+    oneOf:
+      - const: linaro,optee-tz
+      - items:
+          - const: amlogic,t7-optee-tz
+          - const: linaro,optee-tz
 
   interrupts:
     maxItems: 1
