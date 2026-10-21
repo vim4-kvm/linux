@@ -1138,6 +1138,75 @@ static int t7_hdmirx_audio_register(struct platform_device *pdev, struct t7_hdmi
 					     &t7_hdmirx_audio_dai, 1);
 }
 
+int t7_hdmirx_get_edid(struct device *dev, struct v4l2_edid *edid)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	unsigned int blocks;
+	int ret = 0;
+
+	if (!rx || !rx->link || edid->pad)
+		return -EINVAL;
+	mutex_lock(&rx->link->lock);
+	blocks = rx->edid_blob.size / T7_RX_EDID_BLOCK_SIZE;
+	if (!edid->blocks) {
+		edid->blocks = blocks;
+	} else if (edid->start_block >= blocks) {
+		ret = -ENODATA;
+	} else {
+		edid->blocks = min(edid->blocks, blocks - edid->start_block);
+		memcpy(edid->edid, rx->edid + edid->start_block * T7_RX_EDID_BLOCK_SIZE,
+		       edid->blocks * T7_RX_EDID_BLOCK_SIZE);
+	}
+	mutex_unlock(&rx->link->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_get_edid);
+
+int t7_hdmirx_set_edid(struct device *dev, const struct v4l2_edid *edid)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	u8 previous[T7_RX_EDID_CAPACITY];
+	size_t size, previous_size;
+	u32 saved_reset, saved_port;
+	int ret = 0;
+
+	if (!rx || !rx->link || edid->pad || edid->start_block)
+		return -EINVAL;
+	if (edid->blocks > T7_RX_EDID_CAPACITY / T7_RX_EDID_BLOCK_SIZE)
+		return -E2BIG;
+	size = edid->blocks * T7_RX_EDID_BLOCK_SIZE;
+	if (size) {
+		ret = t7_hdmirx_validate_edid(edid->edid, size);
+		if (ret)
+			return ret;
+	}
+	mutex_lock(&rx->link->lock);
+	if (rx->edid_blob.size == size && (!size || !memcmp(rx->edid, edid->edid, size)))
+		goto out;
+	if (rx->link->users) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (!size) {
+		t7_hdmirx_ddc_stop(rx);
+		goto out;
+	}
+	previous_size = rx->edid_blob.size;
+	memcpy(previous, rx->edid, previous_size);
+	saved_reset = rx->saved_reset;
+	saved_port = rx->saved_port_sel;
+	ret = t7_hdmirx_ddc_start(rx, edid->edid, size);
+	if (ret && previous_size)
+		t7_hdmirx_ddc_start(rx, previous, previous_size);
+	/* Runtime updates must not replace the pre-probe teardown snapshot. */
+	rx->saved_reset = saved_reset;
+	rx->saved_port_sel = saved_port;
+out:
+	mutex_unlock(&rx->link->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_set_edid);
+
 int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int height)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
