@@ -57,8 +57,9 @@ static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)
 { assert(!vdin->direct_dma); return NULL; }
 static unsigned int pins, requests, timing_checks, receiver_users;
 static unsigned int pq_writes, gain_writes, oetf_writes;
-static bool hdr_input;
+static bool hdr_input, yuv_input;
 static bool t7_hdmirx_stream_is_hdr(struct device *dev) { (void)dev; return hdr_input; }
+static bool t7_hdmirx_stream_is_yuv(struct device *dev) { (void)dev; return hdr_input || yuv_input; }
 static bool timeout, busy, bad_timing, change_timing;
 static u32 readl(void *address)
 {
@@ -182,7 +183,10 @@ int main(void)
     assert(readl(registers+0x12b0*4)==0x18);
     assert(!(readl(registers+VDIN_HDR_CTRL*4)&BIT(16)));
     assert(readl(registers+VDIN_HDR_MATRIX_OUT*4)==1);
-    hdr_input=false;t7_vdin_configure(&receiver);
+    hdr_input=false;yuv_input=true;t7_vdin_configure(&receiver);
+    assert(readl(registers+VDIN_HDR_CTRL*4)==0);
+    assert(readl(registers+VDIN_MATRIX_CTRL*4)==0);
+    yuv_input=false;t7_vdin_configure(&receiver);
     assert(readl(registers+VDIN_HDR_CTRL*4)==BIT(16));
     assert(readl(registers+VDIN_HDR_MATRIX_OUT*4)==0);
     reset(); bad_timing = true;
