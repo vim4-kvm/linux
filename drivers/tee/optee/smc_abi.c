@@ -1770,6 +1770,16 @@ static int optee_probe(struct platform_device *pdev)
 	/*
 	 * Try to use dynamic shared memory if possible
 	 */
+	/* T7 firmware can advertise dynamic SHM while its runtime setting only
+	 * accepts the reserved pool. Unregistered normal RAM then yields
+	 * OPTEE_SMC_RETURN_EBADADDR on the first OPEN_SESSION. */
+	if (of_device_is_compatible(pdev->dev.of_node, "amlogic,t7-optee-tz")) {
+		struct arm_smccc_res result;
+
+		invoke_fn(OPTEE_SMC_FAST_CALL_VAL(0xe005), 0, 0, 0, 0, 0, 0, 0, &result);
+		if (result.a0 != OPTEE_SMC_RETURN_OK || result.a1 != 1)
+			sec_caps &= ~OPTEE_SMC_SEC_CAP_DYNAMIC_SHM;
+	}
 	if (sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM) {
 		/*
 		 * If we have OPTEE_SMC_SEC_CAP_RPC_ARG we can ask

@@ -39,6 +39,8 @@
 #define HRX_CLK_CTRL2		0x130
 #define HRX_CLK_CTRL3		0x134
 #define WAVE521_CLK_CTRL		0x150
+#define VDEC_CLK_CTRL		0x140
+#define VDEC3_CLK_CTRL		0x148
 #define WAVE521_CLK_CTRL2		0x154
 #define TS_CLK_CTRL		0x158
 #define MALI_CLK_CTRL		0x15c
@@ -995,6 +997,39 @@ static T7_COMP_SEL(wave_c, WAVE521_CLK_CTRL, 25, 0x7, t7_wave_parents);
 static T7_COMP_DIV(wave_c, WAVE521_CLK_CTRL, 16, 7);
 static T7_COMP_GATE(wave_c, WAVE521_CLK_CTRL, 24, 0);
 
+static const struct clk_parent_data t7_hcodec_parents[] = {
+	{ .fw_name = "fdiv2p5" },
+	{ .fw_name = "fdiv3" },
+	{ .fw_name = "fdiv4" },
+	{ .fw_name = "fdiv5" },
+	{ .fw_name = "fdiv7" },
+	{ .fw_name = "hifi" },
+	{ .fw_name = "gp0" },
+	{ .fw_name = "xtal" },
+};
+
+static T7_COMP_SEL(hcodec_0, VDEC_CLK_CTRL, 25, 0x7, t7_hcodec_parents);
+static T7_COMP_DIV(hcodec_0, VDEC_CLK_CTRL, 16, 7);
+static T7_COMP_GATE(hcodec_0, VDEC_CLK_CTRL, 24, 0);
+static T7_COMP_SEL(hcodec_1, VDEC3_CLK_CTRL, 25, 0x7, t7_hcodec_parents);
+static T7_COMP_DIV(hcodec_1, VDEC3_CLK_CTRL, 16, 7);
+static T7_COMP_GATE(hcodec_1, VDEC3_CLK_CTRL, 24, 0);
+
+static struct clk_regmap t7_hcodec = {
+	.data = &(struct clk_regmap_mux_data) {
+		.offset = VDEC3_CLK_CTRL,
+		.mask = 1,
+		.shift = 31,
+	},
+	.hw.init = &(struct clk_init_data) {
+		.name = "hcodec",
+		.ops = &clk_regmap_mux_ops,
+		.parent_hws = (const struct clk_hw *[]) { &t7_hcodec_0.hw, &t7_hcodec_1.hw },
+		.num_parents = 2,
+		.flags = CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT,
+	},
+};
+
 static const struct clk_parent_data t7_vpu_parents[] = {
 	{ .fw_name = "fdiv3" },
 	{ .fw_name = "fdiv4" },
@@ -1464,6 +1499,13 @@ static struct clk_hw *t7_peripherals_hw_clks[] = {
 	[CLKID_WAVE_C_SEL]		= &t7_wave_c_sel.hw,
 	[CLKID_WAVE_C_DIV]		= &t7_wave_c_div.hw,
 	[CLKID_WAVE_C]			= &t7_wave_c.hw,
+	[CLKID_HCODEC_0_SEL]		= &t7_hcodec_0_sel.hw,
+	[CLKID_HCODEC_0_DIV]		= &t7_hcodec_0_div.hw,
+	[CLKID_HCODEC_0]			= &t7_hcodec_0.hw,
+	[CLKID_HCODEC_1_SEL]		= &t7_hcodec_1_sel.hw,
+	[CLKID_HCODEC_1_DIV]		= &t7_hcodec_1_div.hw,
+	[CLKID_HCODEC_1]			= &t7_hcodec_1.hw,
+	[CLKID_HCODEC]			= &t7_hcodec.hw,
 };
 
 static const struct meson_clkc_data t7_peripherals_data = {
