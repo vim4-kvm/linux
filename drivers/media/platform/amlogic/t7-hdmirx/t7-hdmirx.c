@@ -17,6 +17,8 @@
 #include <linux/property.h>
 #include <linux/seq_file.h>
 #include <linux/workqueue.h>
+#include <linux/videodev2.h>
+#include <linux/v4l2-dv-timings.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
@@ -711,6 +713,55 @@ int t7_hdmirx_get_size(struct device *dev, unsigned int *width, unsigned int *he
 	return 0;
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_get_size);
+
+int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
+			  struct v4l2_fract *interval)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	struct v4l2_dv_timings mode;
+	u32 ticks, reference, before, after;
+	u32 hsync, vsync;
+	int ret;
+
+	ret = t7_hdmirx_check_video_now(dev);
+	if (ret)
+		return ret;
+	/* Byte-addressed counters can roll over between bus reads. Retry through
+	 * userspace rather than publishing a torn period as a different frame rate.
+	 * No frame wait here: status polling shares the capture queue lock.
+	 */
+	before = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
+		 (readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
+	after = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
+		(readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
+	if (before != after)
+		return -EAGAIN;
+	ticks = after;
+	reference = clk_get_rate(rx->clocks[T7_RX_PCLK].clk);
+	if (!ticks || ticks < reference / 61 || ticks > reference / 59)
+		return -ERANGE;
+	mode = rx->uhd60 ? (struct v4l2_dv_timings)V4L2_DV_BT_CEA_3840X2160P60 :
+			  (struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60;
+	hsync = t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC);
+	vsync = t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC);
+	/* Only these CEA profiles have qualified porch/polarity settings. Do not
+	 * fabricate DV timings for arbitrary modes with the same active area.
+	 */
+	if (hsync != mode.bt.hsync || vsync != mode.bt.vsync)
+		return -ERANGE;
+	ret = t7_hdmirx_check_video_now(dev);
+	if (ret)
+		return ret;
+	mode.bt.pixelclock = div_u64((u64)reference *
+		(mode.bt.width + mode.bt.hfrontporch + mode.bt.hsync + mode.bt.hbackporch) *
+		(mode.bt.height + mode.bt.vfrontporch + mode.bt.vsync + mode.bt.vbackporch), ticks);
+	/* The measured clock is authoritative, not an exact 60/1 or 60000/1001. */
+	mode.bt.flags &= ~(V4L2_DV_FL_CAN_REDUCE_FPS | V4L2_DV_FL_REDUCED_FPS);
+	*timings = mode;
+	*interval = (struct v4l2_fract) { .numerator = ticks, .denominator = reference };
+	return 0;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_query_timings);
 
 static u32 t7_hdmirx_audio_word(struct t7_hdmirx *rx, unsigned int reg)
 {

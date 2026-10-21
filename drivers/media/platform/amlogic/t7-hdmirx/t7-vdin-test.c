@@ -899,6 +899,35 @@ static int t7_vdin_get_input(struct file *file, void *priv, unsigned int *input)
 	return 0;
 }
 
+static int t7_vdin_query_dv_timings(struct file *file, void *priv,
+				    struct v4l2_dv_timings *timings)
+{
+	struct t7_vdin *vdin = video_drvdata(file);
+	struct v4l2_fract interval;
+
+	return t7_hdmirx_query_timings(vdin->receiver, timings, &interval);
+}
+
+static int t7_vdin_get_parm(struct file *file, void *priv, struct v4l2_streamparm *parm)
+{
+	struct t7_vdin *vdin = video_drvdata(file);
+	struct v4l2_dv_timings timings;
+	struct v4l2_fract interval;
+	int ret;
+
+	if (parm->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		return -EINVAL;
+	ret = t7_hdmirx_query_timings(vdin->receiver, &timings, &interval);
+	if (ret)
+		return ret;
+	/* Capture cannot change the source clock; TIMEPERFRAME capability would
+	 * incorrectly promise S_PARM support. This is a measured, read-only value.
+	 */
+	memset(&parm->parm, 0, sizeof(parm->parm));
+	parm->parm.capture.timeperframe = interval;
+	return 0;
+}
+
 static int t7_vdin_set_input(struct file *file, void *priv, unsigned int input)
 {
 	return input ? -EINVAL : 0;
@@ -913,6 +942,8 @@ static const struct v4l2_ioctl_ops t7_vdin_ioctl_ops = {
 	.vidioc_enum_input = t7_vdin_enum_input,
 	.vidioc_g_input = t7_vdin_get_input,
 	.vidioc_s_input = t7_vdin_set_input,
+	.vidioc_query_dv_timings = t7_vdin_query_dv_timings,
+	.vidioc_g_parm = t7_vdin_get_parm,
 	.vidioc_reqbufs = vb2_ioctl_reqbufs,
 	.vidioc_create_bufs = vb2_ioctl_create_bufs,
 	.vidioc_prepare_buf = vb2_ioctl_prepare_buf,

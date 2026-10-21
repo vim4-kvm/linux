@@ -9,7 +9,7 @@ defines = '\n'.join(line for line in source.splitlines() if line.startswith('#de
 types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
                source.index('static int t7_hdmirx_validate_edid')]
 functions = source[source.index('static void t7_hdmirx_core_stop'):
-                   source.index('static u32 t7_hdmirx_audio_word')]
+                   source.index('int t7_hdmirx_query_timings')]
 vdin = Path(__file__).with_name('t7-vdin-test.c').read_text()
 status_api = vdin[vdin.index('static int t7_vdin_enum_input'):
                   vdin.index('static int t7_vdin_get_input')]
