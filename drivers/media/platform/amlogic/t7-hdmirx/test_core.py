@@ -74,7 +74,7 @@ static void arm_smccc_smc(unsigned long cmd, unsigned long reg, unsigned long va
 }
 static void t7_hdmirx_set_hpd(struct t7_hdmirx *rx, bool high)
 {
-    (void)rx; assert(!high);
+    assert(!high || rx->uhd60);
 }
 static void usleep_range(unsigned int low, unsigned int high)
 {
@@ -184,6 +184,18 @@ int main(void)
     changed = true;
     assert(t7_hdmirx_check_video(&dev) == -ERANGE);
     assert(stability_waits == before + 1);
+    changed=false;t7_hdmirx_core_stop(&rx);
+    core[T7_RX_COR_UNREC_CTRL]=0x34;core[T7_RX_COR_UNREC_TYPE]=0x55;
+    rx.hdr_probe=true;
+    assert(!t7_hdmirx_core_start(&rx));
+    assert(core[T7_RX_COR_UNREC_CTRL]==1 && core[T7_RX_COR_UNREC_TYPE]==0x87);
+    core[T7_RX_COR_COLOR_DEPTH]=5;
+    assert(t7_hdmirx_check_video(&dev)==-ERANGE);
+    core[T7_RX_COR_COLOR_DEPTH]=4;
+    writel(BIT(20),top+T7_RX_TOP_VID_STAT);
+    assert(t7_hdmirx_check_video(&dev)==-ERANGE);
+    t7_hdmirx_core_stop(&rx);
+    assert(core[T7_RX_COR_UNREC_CTRL]==0x34 && core[T7_RX_COR_UNREC_TYPE]==0x55);
     puts("Core lifecycle, stable start qualification and nonblocking status loss/recovery passed");
 }
 '''

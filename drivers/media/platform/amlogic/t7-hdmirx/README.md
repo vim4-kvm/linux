@@ -9,6 +9,16 @@ rewrite EDID. `uhd60` selects the fixed profile by default. With the additional
 `dynamic_modes=1`, the stable cable clock and SCDC ratio select RGB8 1080p60 or
 UHD60 automatically. Other resolutions/rates/formats are rejected.
 
+`hdr_probe=1` additionally allows the 92.8125 MHz reference of a 371.25 MHz
+HDMI 2.0 character clock to lock for metadata observation. It requires the
+dynamic mode experiment and still boots with its validated SDR EDID. The PHY
+coefficients/dividers match the UHD profile; an aligned unsupported signal is
+kept intact rather than repeatedly reset. The unrecognized-packet bank selects
+DRM type 0x87 without enabling packet DMA, and is restored on core shutdown.
+Debugfs exposes raw AVI/DRM candidates, without a freshness or HDR-readiness
+claim. YCbCr/deep-colour frames remain rejected before a capture lease is
+acquired. This is receiver characterization, not HDR capture or tone mapping.
+
 `VIDIOC_QUERY_DV_TIMINGS` and `VIDIOC_G_PARM` report a live measurement for the
 qualified profile, including fractional rates near 60 Hz. Frame period comes
 from the RX reference-clock counter, not from the capture buffer dimensions.

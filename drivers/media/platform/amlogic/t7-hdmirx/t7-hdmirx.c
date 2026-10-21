@@ -133,6 +133,10 @@
 #define T7_RX_COR_AUDIO_MCLK	0x1401
 #define T7_RX_COR_AUDIO_TDM1	0x1440
 #define T7_RX_COR_AUDIO_TDM2	0x1441
+#define T7_RX_COR_AVI_PACKET	0x1140
+#define T7_RX_COR_UNREC_CTRL	0x115e
+#define T7_RX_COR_UNREC_TYPE	0x115f
+#define T7_RX_COR_UNREC_PACKET	0x11c0
 
 static char *edid_firmware;
 module_param(edid_firmware, charp, 0400);
@@ -153,6 +157,10 @@ MODULE_PARM_DESC(uhd60, "Opt-in RGB8 3840x2160p60 HDMI 2.0 trial; requires match
 static bool dynamic_modes;
 module_param(dynamic_modes, bool, 0400);
 MODULE_PARM_DESC(dynamic_modes, "Automatically select RGB8 1080p60/UHD60; requires uhd60=1");
+
+static bool hdr_probe;
+module_param(hdr_probe, bool, 0400);
+MODULE_PARM_DESC(hdr_probe, "Lock the 371.25 MHz HDR trial link for packet observation; HDR capture remains disabled");
 
 static bool audio_test;
 module_param(audio_test, bool, 0400);
@@ -215,6 +223,8 @@ struct t7_hdmirx {
 	struct t7_hdmirx_link *link;
 	bool uhd60;
 	bool dynamic_modes;
+	bool hdr_probe;
+	u8 saved_unrec_ctrl, saved_unrec_type;
 	struct mutex audio_lock;
 	u8 saved_ddc_switch, saved_sink_version, saved_tmds_config;
 	void __iomem *top;
@@ -575,6 +585,10 @@ static void t7_hdmirx_core_stop(void *data)
 	writeb(rx->saved_ddc_switch, rx->cor + T7_RX_COR_DDC_SWITCH);
 	writeb(rx->saved_sink_version, rx->cor + T7_RX_COR_SINK_VERSION);
 	writeb(rx->saved_tmds_config, rx->cor + T7_RX_COR_TMDS_CONFIG);
+	if (rx->hdr_probe) {
+		writeb(rx->saved_unrec_type, rx->cor + T7_RX_COR_UNREC_TYPE);
+		writeb(rx->saved_unrec_ctrl, rx->cor + T7_RX_COR_UNREC_CTRL);
+	}
 	rx->core_active = false;
 }
 
@@ -606,6 +620,10 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 	rx->core_saved_phyck[0] = readb(rx->cor + T7_RX_COR_PHY_CLOCK1);
 	rx->core_saved_phyck[1] = readb(rx->cor + T7_RX_COR_PHY_CLOCK2);
 	rx->core_saved_phyck[2] = readb(rx->cor + T7_RX_COR_PHY_CLOCK3);
+	if (rx->hdr_probe) {
+		rx->saved_unrec_ctrl = readb(rx->cor + T7_RX_COR_UNREC_CTRL);
+		rx->saved_unrec_type = readb(rx->cor + T7_RX_COR_UNREC_TYPE);
+	}
 	rx->core_active = true;
 	/* Hold AON reset while removing TMDS isolation and selecting PHY lanes. */
 	writeb(1, rx->cor + T7_RX_COR_AON_RESET);
@@ -652,6 +670,11 @@ static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
 	if (readb(rx->cor + T7_RX_COR_SYS_CTRL) != 3 ||
 	    readb(rx->cor + T7_RX_COR_PHY_CLOCK1) != 0xff)
 		return -EIO;
+	if (rx->hdr_probe) {
+		/* Capture static metadata in the byte register bank, without packet DMA. */
+		writeb(0x87, rx->cor + T7_RX_COR_UNREC_TYPE);
+		writeb(1, rx->cor + T7_RX_COR_UNREC_CTRL);
+	}
 	if (rx->uhd60)
 		t7_hdmirx_set_hpd(rx, true);
 	return 0;
@@ -1036,6 +1059,18 @@ void t7_hdmirx_stream_put(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_put);
 
+static bool t7_hdmirx_cable_supported(struct t7_hdmirx *rx, u32 cable, bool hdmi2)
+{
+	if (cable >= 146500000 && cable <= 150500000)
+		return true;
+	/* 4K60 YCbCr420 10-bit uses a 371.25 MHz character clock at 1:40.
+	 * Its PHY_BW_4 coefficients and PLL divider match the UHD RGB8 trial.
+	 * Admission here only permits PHY observation; video_status still rejects
+	 * YCbCr/deep-colour input before any capture lease can be acquired.
+	 */
+	return rx->hdr_probe && hdmi2 && cable >= 90812500 && cable <= 94812500;
+}
+
 static void t7_hdmirx_link_work(struct work_struct *work)
 {
 	struct t7_hdmirx_link *link = container_of(to_delayed_work(work),
@@ -1059,12 +1094,19 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	/* A live or quarantined MIF owns its receiver until DMA is safe. */
 	if (link->users)
 		goto out;
+	/* Keep an unsupported but aligned probe signal intact for packet reads.
+	 * Repeated PLL/PCS resets would otherwise destroy the metadata under test.
+	 */
+	if (rx->hdr_probe && ret == -ERANGE && link->configured &&
+	    (readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK) &&
+	    (readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
+		goto out;
 	cable = t7_hdmirx_sample_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
 	rx->cable_hz = cable;
 	next_uhd = !!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1));
 	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
 	    (!rx->dynamic_modes && next_uhd != rx->uhd60) ||
-	    cable < 146500000 || cable > 150500000) {
+	    !t7_hdmirx_cable_supported(rx, cable, next_uhd)) {
 		link->stable_samples = 0;
 		link->previous_cable = 0;
 		link->configured = false;
@@ -1145,6 +1187,7 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 		   readl(rx->top + T7_RX_TOP_EDID_GEN_STAT));
 	seq_printf(s, "phy_active: %u\n", rx->phy_active);
 	seq_printf(s, "dynamic_modes: %u\n", rx->dynamic_modes);
+	seq_printf(s, "hdr_probe: %u\n", rx->hdr_probe);
 	seq_printf(s, "selected_uhd: %u\n", READ_ONCE(rx->uhd60));
 	seq_printf(s, "core_active: %u\n", rx->core_active);
 	if (rx->link) {
@@ -1152,6 +1195,7 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 		seq_printf(s, "capture_users: %u\n", READ_ONCE(rx->link->users));
 	}
 	if (rx->core_active) {
+		u8 avi[17], unrec[31];
 		u32 ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
 			    (readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
 
@@ -1162,6 +1206,15 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 		seq_printf(s, "core_aon_reset: %#x\n", readb(rx->cor + T7_RX_COR_AON_RESET));
 		seq_printf(s, "core_fdet: %#x\n", readb(rx->cor + T7_RX_COR_FRAME_STATUS));
 		seq_printf(s, "color_depth_code: %#x\n", readb(rx->cor + T7_RX_COR_COLOR_DEPTH));
+		/* Raw diagnostic snapshots; no claim of packet freshness or HDR readiness. */
+		for (i = 0; i < ARRAY_SIZE(avi); i++)
+			avi[i] = readb(rx->cor + T7_RX_COR_AVI_PACKET + i);
+		seq_printf(s, "avi_packet: %*phN\n", (int)sizeof(avi), avi);
+		if (rx->hdr_probe) {
+			for (i = 0; i < ARRAY_SIZE(unrec); i++)
+				unrec[i] = readb(rx->cor + T7_RX_COR_UNREC_PACKET + i);
+			seq_printf(s, "drm_candidate: %*phN\n", (int)sizeof(unrec), unrec);
+		}
 		seq_printf(s, "width: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH));
 		seq_printf(s, "height: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT));
 		seq_printf(s, "htotal: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_LOW) +
@@ -1233,6 +1286,8 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EINVAL, "PHY trial requires an EDID firmware\n");
 	if (core_test && !phy_test)
 		return dev_err_probe(dev, -EINVAL, "Core trial requires PHY initialization\n");
+	if (hdr_probe && !dynamic_modes)
+		return dev_err_probe(dev, -EINVAL, "HDR observation requires dynamic_modes=1\n");
 	rx = devm_kzalloc(dev, sizeof(*rx), GFP_KERNEL);
 	if (!rx)
 		return -ENOMEM;
@@ -1243,6 +1298,7 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 	if (dynamic_modes && !uhd60)
 		return -EINVAL;
 	rx->dynamic_modes = dynamic_modes;
+	rx->hdr_probe = hdr_probe;
 	mutex_init(&rx->audio_lock);
 	rx->top = devm_platform_ioremap_resource_byname(pdev, "top");
 	if (IS_ERR(rx->top))
