@@ -3,6 +3,8 @@
 #define __T7_HDMIRX_H
 
 struct device;
+struct v4l2_dv_timings;
+struct v4l2_fract;
 
 /* Require two stable samples matching the receiver's selected RGB8 profile. */
 int t7_hdmirx_check_video(struct device *dev);
@@ -12,6 +14,10 @@ int t7_hdmirx_check_video_now(struct device *dev);
 
 /* Profile dimensions are immutable for the lifetime of the bound receiver. */
 int t7_hdmirx_get_size(struct device *dev, unsigned int *width, unsigned int *height);
+
+/* Measured timing of a locked, supported RGB8 input; never a cached mode. */
+int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
+			  struct v4l2_fract *interval);
 
 /* Hold the video PHY configuration until the consumer has stopped all DMA. */
 int t7_hdmirx_stream_get(struct device *dev);

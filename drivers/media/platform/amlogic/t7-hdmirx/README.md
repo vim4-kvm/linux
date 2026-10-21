@@ -8,6 +8,18 @@ SCDC ratio, then configures the video PLL/PCS. Loss does not withdraw HPD or
 rewrite EDID. The supported profile is still selected by `uhd60`; automatic
 timings and format negotiation are a separate change.
 
+`VIDIOC_QUERY_DV_TIMINGS` and `VIDIOC_G_PARM` report a live measurement for the
+qualified profile, including fractional rates near 60 Hz. Frame period comes
+from the RX reference-clock counter, not from the capture buffer dimensions.
+The query rejects loss, unsupported sync widths and a counter changing during
+its byte reads; it never returns cached timing while unlocked. The fixed CEA
+profile supplies porches only after its totals and sync widths have matched.
+Queries do not wait for another frame or reconfigure PHY, DMA, EDID or HPD.
+`G_PARM` does not advertise `S_PARM` capability: capture cannot set the HDMI
+source clock. `test_timings.py` exercises the actual query and VDIN handlers
+with Linux UAPI headers, fractional rates and source transitions. Arbitrary
+input modes, source-change events and queue resizing are still separate work.
+
 Cable qualification reads the completed meter count and rearms the cable/TMDS
 meters for the next sample. The counters latch completed measurements; repeatedly
 reading a startup count cannot detect a delayed source. Only the meter reset bits
