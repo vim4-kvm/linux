@@ -98,6 +98,7 @@ struct t7_jpeg_file {
 	struct dma_buf_attachment *attachment;
 	struct sg_table *sgt;
 	u32 header_bytes;
+	size_t output_cpu_bytes, input_device_bytes;
 	bool running;
 };
 
@@ -408,6 +409,42 @@ static void configure_jpeg(struct t7_jpeg_file *f, const u32 cmd[30])
 	wr(j, ASSIST_INT3, 0x14);
 }
 
+static void prepare_dma(struct t7_jpeg_file *f, size_t input_bytes)
+{
+	struct device *dev = f->jpeg->dev;
+
+	/*
+	 * Only the returned payload may be accessed by the CPU between frames.
+	 * Untouched output pages remain device-owned, even if the next JPEG is
+	 * larger. The first frame hands off the allocator's zeroed output area.
+	 */
+	if (f->output_cpu_bytes) {
+		dma_sync_single_for_device(dev, f->dma + OUTPUT_OFFSET,
+					   f->output_cpu_bytes, DMA_BIDIRECTIONAL);
+		f->output_cpu_bytes = 0;
+	}
+	if (!f->input) {
+		input_bytes = ALIGN(input_bytes, dma_get_cache_alignment());
+		dma_sync_single_for_device(dev, f->dma, input_bytes, DMA_BIDIRECTIONAL);
+		f->input_device_bytes = input_bytes;
+	}
+}
+
+static void finish_dma(struct t7_jpeg_file *f, size_t output_bytes)
+{
+	struct device *dev = f->jpeg->dev;
+
+	output_bytes = ALIGN(output_bytes, dma_get_cache_alignment());
+	if (f->input_device_bytes) {
+		dma_sync_single_for_cpu(dev, f->dma, f->input_device_bytes,
+				       DMA_BIDIRECTIONAL);
+		f->input_device_bytes = 0;
+	}
+	dma_sync_single_for_cpu(dev, f->dma + OUTPUT_OFFSET, output_bytes,
+			       DMA_BIDIRECTIONAL);
+	f->output_cpu_bytes = output_bytes;
+}
+
 static int start_frame(struct t7_jpeg_file *f, const u32 cmd[30])
 {
 	struct t7_jpeg *j = f->jpeg;
@@ -454,10 +491,11 @@ static int start_frame(struct t7_jpeg_file *f, const u32 cmd[30])
 	wr(j, MBOX_CLEAR, 1);
 	WRITE_ONCE(j->bytes, 0);
 	WRITE_ONCE(j->stage, 0);
+	prepare_dma(f, required);
 	f->running = true;
 	wr(j, MBOX_MASK, 0xffffffff);
 	reset_engine(j, BIT(12) | BIT(11));
-	/* Header/input writes must be visible before the firmware starts DMA. */
+	/* Publish buffer ownership and register programming before DMA starts. */
 	dma_wmb();
 	wr(j, MPSR, 1);
 	return 0;
@@ -523,6 +561,8 @@ static long jpeg_ioctl(struct file *file, unsigned int command, unsigned long ar
 		wr(j, CPSR, 0);
 		reset_engine(j, ENGINE_RESET);
 		synchronize_irq(j->irq);
+		if (f->running)
+			finish_dma(f, j->bytes);
 		f->running = false;
 		break;
 	case JPEG_IOCTL(7):
@@ -562,7 +602,8 @@ static int jpeg_mmap(struct file *file, struct vm_area_struct *vma)
 
 	if (vma->vm_pgoff || vma->vm_end - vma->vm_start != MAPPING_SIZE)
 		return -EINVAL;
-	return dma_mmap_wc(f->jpeg->dev, vma, f->mapping, f->dma, MAPPING_SIZE);
+	return dma_mmap_pages(f->jpeg->dev, vma, MAPPING_SIZE,
+			      virt_to_page(f->mapping));
 }
 
 static int jpeg_open(struct inode *inode, struct file *file)
@@ -582,13 +623,15 @@ static int jpeg_open(struct inode *inode, struct file *file)
 		ret = -ENOMEM;
 		goto out;
 	}
-	f->mapping = dma_alloc_wc(j->dev, MAPPING_SIZE, &f->dma, GFP_KERNEL);
+	f->mapping = dma_alloc_noncoherent(j->dev, MAPPING_SIZE, &f->dma,
+					   DMA_BIDIRECTIONAL, GFP_KERNEL);
 	if (!f->mapping) {
 		kfree(f);
 		ret = -ENOMEM;
 		goto out;
 	}
 	f->jpeg = j;
+	f->output_cpu_bytes = OUTPUT_SIZE;
 	j->stage = 0;
 	j->bytes = 0;
 	j->opened = true;
@@ -611,7 +654,8 @@ static int jpeg_release(struct inode *inode, struct file *file)
 		return 0;
 	}
 	release_input(f);
-	dma_free_wc(j->dev, MAPPING_SIZE, f->mapping, f->dma);
+	dma_free_noncoherent(j->dev, MAPPING_SIZE, f->mapping, f->dma,
+			     DMA_BIDIRECTIONAL);
 	kfree(f);
 	j->opened = false;
 	mutex_unlock(&j->lock);
