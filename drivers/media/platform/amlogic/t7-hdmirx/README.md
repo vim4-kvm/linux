@@ -5,8 +5,9 @@
 With `core_test=1`, probe publishes the EDID and keeps the receiver registered
 without requiring a live source. A delayed worker qualifies the cable clock and
 SCDC ratio, then configures the video PLL/PCS. Loss does not withdraw HPD or
-rewrite EDID. The supported profile is still selected by `uhd60`; automatic
-timings and format negotiation are a separate change.
+rewrite EDID. `uhd60` selects the fixed profile by default. With the additional
+`dynamic_modes=1`, the stable cable clock and SCDC ratio select RGB8 1080p60 or
+UHD60 automatically. Other resolutions/rates/formats are rejected.
 
 `VIDIOC_QUERY_DV_TIMINGS` and `VIDIOC_G_PARM` report a live measurement for the
 qualified profile, including fractional rates near 60 Hz. Frame period comes
@@ -17,8 +18,17 @@ profile supplies porches only after its totals and sync widths have matched.
 Queries do not wait for another frame or reconfigure PHY, DMA, EDID or HPD.
 `G_PARM` does not advertise `S_PARM` capability: capture cannot set the HDMI
 source clock. `test_timings.py` exercises the actual query and VDIN handlers
-with Linux UAPI headers, fractional rates and source transitions. Arbitrary
-input modes, source-change events and queue resizing are still separate work.
+with Linux UAPI headers, fractional rates and source transitions.
+
+The VDIN source monitor emits V4L2 source-change events on mode/loss/recovery,
+skipping torn-period retries. G_FMT describes the applied buffer layout;
+TRY_FMT describes the detected input and S_FMT applies it only after all vb2
+buffers have been released. Capture must acquire a receiver lease for that
+exact geometry before arming DMA. The private snapshot/ring allocation retains
+its maximum capacity; vb2 allocations use the selected geometry and encoder
+alignment. Snapshot sizing and capture share a lock across layout changes.
+`test_source_events.py` covers event transitions; `test_ioctl_locks.py` also
+checks busy mode changes, NV12 alignment, capacity bounds and both mode sizes.
 
 Queue ioctls use `queue_mutex`, independently of the short status queries under
 `video_lock`. A blocked STREAMOFF must not stall RX loss reporting. S_FMT uses
@@ -38,8 +48,11 @@ count followed by a source clock that appears after rearming.
 
 Capture holds a receiver lease from before DMA starts until the MIF is stopped.
 The worker never reconfigures a PHY with outstanding leases. Stop quarantine
-retains that lease until reboot. Audio PLL and DDC registers are not part of the
-video relock sequence. Status exposes `link_ready` and `capture_users`.
+retains that lease until reboot. DDC/HPD are not part of the relock sequence.
+When the selected profile changes, a separate audio mutex protects the recovered
+PLL's CTS divider update against ALSA setup/free; routing and audio DMA remain
+owned by ALSA. Same-profile relock does not touch the audio PLL. Status exposes
+`link_ready`, `selected_uhd`, `dynamic_modes` and `capture_users`.
 Stopping first gates write requests and synchronizes the IRQ, then polls the
 MIF's final-AXI-response write-done flag. A source can stop before an IRQ arrives;
 hardware-confirmed drain releases its lease without publishing that partial

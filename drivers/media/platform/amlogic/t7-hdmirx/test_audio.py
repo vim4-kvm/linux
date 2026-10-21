@@ -17,7 +17,7 @@ prefix = r'''
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
-struct mutex { int unused; };
+struct mutex { bool held; };
 struct delayed_work { int unused; };
 typedef uint8_t u8;
 typedef uint32_t u32;
@@ -26,6 +26,7 @@ typedef uint64_t u64;
 #define BIT(n) (1U << (n))
 #define GENMASK(h, l) ((~0U >> (31 - (h))) & (~0U << (l)))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define READ_ONCE(value) (value)
 #define div_u64(value, divisor) ((value) / (divisor))
 #define SNDRV_PCM_FORMAT_S16_LE 2
 struct clk_bulk_data { const char *id; void *clk; };
@@ -39,6 +40,8 @@ struct snd_pcm_hw_params { unsigned int rate, channels; int format; };
 #define params_format(p) ((p)->format)
 '''
 stubs = r'''
+static void mutex_lock(struct mutex *m) { assert(!m->held); m->held=true; }
+static void mutex_unlock(struct mutex *m) { assert(m->held); m->held=false; }
 static u8 core[0x8000], top[0x4000], phy[0x90], fifo[0x30];
 static bool clocks, fail_clocks, pll_locked;
 static unsigned int writes, enables, disables;

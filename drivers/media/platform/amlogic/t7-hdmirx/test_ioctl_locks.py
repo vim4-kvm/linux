@@ -14,7 +14,8 @@ import tempfile
 directory = Path(__file__).parent
 driver = (Path(sys.argv[1]) if len(sys.argv) > 1 else directory/'t7-vdin-test.c').read_text()
 core = (directory.parents[2]/'v4l2-core/v4l2-ioctl.c').read_text()
-formats = driver[driver.index('static int t7_vdin_get_fmt'):
+format_start = 'static void t7_vdin_fill_fmt' if 'static void t7_vdin_fill_fmt' in driver else 'static int t7_vdin_get_fmt'
+formats = driver[driver.index(format_start):
                  driver.index('static int t7_vdin_enum_input')]
 queries = driver[driver.index('static int t7_vdin_query_dv_timings'):
                  driver.index('static int t7_vdin_set_input')]
@@ -60,10 +61,11 @@ struct video_device {
     struct device dev;
 };
 struct t7_vdin {
-    struct mutex video_lock,queue_mutex;
+    struct mutex video_lock,queue_mutex,lock;
     struct video_device video; struct vb2_queue queue;
     struct device *dev,*receiver; struct v4l2_device v4l2; unsigned int ref;
-    unsigned int width,height,pixel_format,stride,allocation_size; bool nv12;
+    unsigned int width,height,pixel_format,stride,allocation_size,frame_capacity,frame_size;
+    bool nv12,faulted;
 };
 struct file { struct t7_vdin *data; };
 struct v4l2_m2m_ctx { struct mutex *q_lock; };
@@ -74,6 +76,7 @@ struct v4l2_fh { struct v4l2_m2m_ctx *m2m_ctx; };
 #define INFO_FL_ALWAYS_COPY 4
 #define INFO_FL_CLEAR(...) 0
 #define VB2_MMAP 1
+#define ALIGN(value,n) (((value)+(n)-1)&~((n)-1))
 #define VFL_TYPE_VIDEO 1
 #define strscpy(dst,src,size) snprintf(dst,size,"%s",src)
 static const struct { unsigned int flags; } v4l2_ioctls[V4L2_IOCTLS] = {
@@ -86,6 +89,8 @@ static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static bool queue_entered, release_queue, query_done, format_done;
 static bool pause_query, query_entered, release_query, remove_has_queue;
 static unsigned int rx_reads, queue_releases;
+static bool input_locked;
+static unsigned int input_width=3840,input_height=2160;
 static _Thread_local bool removing;
 static void (*remove_action)(void *);
 static void *remove_data;
@@ -109,10 +114,14 @@ static int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *m
     pthread_cond_broadcast(&changed);
     while (pause_query && !release_query) pthread_cond_wait(&changed,&gate);
     pthread_mutex_unlock(&gate);
-    return -ENOLINK;
+    if (!input_locked) return -ENOLINK;
+    mode->bt.width=input_width; mode->bt.height=input_height;
+    return 0;
 }
 static const int t7_vdin_queue_ops, vb2_dma_contig_memops;
 static const int t7_vdin_video_fops, t7_vdin_ioctl_ops;
+static void t7_vdin_source_start(struct t7_vdin *v) { (void)v; }
+static void t7_vdin_source_stop(struct t7_vdin *v) { (void)v; }
 static void t7_vdin_video_release(struct video_device *v) { (void)v; }
 static void t7_vdin_put(struct t7_vdin *v) { assert(v->ref); v->ref--; }
 static void kref_get(unsigned int *ref) { (*ref)++; }
@@ -193,8 +202,10 @@ static bool wait_for(bool *flag) {
 int main(void) {
     pthread_mutex_init(&capture.video_lock.native,NULL);
     pthread_mutex_init(&capture.queue_mutex.native,NULL);
+    pthread_mutex_init(&capture.lock.native,NULL);
     capture.width=3840; capture.height=2160; capture.stride=3840;
     capture.allocation_size=3840*2160*3/2; capture.nv12=true;
+    capture.frame_capacity=capture.allocation_size;
     capture.pixel_format=V4L2_PIX_FMT_NV12; capture.ref=1;
     assert(!t7_vdin_video_register(&capture));
     struct call stop={.cmd=VIDIOC_STREAMOFF},query={.cmd=VIDIOC_QUERY_DV_TIMINGS};
@@ -208,10 +219,22 @@ int main(void) {
     pthread_cond_broadcast(&changed); pthread_mutex_unlock(&gate);
     pthread_join(a,NULL); pthread_join(b,NULL); pthread_join(c,NULL);
     assert(independent && query.result==-ENOLINK && format.result==-EBUSY);
-    struct v4l2_format fmt={0};
+    struct v4l2_format fmt={0}; input_locked=true;
     assert(!dispatch(VIDIOC_S_FMT,&fmt) && fmt.fmt.pix.width==3840);
     capture.queue.busy=true; assert(dispatch(VIDIOC_S_FMT,&fmt)==-EBUSY);
     capture.queue.busy=false;
+    input_width=1920; input_height=1080;
+    assert(!dispatch(VIDIOC_G_FMT,&fmt) && fmt.fmt.pix.width==3840);
+    capture.queue.busy=true;
+    assert(dispatch(VIDIOC_S_FMT,&fmt)==-EBUSY && capture.width==3840);
+    capture.queue.busy=false;
+    assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.width==1920 && capture.height==1080);
+    assert(capture.frame_size==3110400 && capture.allocation_size==3133440);
+    assert(capture.frame_capacity==12441600);
+    input_width=5000; input_height=3000;
+    assert(dispatch(VIDIOC_S_FMT,&fmt)==-ERANGE && capture.width==1920);
+    input_width=3840; input_height=2160;
+    assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.width==3840);
     /* A query already using RX must finish before removal clears registration. */
     pause_query=true; query_entered=query_done=false; capture.queue.owner=&capture;
     pthread_create(&b,NULL,call_worker,&query); assert(wait_for(&query_entered));
