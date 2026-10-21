@@ -20,6 +20,16 @@ source clock. `test_timings.py` exercises the actual query and VDIN handlers
 with Linux UAPI headers, fractional rates and source transitions. Arbitrary
 input modes, source-change events and queue resizing are still separate work.
 
+Queue ioctls use `queue_mutex`, independently of the short status queries under
+`video_lock`. A blocked STREAMOFF must not stall RX loss reporting. S_FMT uses
+a queue trylock before checking buffer allocation; it returns EBUSY while a
+queue operation runs, without inverting disconnect's queue-then-status order.
+Removal first excludes both ioctl classes, marks the video node unregistered,
+and then releases its queue while retaining the device reference. In-flight RX
+queries finish before platform resources are unmapped; old fds get ENODEV.
+`test_ioctl_locks.py` gates stop and query operations, exercises the actual core
+lock selector and driver registration/handlers, and checks removal exclusion.
+
 Cable qualification reads the completed meter count and rearms the cable/TMDS
 meters for the next sample. The counters latch completed measurements; repeatedly
 reading a startup count cannot detect a delayed source. Only the meter reset bits
