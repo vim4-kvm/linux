@@ -1134,7 +1134,23 @@ static int t7_vdin_set_input(struct file *file, void *priv, unsigned int input)
 	return input ? -EINVAL : 0;
 }
 
+static int t7_vdin_get_edid(struct file *file, void *priv, struct v4l2_edid *edid)
+{
+	struct t7_vdin *vdin = video_drvdata(file);
+
+	return t7_hdmirx_get_edid(vdin->receiver, edid);
+}
+
+static int t7_vdin_set_edid(struct file *file, void *priv, struct v4l2_edid *edid)
+{
+	struct t7_vdin *vdin = video_drvdata(file);
+
+	return t7_hdmirx_set_edid(vdin->receiver, edid);
+}
+
 static const struct v4l2_ioctl_ops t7_vdin_ioctl_ops = {
+	.vidioc_g_edid = t7_vdin_get_edid,
+	.vidioc_s_edid = t7_vdin_set_edid,
 	.vidioc_querycap = t7_vdin_querycap,
 	.vidioc_enum_fmt_vid_cap = t7_vdin_enum_fmt,
 	.vidioc_g_fmt_vid_cap = t7_vdin_get_fmt,

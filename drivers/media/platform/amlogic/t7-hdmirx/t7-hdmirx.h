@@ -5,6 +5,11 @@
 struct device;
 struct v4l2_dv_timings;
 struct v4l2_fract;
+struct v4l2_edid;
+
+/* EDID changes are idempotent and refused while a capture lease owns DMA. */
+int t7_hdmirx_get_edid(struct device *dev, struct v4l2_edid *edid);
+int t7_hdmirx_set_edid(struct device *dev, const struct v4l2_edid *edid);
 
 /* Require two stable samples matching the receiver's selected RGB8 profile. */
 int t7_hdmirx_check_video(struct device *dev);

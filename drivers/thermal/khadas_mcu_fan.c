@@ -16,6 +16,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/limits.h>
 #include <linux/workqueue.h>
+#include <linux/mutex.h>
 
 static bool quiet_auto = true;
 module_param(quiet_auto, bool, 0444);
@@ -39,6 +40,10 @@ struct khadas_mcu_fan_ctx {
 	bool sensor_fault;
 	bool quiet_started;
 	int temperature;
+	struct mutex curve_lock;
+	unsigned int trigger_low;
+	unsigned int trigger_mid;
+	unsigned int trigger_high;
 };
 
 static int khadas_vim4_fan_lerp(int temp, int low, int high,
@@ -48,25 +53,33 @@ static int khadas_vim4_fan_lerp(int temp, int low, int high,
 		(high - low);
 }
 
-static int khadas_vim4_fan_target(int temp, bool sensor_fault)
+static int khadas_vim4_fan_target_curve(int temp, bool sensor_fault,
+				      int low, int mid, int high)
 {
 	int target;
+	int start = low - 15000;
+	int daily = low - 5000;
 
-	if (temp >= 100000)
+	if (temp >= 100000 || temp >= high)
 		target = 100;
-	else if (temp < 45000)
+	else if (temp < start)
 		target = 0;
-	else if (temp < 55000)
-		target = khadas_vim4_fan_lerp(temp, 45000, 55000, 5, 25);
-	else if (temp < 60000)
-		target = khadas_vim4_fan_lerp(temp, 55000, 60000, 25, 35);
-	else if (temp < 80000)
-		target = khadas_vim4_fan_lerp(temp, 60000, 80000, 35, 70);
+	else if (temp < daily)
+		target = khadas_vim4_fan_lerp(temp, start, daily, 5, 25);
+	else if (temp < low)
+		target = khadas_vim4_fan_lerp(temp, daily, low, 25, 35);
+	else if (temp < mid)
+		target = khadas_vim4_fan_lerp(temp, low, mid, 35, 70);
 	else
-		target = khadas_vim4_fan_lerp(temp, 80000, 100000, 70, 100);
+		target = khadas_vim4_fan_lerp(temp, mid, high, 70, 100);
 
 	/* Unknown sensors must not override another sensor's valid hot reading. */
 	return sensor_fault ? max(target, 15) : target;
+}
+
+static int khadas_vim4_fan_target(int temp, bool sensor_fault)
+{
+	return khadas_vim4_fan_target_curve(temp, sensor_fault, 60000, 80000, 100000);
 }
 
 static unsigned int khadas_vim4_fan_next(unsigned int current_speed,
@@ -120,7 +133,9 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 	}
 	WRITE_ONCE(ctx->temperature, hottest);
 	WRITE_ONCE(ctx->sensor_fault, fault);
-	target = khadas_vim4_fan_target(hottest, fault);
+	mutex_lock(&ctx->curve_lock);
+	target = khadas_vim4_fan_target_curve(hottest, fault,
+		ctx->trigger_low * 1000, ctx->trigger_mid * 1000, ctx->trigger_high * 1000);
 	/* Fault handling and its first valid sample bypass the normal ramp. */
 	if (ctx->quiet_started && !fault && !was_fault)
 		target = khadas_vim4_fan_next(ctx->level, target);
@@ -129,6 +144,7 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 		dev_err_ratelimited(ctx->dev, "Failed to set fan speed: %d\n", ret);
 	else if (!fault)
 		ctx->quiet_started = true;
+	mutex_unlock(&ctx->curve_lock);
 	if (fault)
 		dev_warn_ratelimited(ctx->dev,
 			"Fan temperature unavailable; requesting %u%% output\n", target);
@@ -176,10 +192,47 @@ static ssize_t temperature_millic_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(temperature_millic);
 
+static ssize_t trigger_temperatures_show(struct device *dev,
+					struct device_attribute *attr, char *buf)
+{
+	struct khadas_mcu_fan_ctx *ctx = dev_get_drvdata(dev);
+	ssize_t size;
+
+	mutex_lock(&ctx->curve_lock);
+	size = sysfs_emit(buf, "%u %u %u\n", ctx->trigger_low,
+			  ctx->trigger_mid, ctx->trigger_high);
+	mutex_unlock(&ctx->curve_lock);
+	return size;
+}
+
+static ssize_t trigger_temperatures_store(struct device *dev,
+					 struct device_attribute *attr,
+					 const char *buf, size_t count)
+{
+	struct khadas_mcu_fan_ctx *ctx = dev_get_drvdata(dev);
+	unsigned int low, mid, high;
+	char extra;
+
+	if (sscanf(buf, "%u %u %u %c", &low, &mid, &high, &extra) != 3 ||
+	    low < 35 || low > 80 || mid < low + 5 || mid > 95 ||
+	    high < mid + 5 || high > 100)
+		return -EINVAL;
+	mutex_lock(&ctx->curve_lock);
+	ctx->trigger_low = low;
+	ctx->trigger_mid = mid;
+	ctx->trigger_high = high;
+	ctx->quiet_started = false;
+	mutex_unlock(&ctx->curve_lock);
+	mod_delayed_work(system_wq, &ctx->quiet_work, 0);
+	return count;
+}
+static DEVICE_ATTR_RW(trigger_temperatures);
+
 static struct attribute *khadas_vim4_fan_attrs[] = {
 	&dev_attr_speed_percent.attr,
 	&dev_attr_sensor_fault.attr,
 	&dev_attr_temperature_millic.attr,
+	&dev_attr_trigger_temperatures.attr,
 	NULL,
 };
 static const struct attribute_group khadas_vim4_fan_group = {
@@ -249,6 +302,10 @@ static int khadas_mcu_fan_probe(struct platform_device *pdev)
 	ctx->fan_reg   = pdata->fan_reg;
 	ctx->max_level = pdata->max_level;
 	ctx->dev = dev;
+	mutex_init(&ctx->curve_lock);
+	ctx->trigger_low = 60;
+	ctx->trigger_mid = 80;
+	ctx->trigger_high = 100;
 	ctx->quiet = quiet_auto && pdata->fan_reg == KHADAS_MCU_VIM4_FAN_CTRL_REG &&
 		pdata->max_level == 100;
 
