@@ -1059,9 +1059,14 @@ void t7_hdmirx_stream_put(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_put);
 
+static bool t7_hdmirx_sdr_cable(u32 cable)
+{
+	return cable >= 146500000 && cable <= 150500000;
+}
+
 static bool t7_hdmirx_cable_supported(struct t7_hdmirx *rx, u32 cable, bool hdmi2)
 {
-	if (cable >= 146500000 && cable <= 150500000)
+	if (t7_hdmirx_sdr_cable(cable))
 		return true;
 	/* 4K60 YCbCr420 10-bit uses a 371.25 MHz character clock at 1:40.
 	 * Its PHY_BW_4 coefficients and PLL divider match the UHD RGB8 trial.
@@ -1082,7 +1087,8 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 
 	mutex_lock(&link->lock);
 	ret = t7_hdmirx_video_status(rx);
-	if (!ret && link->configured) {
+	if (!ret && link->configured &&
+	    (!rx->hdr_probe || t7_hdmirx_sdr_cable(link->previous_cable))) {
 		if (!READ_ONCE(link->ready)) {
 			usleep_range(20000, 21000);
 			ret = t7_hdmirx_video_status(rx);
@@ -1094,13 +1100,9 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	/* A live or quarantined MIF owns its receiver until DMA is safe. */
 	if (link->users)
 		goto out;
-	/* Keep an unsupported but aligned probe signal intact for packet reads.
-	 * Repeated PLL/PCS resets would otherwise destroy the metadata under test.
-	 */
-	if (rx->hdr_probe && ret == -ERANGE && link->configured &&
-	    (readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK) &&
-	    (readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
-		goto out;
+	/* SDR pixels after observation still need a newly qualified clock. */
+	if (!ret)
+		link->configured = false;
 	cable = t7_hdmirx_sample_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
 	rx->cable_hz = cable;
 	next_uhd = !!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1));
@@ -1110,6 +1112,18 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		link->stable_samples = 0;
 		link->previous_cable = 0;
 		link->configured = false;
+		goto out;
+	}
+	/* Keep an unsupported but aligned probe signal intact for packet reads.
+	 * Remember its reference clock so returning SDR is requalified, including
+	 * fresh TMDS meter counts for the subsequent ALSA N/CTS validation.
+	 */
+	if (rx->hdr_probe && ret == -ERANGE && link->configured &&
+	    (readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK) &&
+	    (readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0))) {
+		link->previous_cable = cable;
+		link->previous_uhd = next_uhd;
+		link->stable_samples = 0;
 		goto out;
 	}
 	if (link->previous_cable && link->previous_uhd == next_uhd &&

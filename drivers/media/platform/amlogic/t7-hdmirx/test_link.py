@@ -184,7 +184,9 @@ int main(void)
     tick(&link,100);
     assert(!link.ready && pll_calls==before_probe+1);
     assert(t7_hdmirx_stream_get(&dev,3840,2160)==-ENOLINK && !link.users);
-    unsupported_signal=false; tick(&link,1); assert(link.ready);
+    unsupported_signal=false;cable_hz=148500000;
+    tick(&link,3);assert(!link.ready && pll_calls==before_probe+1);
+    tick(&link,1);assert(link.ready && pll_calls==before_probe+2);
     t7_hdmirx_link_stop(&link);
     assert(canceled == 1 && !link.ready);
     puts("Receiver recovery: absent/delayed source, DMA leases, PLL failure and late alignment passed");
