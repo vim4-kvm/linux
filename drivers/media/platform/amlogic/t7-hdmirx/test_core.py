@@ -20,6 +20,10 @@ prefix = r'''
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+#ifdef __clang__
+/* The extracted register tables size real struct fields; core-only paths do not read them. */
+#pragma clang diagnostic ignored "-Wunneeded-internal-declaration"
+#endif
 typedef uint8_t u8;
 typedef uint32_t u32;
 #define __iomem
