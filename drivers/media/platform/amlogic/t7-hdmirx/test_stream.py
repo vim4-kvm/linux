@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
+source = source.replace('#include "t7-vdin-hdr.h"', Path(__file__).with_name('t7-vdin-hdr.h').read_text())
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('enum t7_vdin_slot_state {'):source.index('static u32 t7_vdin_read')]
 hardware = source[source.index('static u32 t7_vdin_read'):source.index('static int t7_vdin_capture')]
@@ -190,6 +191,7 @@ static void vb2_queue_error(struct vb2_queue *q) {
 }
 static int t7_hdmirx_check_video(void *dev) { return fail_timing?-ENOLINK:0; }
 static unsigned int receiver_users;
+static bool t7_hdmirx_stream_is_hdr(void *dev) { (void)dev; return false; }
 static int t7_hdmirx_stream_get(void *dev, unsigned int width, unsigned int height) {
     int ret=t7_hdmirx_check_video(dev);
     if (!ret) receiver_users++;

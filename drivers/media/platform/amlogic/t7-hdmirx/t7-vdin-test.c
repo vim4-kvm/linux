@@ -302,6 +302,8 @@ static int t7_vdin_stop_dma(struct t7_vdin *vdin)
 	return ret;
 }
 
+#include "t7-vdin-hdr.h"
+
 static void t7_vdin_configure(struct t7_vdin *vdin)
 {
 	t7_vdin_write(vdin, VDIN_WR_CTRL, 0);
@@ -338,6 +340,8 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 		t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 1);
 		t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 1);
 	}
+	if (t7_hdmirx_stream_is_hdr(vdin->receiver))
+		t7_vdin_hdr_configure(vdin);
 	t7_vdin_update(vdin, VDIN_LFIFO_CTRL, GENMASK(13, 0) | BIT(17) | BIT(18),
 		       BIT(17) | 0x780);
 	t7_vdin_write(vdin, VDIN_WR_CTRL2, BIT(18) | (2 << 12));
@@ -375,6 +379,10 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 	ret = t7_hdmirx_stream_get(vdin->receiver, vdin->width, vdin->height);
 	if (ret)
 		return ret;
+	if (!vdin->nv12 && t7_hdmirx_stream_is_hdr(vdin->receiver)) {
+		t7_hdmirx_stream_put(vdin->receiver);
+		return -EOPNOTSUPP;
+	}
 	memset(vdin->frame, 0xa5, vdin->frame_size);
 	dma_wmb();
 	t7_vdin_configure(vdin);
@@ -798,6 +806,10 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	mutex_lock(&vdin->lock);
 	ret = vdin->faulted ? -EIO :
 		t7_hdmirx_stream_get(vdin->receiver, vdin->width, vdin->height);
+	if (!ret && !vdin->nv12 && t7_hdmirx_stream_is_hdr(vdin->receiver)) {
+		t7_hdmirx_stream_put(vdin->receiver);
+		ret = -EOPNOTSUPP;
+	}
 	if (!ret) {
 		vdin->receiver_lease = true;
 		vdin->streaming = true;

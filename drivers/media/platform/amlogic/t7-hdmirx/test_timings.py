@@ -33,6 +33,8 @@ typedef uint64_t u64;
 #define GENMASK(h,l) ((~0U >> (31-(h))) & (~0U << (l)))
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define READ_ONCE(value) (value)
+#define WRITE_ONCE(place, value) ((place) = (value))
+static u64 ktime_get_ns(void) { return 1000000000ULL; }
 #define EXPORT_SYMBOL_GPL(name)
 struct mutex { int unused; };
 struct delayed_work { int unused; };
@@ -59,6 +61,7 @@ static u8 readb(void *address) {
     return *(u8 *)address;
 }
 static u32 readl(void *address) { u32 value; memcpy(&value,address,4); return value; }
+static void writeb(u8 value, void *address) { *(u8 *)address = value; }
 static unsigned long clk_get_rate(void *clk) { (void)clk; return 166666664; }
 static u64 div_u64(u64 a, u32 b) { assert(b); return a/b; }
 static void *dev_get_drvdata(struct device *dev) { return dev->data; }
