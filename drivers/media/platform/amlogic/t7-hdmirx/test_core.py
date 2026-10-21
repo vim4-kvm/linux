@@ -211,6 +211,16 @@ int main(void)
     assert(t7_hdmirx_hdr_input(&rx) && !t7_hdmirx_video_status(&rx));
     now_ns+=1000000001ULL;
     assert(!t7_hdmirx_hdr_input(&rx)); /* missing refresh expires */
+    unsigned char sdravi[17]={0x82,2,13,0xf4,0x72,0xa8,0,0x61};
+    memcpy(core+0x1140,sdravi,sizeof(sdravi));
+    assert(t7_hdmirx_sdr420_input(&rx) && !t7_hdmirx_video_status(&rx));
+    struct t7_hdmirx_link lease={.users=1};
+    u32 pll=T7_RX_PHY_PLL_LOCK;rx.phy=core;memcpy(core+T7_RX_PHY_APLL0,&pll,4);
+    rx.link=&lease;rx.lease_yuv=true;rx.lease_hdr=true;
+    assert(t7_hdmirx_video_status(&rx)==-ENOLINK); /* HDR -> SDR, same geometry */
+    rx.lease_hdr=false;assert(!t7_hdmirx_video_status(&rx));
+    rx.lease_yuv=false;assert(t7_hdmirx_video_status(&rx)==-ENOLINK);
+    rx.link=NULL;memcpy(core+0x1140,avi,sizeof(avi));
     core[0x1134]=BIT(4);t7_hdmirx_update_drm(&rx);
     core[0x1140+3]^=1;assert(!t7_hdmirx_hdr_input(&rx));
     core[0x1140+3]^=1;assert(t7_hdmirx_hdr_input(&rx));

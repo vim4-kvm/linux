@@ -349,6 +349,14 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 		t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 1);
 		t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 1);
 	}
+	if (t7_hdmirx_stream_is_yuv(vdin->receiver)) {
+		/* The RX has already expanded limited BT.709 YCbCr to 4:4:4;
+		 * MIF subsampling/truncation supplies limited NV12 directly.
+		 */
+		t7_vdin_write(vdin, VDIN_HDR_CTRL, 0);
+		t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 0);
+		t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 0);
+	}
 	if (t7_hdmirx_stream_is_hdr(vdin->receiver))
 		t7_vdin_hdr_configure(vdin);
 	t7_vdin_update(vdin, VDIN_LFIFO_CTRL, GENMASK(13, 0) | BIT(17) | BIT(18),
@@ -388,7 +396,7 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 	ret = t7_hdmirx_stream_get(vdin->receiver, vdin->width, vdin->height);
 	if (ret)
 		return ret;
-	if (!vdin->nv12 && t7_hdmirx_stream_is_hdr(vdin->receiver)) {
+	if (!vdin->nv12 && t7_hdmirx_stream_is_yuv(vdin->receiver)) {
 		t7_hdmirx_stream_put(vdin->receiver);
 		return -EOPNOTSUPP;
 	}
@@ -815,7 +823,7 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	mutex_lock(&vdin->lock);
 	ret = vdin->faulted ? -EIO :
 		t7_hdmirx_stream_get(vdin->receiver, vdin->width, vdin->height);
-	if (!ret && !vdin->nv12 && t7_hdmirx_stream_is_hdr(vdin->receiver)) {
+	if (!ret && !vdin->nv12 && t7_hdmirx_stream_is_yuv(vdin->receiver)) {
 		t7_hdmirx_stream_put(vdin->receiver);
 		ret = -EOPNOTSUPP;
 	}
