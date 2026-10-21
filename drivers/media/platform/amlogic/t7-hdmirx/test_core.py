@@ -23,6 +23,10 @@ prefix = r'''
 struct mutex { int unused; };
 struct delayed_work { int unused; };
 #define READ_ONCE(value) (value)
+#define WRITE_ONCE(place, value) ((place) = (value))
+typedef uint64_t u64;
+static u64 now_ns = 1000000000ULL;
+static u64 ktime_get_ns(void) { return now_ns; }
 #ifdef __clang__
 /* The extracted register tables size real struct fields; core-only paths do not read them. */
 #pragma clang diagnostic ignored "-Wunneeded-internal-declaration"
@@ -194,6 +198,29 @@ int main(void)
     core[T7_RX_COR_COLOR_DEPTH]=4;
     writel(BIT(20),top+T7_RX_TOP_VID_STAT);
     assert(t7_hdmirx_check_video(&dev)==-ERANGE);
+    rx.hdr_capture=true;
+    unsigned char avi[17]={0x82,2,13,0x54,0x72,0xe8,0x60,0x61};
+    unsigned char drm[30]={0x87,1,26,0x5c,2};
+    memcpy(core+0x1140,avi,sizeof(avi)); memcpy(core+0x11c0,drm,sizeof(drm));
+    word(T7_RX_COR_WIDTH,1920);word(T7_RX_COR_HEIGHT,2160);
+    word(T7_RX_COR_HSYNC_LOW,2156);word(T7_RX_COR_HSYNC_HIGH,44);
+    word(T7_RX_COR_VSYNC_LOW,2240);word(T7_RX_COR_VSYNC_HIGH,10);
+    core[T7_RX_COR_COLOR_DEPTH]=5;
+    assert(!t7_hdmirx_hdr_input(&rx)); /* cached DRM is insufficient */
+    core[0x1134]=BIT(4);t7_hdmirx_update_drm(&rx);
+    assert(t7_hdmirx_hdr_input(&rx) && !t7_hdmirx_video_status(&rx));
+    now_ns+=1000000001ULL;
+    assert(!t7_hdmirx_hdr_input(&rx)); /* missing refresh expires */
+    core[0x1134]=BIT(4);t7_hdmirx_update_drm(&rx);
+    core[0x1140+3]^=1;assert(!t7_hdmirx_hdr_input(&rx));
+    core[0x1140+3]^=1;assert(t7_hdmirx_hdr_input(&rx));
+    core[0x11c0+4]=3;core[0x11c0+3]--; /* valid HLG is not PQ */
+    core[0x1134]=BIT(4);t7_hdmirx_update_drm(&rx);
+    assert(!t7_hdmirx_hdr_input(&rx));
+    memcpy(core+0x11c0,drm,sizeof(drm));core[0x1134]=BIT(4);
+    t7_hdmirx_update_drm(&rx);assert(t7_hdmirx_hdr_input(&rx));
+    writel(0,top+T7_RX_TOP_TMDS_ALIGN_STAT);t7_hdmirx_update_drm(&rx);
+    assert(!rx.drm_received_ns);
     t7_hdmirx_core_stop(&rx);
     assert(core[T7_RX_COR_UNREC_CTRL]==0x34 && core[T7_RX_COR_UNREC_TYPE]==0x55);
     puts("Core lifecycle, stable start qualification and nonblocking status loss/recovery passed");

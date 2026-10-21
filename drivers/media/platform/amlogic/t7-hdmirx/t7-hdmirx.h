@@ -23,4 +23,7 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int height);
 void t7_hdmirx_stream_put(struct device *dev);
 
+/* Stable input classification for the held stream lease, until stream_put. */
+bool t7_hdmirx_stream_is_hdr(struct device *dev);
+
 #endif
