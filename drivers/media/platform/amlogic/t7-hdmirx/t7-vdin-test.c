@@ -129,7 +129,8 @@ struct t7_vdin {
 	struct v4l2_device v4l2;
 	struct video_device video;
 	struct vb2_queue queue;
-	struct mutex video_lock; /* V4L2 ioctls; never acquired by the worker. */
+	struct mutex video_lock; /* Non-queue ioctls; never acquired by the worker. */
+	struct mutex queue_mutex; /* vb2 allocation, streaming and close. */
 	spinlock_t queue_lock;
 	struct list_head queued;
 	wait_queue_head_t buffer_wait;
@@ -870,10 +871,16 @@ static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fm
 static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
 {
 	struct t7_vdin *vdin = video_drvdata(file);
+	int ret;
 
-	if (vb2_is_busy(&vdin->queue))
+	/* The core holds video_lock here. Disconnect takes queue_mutex first;
+	 * trylock avoids reversing that order while still excluding REQBUFS.
+	 */
+	if (!mutex_trylock(&vdin->queue_mutex))
 		return -EBUSY;
-	return t7_vdin_get_fmt(file, priv, fmt);
+	ret = vb2_is_busy(&vdin->queue) ? -EBUSY : t7_vdin_get_fmt(file, priv, fmt);
+	mutex_unlock(&vdin->queue_mutex);
+	return ret;
 }
 
 static int t7_vdin_enum_input(struct file *file, void *priv, struct v4l2_input *input)
@@ -984,9 +991,22 @@ static void t7_vdin_video_release(struct video_device *video)
 static void t7_vdin_video_unregister(void *data)
 {
 	struct t7_vdin *vdin = data;
+	struct video_device *video = &vdin->video;
 
-	vb2_video_unregister_device(&vdin->video);
+	/* Quiesce both ioctl classes before RX resources can be unmapped. The
+	 * vb2 unregister helper only takes the queue lock, so perform its release
+	 * sequence here with the separate status lock and the same device ref.
+	 */
+	get_device(&video->dev);
+	mutex_lock(&vdin->queue_mutex);
+	mutex_lock(&vdin->video_lock);
+	video_unregister_device(video);
+	mutex_unlock(&vdin->video_lock);
+	vb2_queue_release(&vdin->queue);
+	vdin->queue.owner = NULL;
+	mutex_unlock(&vdin->queue_mutex);
 	v4l2_device_unregister(&vdin->v4l2);
+	put_device(&video->dev);
 }
 
 static int t7_vdin_video_register(struct t7_vdin *vdin)
@@ -1007,7 +1027,7 @@ static int t7_vdin_video_register(struct t7_vdin *vdin)
 	queue->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC |
 				 V4L2_BUF_FLAG_TSTAMP_SRC_EOF;
 	queue->min_queued_buffers = 2;
-	queue->lock = &vdin->video_lock;
+	queue->lock = &vdin->queue_mutex;
 	queue->dev = vdin->dev;
 	ret = vb2_queue_init(queue);
 	if (ret)
@@ -1128,6 +1148,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	vdin->dev = dev;
 	mutex_init(&vdin->lock);
 	mutex_init(&vdin->video_lock);
+	mutex_init(&vdin->queue_mutex);
 	spin_lock_init(&vdin->irq_lock);
 	spin_lock_init(&vdin->queue_lock);
 	INIT_LIST_HEAD(&vdin->queued);
