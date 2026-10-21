@@ -20,9 +20,11 @@
 #include <linux/pm_runtime.h>
 #include <linux/seq_file.h>
 #include <linux/vmalloc.h>
+#include <linux/workqueue.h>
 
 #include <media/v4l2-device.h>
 #include <media/v4l2-fh.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-dma-contig.h>
 
@@ -102,7 +104,7 @@ struct t7_vdin_snapshot {
 };
 
 struct t7_vdin {
-	unsigned int width, height, stride, frame_size, allocation_size;
+	unsigned int width, height, stride, frame_size, allocation_size, frame_capacity;
 	u32 pixel_format;
 	bool nv12;
 	bool direct_dma;
@@ -131,6 +133,9 @@ struct t7_vdin {
 	struct vb2_queue queue;
 	struct mutex video_lock; /* Non-queue ioctls; never acquired by the worker. */
 	struct mutex queue_mutex; /* vb2 allocation, streaming and close. */
+	struct delayed_work source_work;
+	bool source_seen, source_locked;
+	unsigned int source_width, source_height;
 	spinlock_t queue_lock;
 	struct list_head queued;
 	wait_queue_head_t buffer_wait;
@@ -367,7 +372,7 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 
 	if (vdin->faulted)
 		return -EIO;
-	ret = t7_hdmirx_stream_get(vdin->receiver);
+	ret = t7_hdmirx_stream_get(vdin->receiver, vdin->width, vdin->height);
 	if (ret)
 		return ret;
 	memset(vdin->frame, 0xa5, vdin->frame_size);
@@ -411,14 +416,16 @@ static int t7_vdin_frame_open(struct inode *inode, struct file *file)
 	ret = debugfs_file_get(file->f_path.dentry);
 	if (ret)
 		return ret;
+	ret = mutex_lock_interruptible(&vdin->lock);
+	if (ret)
+		goto put_file;
+	/* S_FMT may change geometry; size and capture share the same lock. */
 	snapshot = kvmalloc(struct_size(snapshot, data, vdin->frame_size), GFP_KERNEL);
 	if (!snapshot) {
+		mutex_unlock(&vdin->lock);
 		ret = -ENOMEM;
 		goto put_file;
 	}
-	ret = mutex_lock_interruptible(&vdin->lock);
-	if (ret)
-		goto free_snapshot;
 	ret = vdin->streaming ? -EBUSY : t7_vdin_capture(vdin);
 	if (!ret) {
 		snapshot->size = vdin->frame_size;
@@ -789,7 +796,8 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	int ret;
 
 	mutex_lock(&vdin->lock);
-	ret = vdin->faulted ? -EIO : t7_hdmirx_stream_get(vdin->receiver);
+	ret = vdin->faulted ? -EIO :
+		t7_hdmirx_stream_get(vdin->receiver, vdin->width, vdin->height);
 	if (!ret) {
 		vdin->receiver_lease = true;
 		vdin->streaming = true;
@@ -831,6 +839,48 @@ static const struct vb2_ops t7_vdin_queue_ops = {
 	.stop_streaming = t7_vdin_stop_streaming,
 };
 
+static void t7_vdin_source_work(struct work_struct *work)
+{
+	struct t7_vdin *vdin = container_of(to_delayed_work(work), struct t7_vdin, source_work);
+	struct v4l2_dv_timings timings;
+	struct v4l2_fract interval;
+	struct v4l2_event event = { .type = V4L2_EVENT_SOURCE_CHANGE };
+	bool locked;
+	int ret;
+
+	mutex_lock(&vdin->video_lock);
+	ret = t7_hdmirx_query_timings(vdin->receiver, &timings, &interval);
+	/* A torn period is a retry, not evidence that the source disappeared. */
+	if (ret != -EAGAIN) {
+		locked = !ret;
+		if (vdin->source_seen && (locked != vdin->source_locked ||
+		    (locked && (timings.bt.width != vdin->source_width ||
+				timings.bt.height != vdin->source_height)))) {
+			event.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION;
+			v4l2_event_queue(&vdin->video, &event);
+		}
+		vdin->source_seen = true;
+		vdin->source_locked = locked;
+		if (locked) {
+			vdin->source_width = timings.bt.width;
+			vdin->source_height = timings.bt.height;
+		}
+	}
+	mutex_unlock(&vdin->video_lock);
+	schedule_delayed_work(&vdin->source_work, msecs_to_jiffies(250));
+}
+
+static void t7_vdin_source_start(struct t7_vdin *vdin)
+{
+	schedule_delayed_work(&vdin->source_work, 0);
+}
+
+static void t7_vdin_source_stop(struct t7_vdin *vdin)
+{
+	/* Cancel before taking either ioctl lock: the work owns video_lock. */
+	cancel_delayed_work_sync(&vdin->source_work);
+}
+
 static int t7_vdin_querycap(struct file *file, void *priv, struct v4l2_capability *cap)
 {
 	strscpy(cap->driver, "t7-vdin-test", sizeof(cap->driver));
@@ -848,23 +898,45 @@ static int t7_vdin_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *
 	return 0;
 }
 
-static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
+static void t7_vdin_fill_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
+			     unsigned int width, unsigned int height)
 {
-	struct t7_vdin *vdin = video_drvdata(file);
+	unsigned int stride = width * (vdin->nv12 ? 1 : 3);
 
 	fmt->fmt.pix = (struct v4l2_pix_format) {
-		.width = vdin->width,
-		.height = vdin->height,
+		.width = width,
+		.height = height,
 		.pixelformat = vdin->pixel_format,
 		.field = V4L2_FIELD_NONE,
-		.bytesperline = vdin->stride,
-		.sizeimage = vdin->allocation_size,
+		.bytesperline = stride,
+		.sizeimage = vdin->nv12 ? stride * ALIGN(height, 16) * 3 / 2 : stride * height,
 		.colorspace = vdin->nv12 ? V4L2_COLORSPACE_REC709 : V4L2_COLORSPACE_SRGB,
 		.xfer_func = vdin->nv12 ? V4L2_XFER_FUNC_709 : V4L2_XFER_FUNC_SRGB,
 		.ycbcr_enc = vdin->nv12 ? V4L2_YCBCR_ENC_709 : V4L2_YCBCR_ENC_DEFAULT,
 		.quantization = vdin->nv12 ? V4L2_QUANTIZATION_LIM_RANGE :
 					   V4L2_QUANTIZATION_FULL_RANGE,
 	};
+}
+
+static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
+{
+	struct t7_vdin *vdin = video_drvdata(file);
+
+	t7_vdin_fill_fmt(vdin, fmt, vdin->width, vdin->height);
+	return 0;
+}
+
+static int t7_vdin_try_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
+{
+	struct t7_vdin *vdin = video_drvdata(file);
+	struct v4l2_dv_timings timings;
+	struct v4l2_fract interval;
+	int ret;
+
+	ret = t7_hdmirx_query_timings(vdin->receiver, &timings, &interval);
+	if (ret)
+		return ret;
+	t7_vdin_fill_fmt(vdin, fmt, timings.bt.width, timings.bt.height);
 	return 0;
 }
 
@@ -878,7 +950,27 @@ static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fm
 	 */
 	if (!mutex_trylock(&vdin->queue_mutex))
 		return -EBUSY;
-	ret = vb2_is_busy(&vdin->queue) ? -EBUSY : t7_vdin_get_fmt(file, priv, fmt);
+	ret = -EBUSY;
+	if (vb2_is_busy(&vdin->queue) || !mutex_trylock(&vdin->lock))
+		goto unlock_queue;
+	ret = vdin->faulted ? -EIO : t7_vdin_try_fmt(file, priv, fmt);
+	if (!ret) {
+		unsigned int frame_size = fmt->fmt.pix.bytesperline * fmt->fmt.pix.height;
+
+		if (vdin->nv12)
+			frame_size += frame_size / 2;
+		if (frame_size > vdin->frame_capacity) {
+			ret = -ERANGE;
+		} else {
+			vdin->width = fmt->fmt.pix.width;
+			vdin->height = fmt->fmt.pix.height;
+			vdin->stride = fmt->fmt.pix.bytesperline;
+			vdin->allocation_size = fmt->fmt.pix.sizeimage;
+			vdin->frame_size = frame_size;
+		}
+	}
+	mutex_unlock(&vdin->lock);
+unlock_queue:
 	mutex_unlock(&vdin->queue_mutex);
 	return ret;
 }
@@ -944,13 +1036,15 @@ static const struct v4l2_ioctl_ops t7_vdin_ioctl_ops = {
 	.vidioc_querycap = t7_vdin_querycap,
 	.vidioc_enum_fmt_vid_cap = t7_vdin_enum_fmt,
 	.vidioc_g_fmt_vid_cap = t7_vdin_get_fmt,
-	.vidioc_try_fmt_vid_cap = t7_vdin_get_fmt,
+	.vidioc_try_fmt_vid_cap = t7_vdin_try_fmt,
 	.vidioc_s_fmt_vid_cap = t7_vdin_set_fmt,
 	.vidioc_enum_input = t7_vdin_enum_input,
 	.vidioc_g_input = t7_vdin_get_input,
 	.vidioc_s_input = t7_vdin_set_input,
 	.vidioc_query_dv_timings = t7_vdin_query_dv_timings,
 	.vidioc_g_parm = t7_vdin_get_parm,
+	.vidioc_subscribe_event = v4l2_src_change_event_subscribe,
+	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
 	.vidioc_reqbufs = vb2_ioctl_reqbufs,
 	.vidioc_create_bufs = vb2_ioctl_create_bufs,
 	.vidioc_prepare_buf = vb2_ioctl_prepare_buf,
@@ -993,6 +1087,7 @@ static void t7_vdin_video_unregister(void *data)
 	struct t7_vdin *vdin = data;
 	struct video_device *video = &vdin->video;
 
+	t7_vdin_source_stop(vdin);
 	/* Quiesce both ioctl classes before RX resources can be unmapped. The
 	 * vb2 unregister helper only takes the queue lock, so perform its release
 	 * sequence here with the separate status lock and the same device ref.
@@ -1049,7 +1144,10 @@ static int t7_vdin_video_register(struct t7_vdin *vdin)
 		vb2_queue_release(queue);
 		goto unregister_v4l2;
 	}
-	return devm_add_action_or_reset(vdin->dev, t7_vdin_video_unregister, vdin);
+	ret = devm_add_action_or_reset(vdin->dev, t7_vdin_video_unregister, vdin);
+	if (!ret)
+		t7_vdin_source_start(vdin);
+	return ret;
 
 unregister_v4l2:
 	v4l2_device_unregister(&vdin->v4l2);
@@ -1111,9 +1209,9 @@ static void t7_vdin_free_frame(void *data)
 		return;
 	for (i = 0; i < VDIN_DMA_SLOTS; i++)
 		if (vdin->slots[i].data)
-			dma_free_noncoherent(vdin->dev, vdin->frame_size, vdin->slots[i].data,
+			dma_free_noncoherent(vdin->dev, vdin->frame_capacity, vdin->slots[i].data,
 					     vdin->slots[i].dma, DMA_FROM_DEVICE);
-	dma_free_coherent(vdin->dev, vdin->frame_size, vdin->frame, vdin->frame_dma);
+	dma_free_coherent(vdin->dev, vdin->frame_capacity, vdin->frame, vdin->frame_dma);
 }
 
 static void t7_vdin_debugfs_remove(void *data)
@@ -1149,6 +1247,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	mutex_init(&vdin->lock);
 	mutex_init(&vdin->video_lock);
 	mutex_init(&vdin->queue_mutex);
+	INIT_DELAYED_WORK(&vdin->source_work, t7_vdin_source_work);
 	spin_lock_init(&vdin->irq_lock);
 	spin_lock_init(&vdin->queue_lock);
 	INIT_LIST_HEAD(&vdin->queued);
@@ -1168,7 +1267,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 		return -EPROBE_DEFER;
 	if (!device_link_add(dev, vdin->receiver, DL_FLAG_AUTOREMOVE_CONSUMER))
 		return -EINVAL;
-	ret = t7_hdmirx_get_size(vdin->receiver, &vdin->width, &vdin->height);
+	ret = t7_hdmirx_get_max_size(vdin->receiver, &vdin->width, &vdin->height);
 	if (ret)
 		return ret;
 	vdin->nv12 = nv12;
@@ -1177,6 +1276,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	vdin->frame_size = vdin->stride * vdin->height;
 	if (nv12)
 		vdin->frame_size += vdin->frame_size / 2;
+	vdin->frame_capacity = vdin->frame_size;
 	/* Keep NV12 tightly packed, with tail room for aligned encoder plane views. */
 	vdin->allocation_size = nv12 ? vdin->stride * ALIGN(vdin->height, 16) * 3 / 2 :
 				       vdin->frame_size;

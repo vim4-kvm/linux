@@ -150,6 +150,10 @@ static bool uhd60;
 module_param(uhd60, bool, 0400);
 MODULE_PARM_DESC(uhd60, "Opt-in RGB8 3840x2160p60 HDMI 2.0 trial; requires matching EDID");
 
+static bool dynamic_modes;
+module_param(dynamic_modes, bool, 0400);
+MODULE_PARM_DESC(dynamic_modes, "Automatically select RGB8 1080p60/UHD60; requires uhd60=1");
+
 static bool audio_test;
 module_param(audio_test, bool, 0400);
 MODULE_PARM_DESC(audio_test, "Opt-in stereo LPCM ALSA capture codec for the dedicated audio DTB");
@@ -202,6 +206,7 @@ struct t7_hdmirx_link {
 	unsigned int users;
 	u32 previous_cable;
 	unsigned int stable_samples;
+	bool previous_uhd;
 	bool ready;
 	bool configured;
 };
@@ -209,6 +214,8 @@ struct t7_hdmirx_link {
 struct t7_hdmirx {
 	struct t7_hdmirx_link *link;
 	bool uhd60;
+	bool dynamic_modes;
+	struct mutex audio_lock;
 	u8 saved_ddc_switch, saved_sink_version, saved_tmds_config;
 	void __iomem *top;
 	void __iomem *phy;
@@ -415,27 +422,10 @@ static void t7_hdmirx_phy_stop(void *data)
 	rx->phy_active = false;
 }
 
-static void t7_hdmirx_phy_prepare(struct t7_hdmirx *rx)
+static void t7_hdmirx_phy_configure(struct t7_hdmirx *rx)
 {
 	u32 trim = readl(rx->phy + T7_RX_PHY_MISC1);
 	u32 misc0;
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(t7_hdmirx_phy_top_regs); i++)
-		rx->phy_top_saved[i] = readl(rx->top + t7_hdmirx_phy_top_regs[i]);
-	rx->phy_active = true;
-	writel(0, rx->top + T7_RX_TOP_CLK_CNTL);
-	writel((rx->saved_port_sel & ~GENMASK(2, 0)) | BIT(4) | BIT(rx->port),
-	       rx->top + T7_RX_TOP_PORT_SEL);
-	writel(BIT(1), rx->top + T7_RX_TOP_PHYIF_CNTL0);
-	writel(0x24000001, rx->top + T7_RX_TOP_CHAN_SWITCH_0);
-	writel(0x03000007, rx->top + T7_RX_TOP_CHAN_SWITCH_1);
-	writel(BIT(28) | T7_RX_METER_REF_CYCLES, rx->top + T7_RX_TOP_METER_CABLE_CNTL);
-	writel(BIT(28) | T7_RX_METER_REF_CYCLES, rx->top + T7_RX_TOP_METER_HDMI_CNTL);
-	/* Discard meter state left by the previous receiver instance. */
-	writel(BIT(5) | BIT(6), rx->top + T7_RX_TOP_SW_RESET);
-	readl(rx->top + T7_RX_TOP_SW_RESET);
-	writel(0, rx->top + T7_RX_TOP_SW_RESET);
 	/* Fixed PHY_BW_2 or PHY_BW_5; qualify the cable and SCDC ratio before APLL. */
 	writel(0x200773f8, rx->phy + T7_RX_PHY_MISC0);
 	usleep_range(5, 10);
@@ -463,6 +453,27 @@ static void t7_hdmirx_phy_prepare(struct t7_hdmirx *rx)
 	writel(misc0, rx->phy + T7_RX_PHY_MISC0);
 	usleep_range(5, 10);
 	writel(misc0 | BIT(10) | GENMASK(9, 7), rx->phy + T7_RX_PHY_MISC0);
+}
+
+static void t7_hdmirx_phy_prepare(struct t7_hdmirx *rx)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(t7_hdmirx_phy_top_regs); i++)
+		rx->phy_top_saved[i] = readl(rx->top + t7_hdmirx_phy_top_regs[i]);
+	rx->phy_active = true;
+	writel(0, rx->top + T7_RX_TOP_CLK_CNTL);
+	writel((rx->saved_port_sel & ~GENMASK(2, 0)) | BIT(4) | BIT(rx->port),
+	       rx->top + T7_RX_TOP_PORT_SEL);
+	writel(BIT(1), rx->top + T7_RX_TOP_PHYIF_CNTL0);
+	writel(0x24000001, rx->top + T7_RX_TOP_CHAN_SWITCH_0);
+	writel(0x03000007, rx->top + T7_RX_TOP_CHAN_SWITCH_1);
+	writel(BIT(28) | T7_RX_METER_REF_CYCLES, rx->top + T7_RX_TOP_METER_CABLE_CNTL);
+	writel(BIT(28) | T7_RX_METER_REF_CYCLES, rx->top + T7_RX_TOP_METER_HDMI_CNTL);
+	writel(BIT(5) | BIT(6), rx->top + T7_RX_TOP_SW_RESET);
+	readl(rx->top + T7_RX_TOP_SW_RESET);
+	writel(0, rx->top + T7_RX_TOP_SW_RESET);
+	t7_hdmirx_phy_configure(rx);
 }
 
 static int t7_hdmirx_wait_cable(struct t7_hdmirx *rx, unsigned long reference_hz)
@@ -657,6 +668,9 @@ static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 
 	if (!rx || !rx->core_active)
 		return -ENOLINK;
+	if (rx->dynamic_modes &&
+	    (!!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1)) != READ_ONCE(rx->uhd60)))
+		return -ENOLINK;
 	if (rx->link && !(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK))
 		return -ENOLINK;
 	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
@@ -702,17 +716,17 @@ int t7_hdmirx_check_video(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_check_video);
 
-int t7_hdmirx_get_size(struct device *dev, unsigned int *width, unsigned int *height)
+int t7_hdmirx_get_max_size(struct device *dev, unsigned int *width, unsigned int *height)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
 
 	if (!rx || !rx->core_active)
 		return -ENOLINK;
-	*width = rx->uhd60 ? 3840 : 1920;
-	*height = rx->uhd60 ? 2160 : 1080;
+	*width = rx->dynamic_modes || rx->uhd60 ? 3840 : 1920;
+	*height = rx->dynamic_modes || rx->uhd60 ? 2160 : 1080;
 	return 0;
 }
-EXPORT_SYMBOL_GPL(t7_hdmirx_get_size);
+EXPORT_SYMBOL_GPL(t7_hdmirx_get_max_size);
 
 int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 			  struct v4l2_fract *interval)
@@ -721,11 +735,13 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 	struct v4l2_dv_timings mode;
 	u32 ticks, reference, before, after;
 	u32 hsync, vsync;
+	bool selected_uhd;
 	int ret;
 
 	ret = t7_hdmirx_check_video_now(dev);
 	if (ret)
 		return ret;
+	selected_uhd = READ_ONCE(rx->uhd60);
 	/* Byte-addressed counters can roll over between bus reads. Retry through
 	 * userspace rather than publishing a torn period as a different frame rate.
 	 * No frame wait here: status polling shares the capture queue lock.
@@ -740,7 +756,7 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 	reference = clk_get_rate(rx->clocks[T7_RX_PCLK].clk);
 	if (!ticks || ticks < reference / 61 || ticks > reference / 59)
 		return -ERANGE;
-	mode = rx->uhd60 ? (struct v4l2_dv_timings)V4L2_DV_BT_CEA_3840X2160P60 :
+	mode = selected_uhd ? (struct v4l2_dv_timings)V4L2_DV_BT_CEA_3840X2160P60 :
 			  (struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60;
 	/* Both qualified CEA modes use positive sync pulses. The low-level count
 	 * includes the active picture and porches, not the sync pulse width.
@@ -755,6 +771,8 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 	ret = t7_hdmirx_check_video_now(dev);
 	if (ret)
 		return ret;
+	if (selected_uhd != READ_ONCE(rx->uhd60))
+		return -EAGAIN;
 	mode.bt.pixelclock = div_u64((u64)reference *
 		(mode.bt.width + mode.bt.hfrontporch + mode.bt.hsync + mode.bt.hbackporch) *
 		(mode.bt.height + mode.bt.vfrontporch + mode.bt.vsync + mode.bt.vbackporch), ticks);
@@ -792,7 +810,7 @@ static int t7_hdmirx_validate_audio(u32 tmds, u32 n, u32 cts,
 	return 0;
 }
 
-static void t7_hdmirx_audio_stop(void *data)
+static void t7_hdmirx_audio_stop_locked(void *data)
 {
 	struct t7_hdmirx *rx = data;
 	unsigned int i;
@@ -825,7 +843,16 @@ static void t7_hdmirx_audio_stop(void *data)
 	rx->audio_active = false;
 }
 
-static int t7_hdmirx_audio_hw_params(struct snd_pcm_substream *substream,
+static void t7_hdmirx_audio_stop(void *data)
+{
+	struct t7_hdmirx *rx = data;
+
+	mutex_lock(&rx->audio_lock);
+	t7_hdmirx_audio_stop_locked(rx);
+	mutex_unlock(&rx->audio_lock);
+}
+
+static int t7_hdmirx_audio_hw_params_locked(struct snd_pcm_substream *substream,
 				    struct snd_pcm_hw_params *params,
 				    struct snd_soc_dai *dai)
 {
@@ -837,6 +864,8 @@ static int t7_hdmirx_audio_hw_params(struct snd_pcm_substream *substream,
 	if (!rx->core_active || params_channels(params) != 2 ||
 	    params_format(params) != SNDRV_PCM_FORMAT_S16_LE)
 		return -EINVAL;
+	if (rx->dynamic_modes && (!rx->link || !READ_ONCE(rx->link->ready)))
+		return -ENOLINK;
 	n = t7_hdmirx_audio_word(rx, T7_RX_COR_N);
 	cts = t7_hdmirx_audio_word(rx, T7_RX_COR_CTS);
 	tmds = t7_hdmirx_meter_hz(readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
@@ -892,7 +921,7 @@ static int t7_hdmirx_audio_hw_params(struct snd_pcm_substream *substream,
 	ret = readl_poll_timeout(rx->phy + T7_RX_AUD_PLL_STATUS, status,
 				status & BIT(31), 10, 100000);
 	if (ret) {
-		t7_hdmirx_audio_stop(rx);
+		t7_hdmirx_audio_stop_locked(rx);
 		return ret;
 	}
 	value = readb(rx->cor + T7_RX_COR_POWER_RESET);
@@ -906,6 +935,19 @@ static int t7_hdmirx_audio_hw_params(struct snd_pcm_substream *substream,
 	writel(value | BIT(29) | BIT(28), rx->frhdmirx);
 	writel(value | BIT(29) | BIT(28) | BIT(31), rx->frhdmirx);
 	return 0;
+}
+
+static int t7_hdmirx_audio_hw_params(struct snd_pcm_substream *substream,
+				    struct snd_pcm_hw_params *params,
+				    struct snd_soc_dai *dai)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dai->dev);
+	int ret;
+
+	mutex_lock(&rx->audio_lock);
+	ret = t7_hdmirx_audio_hw_params_locked(substream, params, dai);
+	mutex_unlock(&rx->audio_lock);
+	return ret;
 }
 
 static int t7_hdmirx_audio_hw_free(struct snd_pcm_substream *substream,
@@ -961,7 +1003,7 @@ static int t7_hdmirx_audio_register(struct platform_device *pdev, struct t7_hdmi
 					     &t7_hdmirx_audio_dai, 1);
 }
 
-int t7_hdmirx_stream_get(struct device *dev)
+int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int height)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
 	int ret;
@@ -970,6 +1012,9 @@ int t7_hdmirx_stream_get(struct device *dev)
 		return -ENOLINK;
 	mutex_lock(&rx->link->lock);
 	ret = t7_hdmirx_check_video(dev);
+	if (!ret && (width != (rx->uhd60 ? 3840 : 1920) ||
+		     height != (rx->uhd60 ? 2160 : 1080)))
+		ret = -EPIPE;
 	if (!ret)
 		rx->link->users++;
 	mutex_unlock(&rx->link->lock);
@@ -997,6 +1042,7 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 						struct t7_hdmirx_link, work);
 	struct t7_hdmirx *rx = link->rx;
 	u32 cable;
+	bool next_uhd;
 	int ret;
 
 	mutex_lock(&link->lock);
@@ -1015,24 +1061,40 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		goto out;
 	cable = t7_hdmirx_sample_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
 	rx->cable_hz = cable;
+	next_uhd = !!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1));
 	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
-	    (!!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1)) != rx->uhd60) ||
+	    (!rx->dynamic_modes && next_uhd != rx->uhd60) ||
 	    cable < 146500000 || cable > 150500000) {
 		link->stable_samples = 0;
 		link->previous_cable = 0;
 		link->configured = false;
 		goto out;
 	}
-	if (link->previous_cable &&
+	if (link->previous_cable && link->previous_uhd == next_uhd &&
 	    abs((int)cable - (int)link->previous_cable) <= 500000)
 		link->stable_samples++;
 	else
 		link->stable_samples = 0;
 	link->previous_cable = cable;
+	link->previous_uhd = next_uhd;
 	if (link->stable_samples < 3)
 		goto out;
 	link->stable_samples = 0;
+	mutex_lock(&rx->audio_lock);
+	if (rx->uhd60 != next_uhd) {
+		WRITE_ONCE(rx->uhd60, next_uhd);
+		/* ACR CTS division tracks PHY_BW_2 versus PHY_BW_5. Preserve ALSA
+		 * routing and DMA while resetting only the recovered audio PLL.
+		 */
+		if (rx->audio_active) {
+			writel(0x40001540, rx->phy + T7_RX_AUD_PLL0);
+			writel(next_uhd ? 0 : 2, rx->phy + T7_RX_AUD_PLL3);
+			writel(0x60001540, rx->phy + T7_RX_AUD_PLL0);
+		}
+		t7_hdmirx_phy_configure(rx);
+	}
 	ret = t7_hdmirx_phy_pll(rx);
+	mutex_unlock(&rx->audio_lock);
 	if (ret)
 		goto out;
 	/* Video PLL/PCS only: keep DDC/HPD and the audio PLL configuration. */
@@ -1082,6 +1144,8 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 	seq_printf(s, "top_edid_gen_stat: %#010x\n",
 		   readl(rx->top + T7_RX_TOP_EDID_GEN_STAT));
 	seq_printf(s, "phy_active: %u\n", rx->phy_active);
+	seq_printf(s, "dynamic_modes: %u\n", rx->dynamic_modes);
+	seq_printf(s, "selected_uhd: %u\n", READ_ONCE(rx->uhd60));
 	seq_printf(s, "core_active: %u\n", rx->core_active);
 	if (rx->link) {
 		seq_printf(s, "link_ready: %u\n", READ_ONCE(rx->link->ready));
@@ -1176,6 +1240,10 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 	if (ret || rx->port > 2)
 		return dev_err_probe(dev, -EINVAL, "Require input port 0..2\n");
 	rx->uhd60 = uhd60;
+	if (dynamic_modes && !uhd60)
+		return -EINVAL;
+	rx->dynamic_modes = dynamic_modes;
+	mutex_init(&rx->audio_lock);
 	rx->top = devm_platform_ioremap_resource_byname(pdev, "top");
 	if (IS_ERR(rx->top))
 		return PTR_ERR(rx->top);

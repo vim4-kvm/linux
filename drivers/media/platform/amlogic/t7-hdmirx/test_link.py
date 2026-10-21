@@ -20,6 +20,7 @@ prefix = r'''
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #ifdef __clang__
 #pragma clang diagnostic ignored "-Wunneeded-internal-declaration"
 #endif
@@ -45,6 +46,7 @@ struct device { void *data; };
 stubs = r'''
 static bool signal_valid, source_present, hdmi2 = true, pll_fail, late_alignment, lose_during_wait;
 static unsigned int pll_calls, pcs_calls, queued, canceled, last_delay, meter_resets;
+static unsigned int profile_changes;
 static u32 meter_reset;
 static u32 cable_hz;
 static struct t7_hdmirx receiver;
@@ -53,7 +55,7 @@ static void mutex_lock(struct mutex *lock) { assert(!lock->held); lock->held = t
 static void mutex_unlock(struct mutex *lock) { assert(lock->held); lock->held = false; }
 static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 {
-    (void)rx; return signal_valid ? 0 : -ENOLINK;
+    return signal_valid && (!rx->dynamic_modes || rx->uhd60==hdmi2) ? 0 : -ENOLINK;
 }
 static int t7_hdmirx_check_video(struct device *dev)
 {
@@ -70,6 +72,10 @@ static u32 readl(void *address)
 }
 static void writel(u32 value, void *address)
 {
+    if (address == receiver.phy + T7_RX_AUD_PLL0 || address == receiver.phy + T7_RX_AUD_PLL3) {
+        assert(!receiver.link->users && receiver.audio_lock.held);
+        memcpy(address,&value,4); return;
+    }
     assert(address == receiver.top + T7_RX_TOP_SW_RESET && !receiver.link->users);
     assert(!value || value == (BIT(5) | BIT(6)));
     meter_reset = value;
@@ -86,6 +92,9 @@ static int t7_hdmirx_phy_pll(struct t7_hdmirx *rx)
 {
     assert(rx->link->lock.held && !rx->link->users);
     pll_calls++; return pll_fail ? -ETIMEDOUT : 0;
+}
+static void t7_hdmirx_phy_configure(struct t7_hdmirx *rx) {
+    assert(rx->link->lock.held && !rx->link->users); profile_changes++;
 }
 static void t7_hdmirx_phy_equalize(struct t7_hdmirx *rx)
 {
@@ -113,18 +122,18 @@ static void tick(struct t7_hdmirx_link *link, int count)
 }
 int main(void)
 {
-    unsigned char top[0x4000], core[0x8000];
+    unsigned char top[0x4000], core[0x8000], phy[0x100]={0};
     struct t7_hdmirx_link link = {.rx = &receiver};
     struct device dev = {.data = &receiver};
     receiver.top = top; receiver.cor = core; receiver.link = &link; receiver.uhd60 = true;
     tick(&link, 100);
     assert(!link.ready && !pll_calls && queued == 100);
-    assert(t7_hdmirx_stream_get(&dev) == -ENOLINK && !link.users);
+    assert(t7_hdmirx_stream_get(&dev,3840,2160) == -ENOLINK && !link.users);
     source_present = true; cable_hz = 148500000;
     tick(&link, 3); assert(!pll_calls);
     tick(&link, 1); assert(pll_calls == 1 && pcs_calls == 1 && link.ready);
     tick(&link, 100); assert(pll_calls == 1);
-    assert(!t7_hdmirx_stream_get(&dev) && !t7_hdmirx_stream_get(&dev) && link.users == 2);
+    assert(!t7_hdmirx_stream_get(&dev,3840,2160) && !t7_hdmirx_stream_get(&dev,3840,2160) && link.users == 2);
     unsigned int resets_before = meter_resets;
     signal_valid = false; tick(&link, 10);
     assert(!link.ready && pll_calls == 1 && meter_resets == resets_before);
@@ -139,6 +148,19 @@ int main(void)
     signal_valid = true; tick(&link, 1); assert(link.ready && pll_calls == 4);
     link.ready = false; lose_during_wait = true; tick(&link, 1);
     assert(!link.ready && !signal_valid);
+    lose_during_wait=false; late_alignment=false; receiver.dynamic_modes=true;
+    receiver.phy=phy; receiver.audio_active=true;
+    hdmi2=false; tick(&link,4);
+    assert(link.ready && !receiver.uhd60 && profile_changes==1);
+    u32 audio_div; memcpy(&audio_div,phy+T7_RX_AUD_PLL3,4); assert(audio_div==2);
+    assert(t7_hdmirx_stream_get(&dev,3840,2160)==-EPIPE && !link.users);
+    assert(!t7_hdmirx_stream_get(&dev,1920,1080));
+    hdmi2=true; tick(&link,20);
+    assert(!link.ready && !receiver.uhd60 && profile_changes==1);
+    t7_hdmirx_stream_put(&dev); tick(&link,4);
+    assert(link.ready && receiver.uhd60 && profile_changes==2);
+    memcpy(&audio_div,phy+T7_RX_AUD_PLL3,4); assert(audio_div==0);
+    assert(t7_hdmirx_stream_get(&dev,1920,1080)==-EPIPE && !link.users);
     t7_hdmirx_link_stop(&link);
     assert(canceled == 1 && !link.ready);
     puts("Receiver recovery: absent/delayed source, DMA leases, PLL failure and late alignment passed");
