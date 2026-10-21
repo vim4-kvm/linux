@@ -117,6 +117,9 @@ int main(void)
     missing = 5;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 100 && ctx.sensor_fault && !ctx.quiet_started);
+    assert(delay == 1000);
+    khadas_vim4_fan_work(&ctx.quiet_work.work);
+    assert(ctx.level == 100 && !ctx.quiet_started && delay == 1000);
     missing = -1; reads = 0;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 15 && !ctx.sensor_fault && ctx.quiet_started);
@@ -127,9 +130,11 @@ int main(void)
     unreadable = 5;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 100 && ctx.sensor_fault);
+    assert(delay == 1000);
     unreadable = -1; temperatures[5] = 50000;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 95 && !ctx.sensor_fault);
+    assert(delay == 30000);
     write_error = -1;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 95 && requested == 90 && delay == 1000);

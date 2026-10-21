@@ -124,8 +124,9 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 	if (fault)
 		dev_warn_ratelimited(ctx->dev, "Fan temperature unavailable; requesting full speed\n");
 
+	/* Thermal zones may register after the first boot-time sample. */
 	schedule_delayed_work(&ctx->quiet_work,
-			      msecs_to_jiffies(ret ? 1000 : 30000));
+			      msecs_to_jiffies(ret || fault ? 1000 : 30000));
 }
 
 static void khadas_vim4_fan_stop(void *data)

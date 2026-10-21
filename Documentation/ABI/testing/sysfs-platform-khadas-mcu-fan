@@ -9,7 +9,10 @@ Description:
                 reading, and applies the quiet curve with a 5 percentage
                 point slew limit. Starting, stopping, and full speed bypass
                 the slew limit. Any unavailable sensor requests full speed.
-                Failed MCU writes retry after one second.
+                Unavailable sensors and failed MCU writes retry after one
+                second; normal sampling resumes after a successful sample
+                and MCU write. The first valid sample adopts the quiet
+                target directly instead of slewing down from full speed.
                 khadas_mcu_fan.quiet_auto=0 selects the original thermal
                 cooling device instead. Other MCU variants are unaffected.
 
