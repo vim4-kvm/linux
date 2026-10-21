@@ -1532,21 +1532,23 @@ in_rq_cur(struct usb_function *fn, const struct usb_ctrlrequest *cr)
 	u8 entity_id = (w_index >> 8) & 0xff;
 	u8 control_selector = w_value >> 8;
 	int value = -EOPNOTSUPP;
-	u32 p_srate, c_srate;
-
-	u_audio_get_playback_srate(agdev, &p_srate);
-	u_audio_get_capture_srate(agdev, &c_srate);
+	u32 srate;
 
 	if ((entity_id == USB_IN_CLK_ID) || (entity_id == USB_OUT_CLK_ID)) {
+		/* Disabled directions have no initialized runtime or sample-rate lock. */
+		if ((entity_id == USB_IN_CLK_ID && !opts->p_chmask) ||
+		    (entity_id == USB_OUT_CLK_ID && !opts->c_chmask))
+			return -EOPNOTSUPP;
 		if (control_selector == UAC2_CS_CONTROL_SAM_FREQ) {
 			struct cntrl_cur_lay3 c;
 
 			memset(&c, 0, sizeof(struct cntrl_cur_lay3));
 
 			if (entity_id == USB_IN_CLK_ID)
-				c.dCUR = cpu_to_le32(p_srate);
-			else if (entity_id == USB_OUT_CLK_ID)
-				c.dCUR = cpu_to_le32(c_srate);
+				u_audio_get_playback_srate(agdev, &srate);
+			else
+				u_audio_get_capture_srate(agdev, &srate);
+			c.dCUR = cpu_to_le32(srate);
 
 			value = min_t(unsigned int, w_length, sizeof(c));
 			memcpy(req->buf, &c, value);
