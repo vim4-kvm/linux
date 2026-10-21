@@ -162,6 +162,10 @@ static bool hdr_probe;
 module_param(hdr_probe, bool, 0400);
 MODULE_PARM_DESC(hdr_probe, "Lock the 371.25 MHz HDR trial link for packet observation; HDR capture remains disabled");
 
+static bool hdr_capture;
+module_param(hdr_capture, bool, 0400);
+MODULE_PARM_DESC(hdr_capture, "Experimental HDR10 420 10-bit input with VDIN HDR2 conversion; requires hdr_probe");
+
 static bool audio_test;
 module_param(audio_test, bool, 0400);
 MODULE_PARM_DESC(audio_test, "Opt-in stereo LPCM ALSA capture codec for the dedicated audio DTB");
@@ -224,6 +228,9 @@ struct t7_hdmirx {
 	bool uhd60;
 	bool dynamic_modes;
 	bool hdr_probe;
+	bool hdr_capture;
+	bool lease_hdr;
+	unsigned long long drm_received_ns;
 	u8 saved_unrec_ctrl, saved_unrec_type;
 	struct mutex audio_lock;
 	u8 saved_ddc_switch, saved_sink_version, saved_tmds_config;
@@ -685,9 +692,71 @@ static u32 t7_hdmirx_core_read16(struct t7_hdmirx *rx, u32 offset)
 	return readb(rx->cor + offset) | (readb(rx->cor + offset + 1) << 8);
 }
 
+static bool t7_hdmirx_packet_valid(const u8 *data, u8 type, u8 version, u8 length)
+{
+	unsigned int i;
+	u8 sum = 0;
+
+	if (data[0] != type || data[1] != version || data[2] != length)
+		return false;
+	for (i = 0; i < (unsigned int)length + 4; i++)
+		sum += data[i];
+	return !sum;
+}
+
+/* Called by the link worker. A cached packet bank is not proof of reception.
+ * Consume only the DRM new-packet W1C flag, leaving AVI/audio IRQs untouched.
+ * Double reads and checksum reject torn packets; no metadata DMA is needed.
+ */
+static void t7_hdmirx_update_drm(struct t7_hdmirx *rx)
+{
+	u8 packet[30], again[30];
+	unsigned int i;
+
+	if (!rx->hdr_capture)
+		return;
+	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
+	    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0))) {
+		WRITE_ONCE(rx->drm_received_ns, 0);
+		writeb(BIT(4), rx->cor + 0x1134);
+		return;
+	}
+	if (!(readb(rx->cor + 0x1134) & BIT(4)))
+		return;
+	writeb(BIT(4), rx->cor + 0x1134);
+	for (i = 0; i < sizeof(packet); i++)
+		packet[i] = readb(rx->cor + 0x11c0 + i);
+	for (i = 0; i < sizeof(again); i++)
+		again[i] = readb(rx->cor + 0x11c0 + i);
+	WRITE_ONCE(rx->drm_received_ns,
+		   !memcmp(packet, again, sizeof(packet)) &&
+		   t7_hdmirx_packet_valid(packet, 0x87, 1, 26) &&
+		   packet[4] == 2 && packet[5] == 0 ? ktime_get_ns() : 0);
+}
+
+static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx)
+{
+	u8 avi[17], again[17];
+	u64 received = READ_ONCE(rx->drm_received_ns);
+	unsigned int i;
+
+	if (!rx->hdr_capture || !received || ktime_get_ns() - received > 1000000000ULL)
+		return false;
+	for (i = 0; i < sizeof(avi); i++)
+		avi[i] = readb(rx->cor + 0x1140 + i);
+	for (i = 0; i < sizeof(again); i++)
+		again[i] = readb(rx->cor + 0x1140 + i);
+	return !memcmp(avi, again, sizeof(avi)) &&
+		t7_hdmirx_packet_valid(avi, 0x82, 2, 13) &&
+		(avi[4] >> 5) == 3 && (avi[5] >> 6) == 3 &&
+		((avi[6] >> 4) & 7) == 6 && !(avi[8] & 0xc0) &&
+		avi[7] == 97 && readb(rx->cor + T7_RX_COR_COLOR_DEPTH) == 5;
+}
+
 static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 {
 	u32 ticks, reference;
+	bool hdr;
 
 	if (!rx || !rx->core_active)
 		return -ENOLINK;
@@ -701,13 +770,16 @@ static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 		return -ENOLINK;
 	if (readb(rx->cor + T7_RX_COR_FRAME_STATUS) & BIT(2))
 		return -ERANGE;
-	if (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
-	    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4)
+	hdr = t7_hdmirx_hdr_input(rx);
+	if (!hdr && (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
+	    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4))
 		return -ERANGE;
-	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (rx->uhd60 ? 3840 : 1920) ||
+	if (rx->link && rx->link->users && hdr != rx->lease_hdr)
+		return -ENOLINK;
+	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (hdr ? 1920 : rx->uhd60 ? 3840 : 1920) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != (rx->uhd60 ? 2160 : 1080) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_LOW) +
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH) != (rx->uhd60 ? 4400 : 2200) ||
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH) != (hdr ? 2200 : rx->uhd60 ? 4400 : 2200) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_LOW) +
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH) != (rx->uhd60 ? 2250 : 1125))
 		return -ERANGE;
@@ -785,6 +857,8 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 	 * includes the active picture and porches, not the sync pulse width.
 	 */
 	hsync = t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH);
+	if (t7_hdmirx_hdr_input(rx))
+		hsync *= 2;
 	vsync = t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH);
 	/* Only these CEA profiles have qualified porch/polarity settings. Do not
 	 * fabricate DV timings for arbitrary modes with the same active area.
@@ -1038,12 +1112,22 @@ int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int he
 	if (!ret && (width != (rx->uhd60 ? 3840 : 1920) ||
 		     height != (rx->uhd60 ? 2160 : 1080)))
 		ret = -EPIPE;
-	if (!ret)
+	if (!ret) {
+		rx->lease_hdr = t7_hdmirx_hdr_input(rx);
 		rx->link->users++;
+	}
 	mutex_unlock(&rx->link->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_get);
+
+bool t7_hdmirx_stream_is_hdr(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+
+	return READ_ONCE(rx->lease_hdr);
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_hdr);
 
 void t7_hdmirx_stream_put(struct device *dev)
 {
@@ -1086,9 +1170,11 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	int ret;
 
 	mutex_lock(&link->lock);
+	t7_hdmirx_update_drm(rx);
 	ret = t7_hdmirx_video_status(rx);
 	if (!ret && link->configured &&
-	    (!rx->hdr_probe || t7_hdmirx_sdr_cable(link->previous_cable))) {
+	    (!rx->hdr_probe || t7_hdmirx_sdr_cable(link->previous_cable) ||
+	     t7_hdmirx_hdr_input(rx))) {
 		if (!READ_ONCE(link->ready)) {
 			usleep_range(20000, 21000);
 			ret = t7_hdmirx_video_status(rx);
@@ -1202,6 +1288,9 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 	seq_printf(s, "phy_active: %u\n", rx->phy_active);
 	seq_printf(s, "dynamic_modes: %u\n", rx->dynamic_modes);
 	seq_printf(s, "hdr_probe: %u\n", rx->hdr_probe);
+	seq_printf(s, "hdr_capture: %u\n", rx->hdr_capture);
+	seq_printf(s, "hdr_input: %u\n", t7_hdmirx_hdr_input(rx));
+	seq_printf(s, "drm_received_ns: %llu\n", READ_ONCE(rx->drm_received_ns));
 	seq_printf(s, "selected_uhd: %u\n", READ_ONCE(rx->uhd60));
 	seq_printf(s, "core_active: %u\n", rx->core_active);
 	if (rx->link) {
@@ -1313,6 +1402,7 @@ static int t7_hdmirx_probe(struct platform_device *pdev)
 		return -EINVAL;
 	rx->dynamic_modes = dynamic_modes;
 	rx->hdr_probe = hdr_probe;
+	rx->hdr_capture = hdr_capture && hdr_probe && dynamic_modes;
 	mutex_init(&rx->audio_lock);
 	rx->top = devm_platform_ioremap_resource_byname(pdev, "top");
 	if (IS_ERR(rx->top))

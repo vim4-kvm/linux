@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
+source = source.replace('#include "t7-vdin-hdr.h"', Path(__file__).with_name('t7-vdin-hdr.h').read_text())
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('enum t7_vdin_slot_state {'):source.index('static u32 t7_vdin_read')]
 functions = source[source.index('static u32 t7_vdin_read'):
@@ -55,6 +56,9 @@ static struct t7_vdin receiver;
 static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)
 { assert(!vdin->direct_dma); return NULL; }
 static unsigned int pins, requests, timing_checks, receiver_users;
+static unsigned int pq_writes, gain_writes, oetf_writes;
+static bool hdr_input;
+static bool t7_hdmirx_stream_is_hdr(struct device *dev) { (void)dev; return hdr_input; }
 static bool timeout, busy, bad_timing, change_timing;
 static u32 readl(void *address)
 {
@@ -66,6 +70,9 @@ static u32 readl(void *address)
 }
 static void writel(u32 value, void *address)
 {
+    if (address == registers + 0x129f * 4) pq_writes++;
+    if (address == registers + 0x12a7 * 4) gain_writes++;
+    if (address == registers + 0x12a1 * 4) oetf_writes++;
     assert((uint8_t *)address >= registers &&
            (uint8_t *)address + 4 <= registers + sizeof(registers));
     if (address == registers + VDIN_WR_CTRL * 4 && value & VDIN_WR_REQ) {
@@ -167,6 +174,15 @@ int main(void)
     assert((readl(registers + VDIN_LFIFO_CTRL * 4) & 0x3fff) == 0x780);
     assert((readl(registers + VDIN_WR_CTRL * 4) >> 12 & 3) == 2);
     assert(readl(registers + VDIN_WR_CHROMA_STRIDE * 4) == 3840U / 16);
+    reset(); receiver.nv12=true;hdr_input=true;
+    t7_vdin_configure(&receiver);
+    assert(pq_writes==143 && gain_writes==75 && oetf_writes==75);
+    assert(readl(registers+0x12b0*4)==0x18);
+    assert(!(readl(registers+VDIN_HDR_CTRL*4)&BIT(16)));
+    assert(readl(registers+VDIN_HDR_MATRIX_OUT*4)==1);
+    hdr_input=false;t7_vdin_configure(&receiver);
+    assert(readl(registers+VDIN_HDR_CTRL*4)==BIT(16));
+    assert(readl(registers+VDIN_HDR_MATRIX_OUT*4)==0);
     reset(); bad_timing = true;
     assert(t7_vdin_capture(&receiver) == -ERANGE && !requests && !receiver.armed);
     reset(); timeout = true;

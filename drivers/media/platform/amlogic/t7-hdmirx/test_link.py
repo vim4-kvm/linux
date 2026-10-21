@@ -44,6 +44,8 @@ struct debugfs_blob_wrapper { void *data; unsigned long size; };
 struct device { void *data; };
 '''
 stubs = r'''
+static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx) { (void)rx; return false; }
+static void t7_hdmirx_update_drm(struct t7_hdmirx *rx) { (void)rx; }
 static bool signal_valid, source_present, hdmi2 = true, pll_fail, late_alignment, lose_during_wait;
 static bool unsupported_signal;
 static unsigned int pll_calls, pcs_calls, queued, canceled, last_delay, meter_resets;
