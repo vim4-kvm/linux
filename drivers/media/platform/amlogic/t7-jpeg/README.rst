@@ -15,6 +15,11 @@ copies and releases its mapping after each completed frame. System-memory
 diagnostics copy into the input area. Only one file owns the engine at a time.
 Mapped VMAs retain the file and its DMA allocation until the last mapping closes.
 Completion ends the firmware's reads before input-engine reset and unmapping.
+The mapping uses cached pages with explicit CPU/device ownership. After command
+submission, userspace must not touch input or payload until completion and the
+lengths ioctl have returned. Between frames only the returned payload extent
+may be read; the unused bitstream ring remains device-owned. The header page is
+CPU-only. Diagnostic input is synchronized separately from imported DMA-bufs.
 Close aborts with a secure power-off before freeing DMA; a failed power-off
 quarantines the context and pins the module until reboot.
 
