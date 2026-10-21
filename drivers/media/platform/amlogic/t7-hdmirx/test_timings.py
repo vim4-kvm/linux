@@ -77,10 +77,11 @@ static void setup(bool uhd, unsigned int ticks) {
     value = T7_RX_PHY_PLL_LOCK; memcpy(phy + T7_RX_PHY_APLL0,&value,4);
     word(T7_RX_COR_WIDTH, uhd ? 3840 : 1920);
     word(T7_RX_COR_HEIGHT, uhd ? 2160 : 1080);
-    word(T7_RX_COR_HSYNC, uhd ? 88 : 44);
-    word(T7_RX_COR_HFRONT_BACK, uhd ? 4312 : 2156);
-    word(T7_RX_COR_VSYNC, uhd ? 10 : 5);
-    word(T7_RX_COR_VFRONT_BACK, uhd ? 2240 : 1120);
+    /* Byte layout observed on hardware: positive pulse is the HIGH count. */
+    word(T7_RX_COR_HSYNC_LOW, uhd ? 4312 : 2156);
+    word(T7_RX_COR_HSYNC_HIGH, uhd ? 88 : 44);
+    word(T7_RX_COR_VSYNC_LOW, uhd ? 2240 : 1120);
+    word(T7_RX_COR_VSYNC_HIGH, uhd ? 10 : 5);
     period(ticks); period_reads = change_read = 0; lose_signal = false;
 }
 int main(void) {
@@ -127,7 +128,9 @@ int main(void) {
     assert(t7_vdin_query_dv_timings(&file,NULL,&timing)==-ERANGE);
     setup(true,2777778); core[T7_RX_COR_COLOR_DEPTH]=5;
     assert(t7_vdin_query_dv_timings(&file,NULL,&timing)==-ERANGE);
-    setup(true,2777778); word(T7_RX_COR_HSYNC,80); word(T7_RX_COR_HFRONT_BACK,4320);
+    setup(true,2777778); word(T7_RX_COR_HSYNC_HIGH,80); word(T7_RX_COR_HSYNC_LOW,4320);
+    assert(t7_vdin_query_dv_timings(&file,NULL,&timing)==-ERANGE);
+    setup(true,2777778); word(T7_RX_COR_HSYNC_HIGH,4312); word(T7_RX_COR_HSYNC_LOW,88);
     assert(t7_vdin_query_dv_timings(&file,NULL,&timing)==-ERANGE);
     setup(true,2777778); link.ready=false;
     assert(t7_vdin_get_parm(&file,NULL,&parm)==-ENOLINK);

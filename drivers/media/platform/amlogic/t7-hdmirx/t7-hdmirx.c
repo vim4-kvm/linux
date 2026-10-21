@@ -109,10 +109,10 @@
 #define T7_RX_COR_FRAME_TICKS	0x1888
 #define T7_RX_COR_WIDTH		0x188c
 #define T7_RX_COR_HEIGHT		0x188e
-#define T7_RX_COR_HSYNC		0x1890
-#define T7_RX_COR_HFRONT_BACK	0x1892
-#define T7_RX_COR_VSYNC		0x1898
-#define T7_RX_COR_VFRONT_BACK	0x189a
+#define T7_RX_COR_HSYNC_LOW	0x1890
+#define T7_RX_COR_HSYNC_HIGH	0x1892
+#define T7_RX_COR_VSYNC_LOW	0x1898
+#define T7_RX_COR_VSYNC_HIGH	0x189a
 #define T7_RX_COR_DPLL_CONFIG	0x1f15
 #define T7_RX_COR_DPLL_HDMI2	0x1f52
 #define T7_RX_COR_PHY_CLOCK1	0x20a3
@@ -669,10 +669,10 @@ static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 		return -ERANGE;
 	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (rx->uhd60 ? 3840 : 1920) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != (rx->uhd60 ? 2160 : 1080) ||
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC) +
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_HFRONT_BACK) != (rx->uhd60 ? 4400 : 2200) ||
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC) +
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT_BACK) != (rx->uhd60 ? 2250 : 1125))
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_LOW) +
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH) != (rx->uhd60 ? 4400 : 2200) ||
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_LOW) +
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH) != (rx->uhd60 ? 2250 : 1125))
 		return -ERANGE;
 	ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
 		(readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
@@ -742,8 +742,11 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 		return -ERANGE;
 	mode = rx->uhd60 ? (struct v4l2_dv_timings)V4L2_DV_BT_CEA_3840X2160P60 :
 			  (struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60;
-	hsync = t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC);
-	vsync = t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC);
+	/* Both qualified CEA modes use positive sync pulses. The low-level count
+	 * includes the active picture and porches, not the sync pulse width.
+	 */
+	hsync = t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH);
+	vsync = t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH);
 	/* Only these CEA profiles have qualified porch/polarity settings. Do not
 	 * fabricate DV timings for arbitrary modes with the same active area.
 	 */
@@ -1097,10 +1100,12 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 		seq_printf(s, "color_depth_code: %#x\n", readb(rx->cor + T7_RX_COR_COLOR_DEPTH));
 		seq_printf(s, "width: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH));
 		seq_printf(s, "height: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT));
-		seq_printf(s, "htotal: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC) +
-			   t7_hdmirx_core_read16(rx, T7_RX_COR_HFRONT_BACK));
-		seq_printf(s, "vtotal: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC) +
-			   t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT_BACK));
+		seq_printf(s, "htotal: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_LOW) +
+			   t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH));
+		seq_printf(s, "vtotal: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_LOW) +
+			   t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH));
+		seq_printf(s, "hsync_high: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH));
+		seq_printf(s, "vsync_high: %u\n", t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH));
 		seq_printf(s, "frame_ticks: %u\n", ticks);
 		seq_printf(s, "audio_n: %u\n", t7_hdmirx_audio_word(rx, T7_RX_COR_N));
 		seq_printf(s, "audio_cts: %u\n", t7_hdmirx_audio_word(rx, T7_RX_COR_CTS));
