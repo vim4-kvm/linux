@@ -42,6 +42,7 @@ typedef int irqreturn_t;
 #define spin_lock_irqsave(l,f) ((void)((f)=0),pthread_mutex_lock(l))
 #define spin_unlock_irqrestore(l,f) ((void)(f),pthread_mutex_unlock(l))
 struct mutex { pthread_mutex_t native; };
+struct delayed_work { int unused; };
 #define mutex_lock(l) pthread_mutex_lock(&(l)->native)
 #define mutex_unlock(l) pthread_mutex_unlock(&(l)->native)
 #define dev_err(...) ((void)0)
@@ -189,7 +190,7 @@ static void vb2_queue_error(struct vb2_queue *q) {
 }
 static int t7_hdmirx_check_video(void *dev) { return fail_timing?-ENOLINK:0; }
 static unsigned int receiver_users;
-static int t7_hdmirx_stream_get(void *dev) {
+static int t7_hdmirx_stream_get(void *dev, unsigned int width, unsigned int height) {
     int ret=t7_hdmirx_check_video(dev);
     if (!ret) receiver_users++;
     return ret;

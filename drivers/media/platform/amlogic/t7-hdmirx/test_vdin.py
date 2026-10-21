@@ -38,6 +38,7 @@ typedef int irqreturn_t;
 struct device { int unused; };
 struct clk_bulk_data { int unused; };
 struct mutex { int unused; };
+struct delayed_work { int unused; };
 struct completion { bool done; };
 struct kref { int unused; };
 struct list_head { int unused; };
@@ -100,7 +101,7 @@ static int t7_hdmirx_check_video(struct device *dev)
     timing_checks++;
     return bad_timing || (change_timing && timing_checks == 2) ? -ERANGE : 0;
 }
-static int t7_hdmirx_stream_get(struct device *dev)
+static int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int height)
 {
     int ret = t7_hdmirx_check_video(dev);
     if (!ret) receiver_users++;
