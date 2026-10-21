@@ -231,6 +231,7 @@ struct t7_hdmirx {
 	bool hdr_probe;
 	bool hdr_capture;
 	bool lease_hdr;
+	bool lease_yuv;
 	unsigned long long drm_received_ns;
 	u8 saved_unrec_ctrl, saved_unrec_type;
 	u8 saved_packet_irq_mode;
@@ -768,10 +769,30 @@ static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx)
 		avi[7] == 97 && readb(rx->cor + T7_RX_COR_COLOR_DEPTH) == 5;
 }
 
+/* macOS can keep the same 420/10-bit transport when HDR is disabled. Its
+ * BT.709 limited AVI describes ordinary SDR and needs no PQ/tone mapping.
+ */
+static bool t7_hdmirx_sdr420_input(struct t7_hdmirx *rx)
+{
+	u8 avi[17], again[17];
+	unsigned int i;
+
+	if (!rx->hdr_capture || readb(rx->cor + T7_RX_COR_COLOR_DEPTH) != 5)
+		return false;
+	for (i = 0; i < sizeof(avi); i++)
+		avi[i] = readb(rx->cor + 0x1140 + i);
+	for (i = 0; i < sizeof(again); i++)
+		again[i] = readb(rx->cor + 0x1140 + i);
+	return !memcmp(avi, again, sizeof(avi)) &&
+		t7_hdmirx_packet_valid(avi, 0x82, 2, 13) &&
+		(avi[4] >> 5) == 3 && (avi[5] >> 6) == 2 &&
+		!(avi[8] & 0xc0) && avi[7] == 97;
+}
+
 static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 {
 	u32 ticks, reference;
-	bool hdr;
+	bool hdr, yuv;
 
 	if (!rx || !rx->core_active)
 		return -ENOLINK;
@@ -786,15 +807,17 @@ static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 	if (readb(rx->cor + T7_RX_COR_FRAME_STATUS) & BIT(2))
 		return -ERANGE;
 	hdr = t7_hdmirx_hdr_input(rx);
-	if (!hdr && (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
+	yuv = hdr || t7_hdmirx_sdr420_input(rx);
+	if (!yuv && (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
 	    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4))
 		return -ERANGE;
-	if (rx->link && rx->link->users && hdr != rx->lease_hdr)
+	if (rx->link && rx->link->users &&
+	    (hdr != rx->lease_hdr || yuv != rx->lease_yuv))
 		return -ENOLINK;
-	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (hdr ? 1920 : rx->uhd60 ? 3840 : 1920) ||
+	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (yuv ? 1920 : rx->uhd60 ? 3840 : 1920) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != (rx->uhd60 ? 2160 : 1080) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_LOW) +
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH) != (hdr ? 2200 : rx->uhd60 ? 4400 : 2200) ||
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH) != (yuv ? 2200 : rx->uhd60 ? 4400 : 2200) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_LOW) +
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH) != (rx->uhd60 ? 2250 : 1125))
 		return -ERANGE;
@@ -872,7 +895,7 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 	 * includes the active picture and porches, not the sync pulse width.
 	 */
 	hsync = t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH);
-	if (t7_hdmirx_hdr_input(rx))
+	if (t7_hdmirx_hdr_input(rx) || t7_hdmirx_sdr420_input(rx))
 		hsync *= 2;
 	vsync = t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH);
 	/* Only these CEA profiles have qualified porch/polarity settings. Do not
@@ -1129,6 +1152,7 @@ int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int he
 		ret = -EPIPE;
 	if (!ret) {
 		rx->lease_hdr = t7_hdmirx_hdr_input(rx);
+		rx->lease_yuv = rx->lease_hdr || t7_hdmirx_sdr420_input(rx);
 		rx->link->users++;
 	}
 	mutex_unlock(&rx->link->lock);
@@ -1143,6 +1167,14 @@ bool t7_hdmirx_stream_is_hdr(struct device *dev)
 	return READ_ONCE(rx->lease_hdr);
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_hdr);
+
+bool t7_hdmirx_stream_is_yuv(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+
+	return READ_ONCE(rx->lease_yuv);
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_yuv);
 
 void t7_hdmirx_stream_put(struct device *dev)
 {
@@ -1181,15 +1213,17 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 						struct t7_hdmirx_link, work);
 	struct t7_hdmirx *rx = link->rx;
 	u32 cable;
-	bool next_uhd;
+	bool next_uhd, yuv;
 	int ret;
 
 	mutex_lock(&link->lock);
 	t7_hdmirx_update_drm(rx);
 	ret = t7_hdmirx_video_status(rx);
+	yuv = t7_hdmirx_hdr_input(rx) || t7_hdmirx_sdr420_input(rx);
 	if (!ret && link->configured &&
-	    (!rx->hdr_probe || t7_hdmirx_sdr_cable(link->previous_cable) ||
-	     t7_hdmirx_hdr_input(rx))) {
+	    (!rx->hdr_probe ||
+	     (t7_hdmirx_sdr_cable(link->previous_cable) && !yuv) ||
+	     (link->previous_cable && !t7_hdmirx_sdr_cable(link->previous_cable) && yuv))) {
 		if (!READ_ONCE(link->ready)) {
 			usleep_range(20000, 21000);
 			ret = t7_hdmirx_video_status(rx);

@@ -25,5 +25,6 @@ void t7_hdmirx_stream_put(struct device *dev);
 
 /* Stable input classification for the held stream lease, until stream_put. */
 bool t7_hdmirx_stream_is_hdr(struct device *dev);
+bool t7_hdmirx_stream_is_yuv(struct device *dev);
 
 #endif

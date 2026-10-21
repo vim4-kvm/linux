@@ -28,7 +28,9 @@ mode bit 4 requests every receipt rather than only content changes. Both the
 packet selection and IRQ mode are restored on shutdown. AVI/DRM checksums and
 double reads reject malformed/torn packets; link loss clears metadata.
 
-The stream lease also records HDR/SDR classification. A change invalidates
+BT.709 limited 420/10-bit VIC97 is also accepted for SDR: macOS may retain this
+transport after turning HDR off. RX expansion feeds NV12 with HDR2 bypassed.
+The stream lease records both YCbCr/RGB and HDR/SDR classification. A change invalidates
 capture even at unchanged geometry, allowing the existing loss/recovery path
 to rebuild without publishing PQ bytes as SDR. VDIN HDR2 performs PQ EOTF,
 BT.2020-to-709 gamut conversion, 203/1000-nit tone mapping and sRGB OETF before
