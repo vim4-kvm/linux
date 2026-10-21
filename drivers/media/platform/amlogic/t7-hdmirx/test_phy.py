@@ -45,6 +45,9 @@ static u8 readb(void *address) {
 }
 static struct t7_hdmirx receiver;
 static bool lock_pll, jitter, delayed_source;
+static bool one_shot_meter;
+static u32 next_meter;
+static unsigned int meter_restarts;
 static unsigned int delays, meter_reads, pll_attempts, writes;
 static u32 raw_read(void *address)
 {
@@ -74,6 +77,11 @@ static u32 readl(void *address)
 static void writel(u32 value, void *address)
 {
     assert(bounded(address));
+    if (one_shot_meter && address == top + T7_RX_TOP_SW_RESET && !value &&
+        raw_read(address) == (BIT(5) | BIT(6))) {
+        memcpy(top + T7_RX_TOP_METER_CABLE_STAT, &next_meter, 4);
+        meter_restarts++;
+    }
     if (address == phy + T7_RX_PHY_APLL0 && value == 0x20090428)
         pll_attempts++;
     memcpy(address, &value, 4);
@@ -97,6 +105,7 @@ static void reset(void)
     memset(core, 0, sizeof(core));
     receiver = (struct t7_hdmirx) { .top = top, .phy = phy, .cor = core, .port = 1 };
     lock_pll = jitter = delayed_source = false;
+    one_shot_meter = false; next_meter = meter_restarts = 0;
     delays = meter_reads = pll_attempts = writes = 0;
     writel(BIT(21) | BIT(1), top + T7_RX_TOP_HPD_PWR5V);
 }
@@ -158,6 +167,12 @@ int main(void)
     reset(); delayed_source = true;
     writel(BIT(31) | 50688, top + T7_RX_TOP_METER_CABLE_STAT);
     assert(!t7_hdmirx_wait_cable(&receiver, 24000000) && meter_reads == 204);
+    /* The hardware keeps a completed count until the meter reset pulse. */
+    reset(); one_shot_meter = true; next_meter = BIT(31) | 50688;
+    writel(BIT(31) | 65, top + T7_RX_TOP_METER_CABLE_STAT);
+    assert(!t7_hdmirx_wait_cable(&receiver, 24000000));
+    assert(meter_reads == 5 && meter_restarts == 5);
+    assert(receiver.cable_hz == 148500000);
     reset(); writel(BIT(31) | 101376, top + T7_RX_TOP_METER_CABLE_STAT);
     assert(t7_hdmirx_wait_cable(&receiver, 24000000) == -ETIMEDOUT);
     assert(receiver.cable_hz == 297000000 && !pll_attempts);

@@ -8,6 +8,12 @@ SCDC ratio, then configures the video PLL/PCS. Loss does not withdraw HPD or
 rewrite EDID. The supported profile is still selected by `uhd60`; automatic
 timings and format negotiation are a separate change.
 
+Cable qualification reads the completed meter count and rearms the cable/TMDS
+meters for the next sample. The counters latch completed measurements; repeatedly
+reading a startup count cannot detect a delayed source. Only the meter reset bits
+are pulsed, leaving PCS, DDC and HPD intact. `test_phy.py` covers a stale initial
+count followed by a source clock that appears after rearming.
+
 Capture holds a receiver lease from before DMA starts until the MIF is stopped.
 The worker never reconfigures a PHY with outstanding leases. Stop quarantine
 retains that lease until reboot. Audio PLL and DDC registers are not part of the
