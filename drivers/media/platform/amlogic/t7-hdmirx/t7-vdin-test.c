@@ -39,12 +39,16 @@ module_param(direct_dma, bool, 0400);
 MODULE_PARM_DESC(direct_dma, "Capture into leased coherent vb2 buffers without a CPU frame copy");
 
 /* VCBUS word indices; the accessors alone convert them to byte offsets. */
+#define VDIN_SCALE_COEF_IDX	0x1200
+#define VDIN_SCALE_COEF		0x1201
 #define VDIN_COM_CTRL0		0x1202
 #define VDIN_ACTIVE_PIXELS	0x1203
 #define VDIN_LCNT_STATUS		0x1204
 #define VDIN_ASFIFO_CTRL1		0x1209
 #define VDIN_WIDTHS		0x120a
 #define VDIN_SC_MISC_CTRL		0x120b
+#define VDIN_HSC_PHASE_STEP	0x120c
+#define VDIN_HSC_INI_CTRL		0x120d
 #define VDIN_MATRIX_CTRL		0x1210
 #define VDIN_LFIFO_CTRL		0x121a
 #define VDIN_GCLK_CTRL		0x121b
@@ -53,6 +57,10 @@ MODULE_PARM_DESC(direct_dma, "Capture into leased coherent vb2 buffers without a
 #define VDIN_WR_CTRL		0x1220
 #define VDIN_WR_H_WIN		0x1221
 #define VDIN_WR_V_WIN		0x1222
+#define VDIN_VSC_PHASE_STEP	0x1223
+#define VDIN_VSC_INI_CTRL		0x1224
+#define VDIN_SCIN_HEIGHT		0x1225
+#define VDIN_DUMMY_DATA		0x1226
 #define VDIN_WR_URGENT		0x1257
 #define VDIN_WR_STATUS		0x1258
 #define VDIN_GCLK_CTRL2		0x1270
@@ -105,6 +113,8 @@ struct t7_vdin_snapshot {
 
 struct t7_vdin {
 	unsigned int width, height, stride, frame_size, allocation_size, frame_capacity;
+	/* Source lease geometry is independent of the downscaled DMA image. */
+	unsigned int input_width, input_height;
 	u32 pixel_format;
 	bool nv12;
 	bool direct_dma;
@@ -313,6 +323,39 @@ static int t7_vdin_stop_dma(struct t7_vdin *vdin)
 	return ret;
 }
 
+static void t7_vdin_configure_scale(struct t7_vdin *vdin)
+{
+	static const u32 bicubic[] = {
+		0x00800000, 0x007f0100, 0xff7f0200, 0xfe7f0300, 0xfd7e0500,
+		0xfc7e0600, 0xfb7d0800, 0xfb7c0900, 0xfa7b0b00, 0xfa7a0dff,
+		0xf9790fff, 0xf97711ff, 0xf87613ff, 0xf87416fe, 0xf87218fe,
+		0xf8701afe, 0xf76f1dfd, 0xf76d1ffd, 0xf76b21fd, 0xf76824fd,
+		0xf76627fc, 0xf76429fc, 0xf7612cfc, 0xf75f2ffb, 0xf75d31fb,
+		0xf75a34fb, 0xf75837fa, 0xf7553afa, 0xf8523cfa, 0xf8503ff9,
+		0xf84d42f9, 0xf84a45f9, 0xf84848f8,
+	};
+	unsigned int i;
+
+	t7_vdin_write(vdin, VDIN_SC_MISC_CTRL, 0);
+	t7_vdin_write(vdin, VDIN_VSC_INI_CTRL, 0);
+	if (vdin->width != vdin->input_width) {
+		t7_vdin_write(vdin, VDIN_SCALE_COEF_IDX, 0x100);
+		for (i = 0; i < ARRAY_SIZE(bicubic); i++)
+			t7_vdin_write(vdin, VDIN_SCALE_COEF, bicubic[i]);
+		t7_vdin_write(vdin, VDIN_HSC_PHASE_STEP,
+			      ((u64)vdin->input_width << 24) / vdin->width);
+		t7_vdin_write(vdin, VDIN_HSC_INI_CTRL, BIT(29) | (4 << 24));
+		t7_vdin_write(vdin, VDIN_SC_MISC_CTRL, BIT(6) | BIT(5) | BIT(4) | 4);
+	}
+	if (vdin->height != vdin->input_height) {
+		t7_vdin_write(vdin, VDIN_VSC_PHASE_STEP,
+			      ((u64)vdin->input_height << 20) / vdin->height);
+		t7_vdin_write(vdin, VDIN_SCIN_HEIGHT, vdin->input_height - 1);
+		t7_vdin_write(vdin, VDIN_DUMMY_DATA, 0x008080);
+		t7_vdin_write(vdin, VDIN_VSC_INI_CTRL, BIT(23) | 0x8000);
+	}
+}
+
 static void t7_vdin_configure(struct t7_vdin *vdin)
 {
 	t7_vdin_write(vdin, VDIN_WR_CTRL, 0);
@@ -326,9 +369,9 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	t7_vdin_write(vdin, VDIN_ASFIFO_CTRL1, 0xe40000);
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), BIT(26));
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), 0);
-	t7_vdin_write(vdin, VDIN_WIDTHS, ((vdin->width - 1) << 16) | (vdin->width - 1));
-	t7_vdin_write(vdin, VDIN_INTF_WIDTH, vdin->width - 1);
-	t7_vdin_write(vdin, VDIN_SC_MISC_CTRL, 0);
+	t7_vdin_write(vdin, VDIN_WIDTHS, ((vdin->input_width - 1) << 16) | (vdin->width - 1));
+	t7_vdin_write(vdin, VDIN_INTF_WIDTH, vdin->input_width - 1);
+	t7_vdin_configure_scale(vdin);
 	t7_vdin_write(vdin, VDIN_VSHRK_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_HDR_CTRL, 0);
@@ -393,7 +436,7 @@ static int t7_vdin_capture(struct t7_vdin *vdin)
 
 	if (vdin->faulted)
 		return -EIO;
-	ret = t7_hdmirx_stream_get(vdin->receiver, vdin->width, vdin->height);
+	ret = t7_hdmirx_stream_get(vdin->receiver, vdin->input_width, vdin->input_height);
 	if (ret)
 		return ret;
 	if (!vdin->nv12 && t7_hdmirx_stream_is_yuv(vdin->receiver)) {
@@ -822,7 +865,7 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 
 	mutex_lock(&vdin->lock);
 	ret = vdin->faulted ? -EIO :
-		t7_hdmirx_stream_get(vdin->receiver, vdin->width, vdin->height);
+		t7_hdmirx_stream_get(vdin->receiver, vdin->input_width, vdin->input_height);
 	if (!ret && !vdin->nv12 && t7_hdmirx_stream_is_yuv(vdin->receiver)) {
 		t7_hdmirx_stream_put(vdin->receiver);
 		ret = -EOPNOTSUPP;
@@ -955,23 +998,51 @@ static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fm
 	return 0;
 }
 
-static int t7_vdin_try_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
+static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
+				struct v4l2_dv_timings *timings)
 {
-	struct t7_vdin *vdin = video_drvdata(file);
-	struct v4l2_dv_timings timings;
 	struct v4l2_fract interval;
+	unsigned int width = fmt->fmt.pix.width, height = fmt->fmt.pix.height;
 	int ret;
 
-	ret = t7_hdmirx_query_timings(vdin->receiver, &timings, &interval);
+	ret = t7_hdmirx_query_timings(vdin->receiver, timings, &interval);
 	if (ret)
 		return ret;
-	t7_vdin_fill_fmt(vdin, fmt, timings.bt.width, timings.bt.height);
+	if (timings->bt.width > 3840 || timings->bt.height > 2160)
+		return -ERANGE;
+	if (!vdin->nv12 || !width || !height) {
+		width = timings->bt.width;
+		height = timings->bt.height;
+	} else {
+		/* MIF strides are 16-byte units; NV12 chroma needs even height.
+		 * Keep downscale ratios within the scaler's phase-step range.
+		 */
+		if (width < 320)
+			width = 320;
+		if (height < 180)
+			height = 180;
+		if (width > timings->bt.width)
+			width = timings->bt.width;
+		if (height > timings->bt.height)
+			height = timings->bt.height;
+		width &= ~15U;
+		height &= ~1U;
+	}
+	t7_vdin_fill_fmt(vdin, fmt, width, height);
 	return 0;
+}
+
+static int t7_vdin_try_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
+{
+	struct v4l2_dv_timings timings;
+
+	return t7_vdin_negotiate_fmt(video_drvdata(file), fmt, &timings);
 }
 
 static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
 {
 	struct t7_vdin *vdin = video_drvdata(file);
+	struct v4l2_dv_timings timings;
 	int ret;
 
 	/* The core holds video_lock here. Disconnect takes queue_mutex first;
@@ -982,7 +1053,7 @@ static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fm
 	ret = -EBUSY;
 	if (vb2_is_busy(&vdin->queue) || !mutex_trylock(&vdin->lock))
 		goto unlock_queue;
-	ret = vdin->faulted ? -EIO : t7_vdin_try_fmt(file, priv, fmt);
+	ret = vdin->faulted ? -EIO : t7_vdin_negotiate_fmt(vdin, fmt, &timings);
 	if (!ret) {
 		unsigned int frame_size = fmt->fmt.pix.bytesperline * fmt->fmt.pix.height;
 
@@ -991,6 +1062,8 @@ static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fm
 		if (frame_size > vdin->frame_capacity) {
 			ret = -ERANGE;
 		} else {
+			vdin->input_width = timings.bt.width;
+			vdin->input_height = timings.bt.height;
 			vdin->width = fmt->fmt.pix.width;
 			vdin->height = fmt->fmt.pix.height;
 			vdin->stride = fmt->fmt.pix.bytesperline;
@@ -1368,6 +1441,8 @@ static int t7_vdin_probe(struct platform_device *pdev)
 		return ret;
 	vdin->nv12 = nv12;
 	vdin->pixel_format = nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24;
+	vdin->input_width = vdin->width;
+	vdin->input_height = vdin->height;
 	vdin->stride = vdin->width * (nv12 ? 1 : 3);
 	vdin->frame_size = vdin->stride * vdin->height;
 	if (nv12)

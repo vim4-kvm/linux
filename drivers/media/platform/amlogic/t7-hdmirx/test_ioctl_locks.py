@@ -65,6 +65,7 @@ struct t7_vdin {
     struct video_device video; struct vb2_queue queue;
     struct device *dev,*receiver; struct v4l2_device v4l2; unsigned int ref;
     unsigned int width,height,pixel_format,stride,allocation_size,frame_capacity,frame_size;
+    unsigned int input_width,input_height;
     bool nv12,faulted;
 };
 struct file { struct t7_vdin *data; };
@@ -221,6 +222,15 @@ int main(void) {
     assert(independent && query.result==-ENOLINK && format.result==-EBUSY);
     struct v4l2_format fmt={0}; input_locked=true;
     assert(!dispatch(VIDIOC_S_FMT,&fmt) && fmt.fmt.pix.width==3840);
+    assert(capture.input_width==3840 && capture.input_height==2160);
+    fmt.fmt.pix.width=1280; fmt.fmt.pix.height=720;
+    struct file format_file={.data=&capture};
+    assert(!t7_vdin_try_fmt(&format_file,NULL,&fmt));
+    assert(fmt.fmt.pix.width==1280 && fmt.fmt.pix.height==720);
+    assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.width==1280);
+    assert(capture.input_width==3840 && capture.frame_size==1280*720*3/2);
+    fmt.fmt.pix.width=3840; fmt.fmt.pix.height=2160;
+    assert(!dispatch(VIDIOC_S_FMT,&fmt));
     capture.queue.busy=true; assert(dispatch(VIDIOC_S_FMT,&fmt)==-EBUSY);
     capture.queue.busy=false;
     input_width=1920; input_height=1080;
@@ -234,6 +244,7 @@ int main(void) {
     input_width=5000; input_height=3000;
     assert(dispatch(VIDIOC_S_FMT,&fmt)==-ERANGE && capture.width==1920);
     input_width=3840; input_height=2160;
+    fmt.fmt.pix.width=3840; fmt.fmt.pix.height=2160;
     assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.width==3840);
     /* A query already using RX must finish before removal clears registration. */
     pause_query=true; query_entered=query_done=false; capture.queue.owner=&capture;

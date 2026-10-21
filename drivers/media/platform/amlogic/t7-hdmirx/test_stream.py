@@ -33,6 +33,7 @@ typedef int irqreturn_t;
 #define MODULE_PARM_DESC(...)
 #define __iomem
 #define BIT(n) (1U<<(n))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define GENMASK(h,l) ((~0U>>(31-(h))) & (~0U<<(l)))
 #define IRQ_HANDLED 1
 #define THIS_MODULE NULL
@@ -265,6 +266,7 @@ static void setup(struct t7_vdin_buffer b[4]) {
     receiver.queued.next=receiver.queued.prev=&receiver.queued;
     receiver.queue.priv=&receiver; receiver.queue.mem_ops=&mem_ops; receiver.regs=registers;
     receiver.width=1920; receiver.height=1080; receiver.stride=5760;
+    receiver.input_width=1920; receiver.input_height=1080;
     receiver.frame_size=VDIN_FRAME_SIZE;
     receiver.allocation_size=VDIN_FRAME_SIZE;
     started=entered=permits=completed=pins=stop_waiting=0;

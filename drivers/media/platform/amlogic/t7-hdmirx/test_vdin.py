@@ -27,6 +27,7 @@ typedef int irqreturn_t;
 #define VDIN_STRIDE (1920U*3U)
 #define __iomem
 #define BIT(n) (1U << (n))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define GENMASK(h, l) ((~0U >> (31 - (h))) & (~0U << (l)))
 #define IRQ_HANDLED 1
 #define THIS_MODULE ((void *)0)
@@ -111,6 +112,7 @@ static int t7_hdmirx_check_video(struct device *dev)
 }
 static int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int height)
 {
+    assert(width==receiver.input_width && height==receiver.input_height);
     int ret = t7_hdmirx_check_video(dev);
     if (!ret) receiver_users++;
     return ret;
@@ -153,6 +155,7 @@ static void reset(void)
     memset(frame, 0xa5, sizeof(frame));
     receiver = (struct t7_vdin) { .regs = registers, .frame = frame,
                                .frame_dma = 0x10000000, .width = 1920, .height = 1080,
+                               .input_width = 1920, .input_height = 1080,
                                .stride = VDIN_STRIDE, .frame_size = VDIN_FRAME_SIZE };
     pins = requests = timing_checks = receiver_users = 0;
     timeout = busy = bad_timing = change_timing = false;
@@ -170,6 +173,7 @@ int main(void)
     assert(!t7_vdin_capture(&receiver) && receiver.snapshots == 2);
     reset(); receiver.nv12 = true;
     receiver.width = 3840; receiver.height = 2160; receiver.stride = 3840;
+    receiver.input_width = 3840; receiver.input_height = 2160;
     receiver.frame_size = 3840U * 2160U * 3U / 2;
     assert(!t7_vdin_capture(&receiver));
     assert(frame[receiver.frame_size - 1] == 0x5a && frame[receiver.frame_size] == 0xa5);
@@ -177,6 +181,19 @@ int main(void)
     assert((readl(registers + VDIN_LFIFO_CTRL * 4) & 0x3fff) == 0x780);
     assert((readl(registers + VDIN_WR_CTRL * 4) >> 12 & 3) == 2);
     assert(readl(registers + VDIN_WR_CHROMA_STRIDE * 4) == 3840U / 16);
+    /* Full HDMI input feeds a smaller DMA image; switching back disables scaling. */
+    receiver.width=1920; receiver.height=1080; receiver.stride=1920;
+    receiver.frame_size=1920U*1080U*3/2;
+    assert(!t7_vdin_capture(&receiver));
+    assert(readl(registers+VDIN_WIDTHS*4)==((3839U<<16)|1919));
+    assert(readl(registers+VDIN_HSC_PHASE_STEP*4)==2U<<24);
+    assert(readl(registers+VDIN_VSC_PHASE_STEP*4)==2U<<20);
+    assert(readl(registers+VDIN_VSC_INI_CTRL*4)&BIT(23));
+    receiver.width=3840; receiver.height=2160; receiver.stride=3840;
+    receiver.frame_size=3840U*2160U*3/2;
+    assert(!t7_vdin_capture(&receiver));
+    assert(!readl(registers+VDIN_SC_MISC_CTRL*4));
+    assert(!readl(registers+VDIN_VSC_INI_CTRL*4));
     reset(); receiver.nv12=true;hdr_input=true;
     t7_vdin_configure(&receiver);
     assert(pq_writes==143 && gain_writes==75 && oetf_writes==75);
