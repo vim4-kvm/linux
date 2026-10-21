@@ -255,6 +255,8 @@ static void destroy_wait(wait_queue_head_t *w) {
 static void setup(struct t7_vdin_buffer b[4]) {
     receiver_users=0;
     memset(&receiver,0,sizeof(receiver)); memset(b,0,4*sizeof(*b));
+    memcpy(receiver.hdr_gain,t7_hdr_gain,sizeof(t7_hdr_gain));
+    memcpy(receiver.hdr_oetf,t7_hdr_srgb,sizeof(t7_hdr_srgb));
     memset(registers,0,sizeof(registers)); memset(cpu_owned,0,sizeof(cpu_owned));
     pthread_mutex_init(&receiver.lock.native,NULL); pthread_mutex_init(&receiver.queue_lock,NULL);
     pthread_mutex_init(&receiver.irq_lock,NULL);

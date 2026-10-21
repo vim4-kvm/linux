@@ -153,6 +153,8 @@ struct t7_vdin {
 	u32 ring_sequence;
 	u32 ring_pauses;
 	u64 copied_bytes;
+	u32 hdr_gain[149], hdr_oetf[149];
+	bool hdr_curve_pending;
 };
 
 static u32 t7_vdin_read(struct t7_vdin *vdin, u32 reg)
@@ -169,6 +171,8 @@ static void t7_vdin_update(struct t7_vdin *vdin, u32 reg, u32 mask, u32 value)
 {
 	t7_vdin_write(vdin, reg, (t7_vdin_read(vdin, reg) & ~mask) | (value & mask));
 }
+
+#include "t7-vdin-hdr.h"
 
 static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin);
 
@@ -194,6 +198,13 @@ static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
 			      (address + vdin->stride * vdin->height) >> 4);
 	vdin->dma_idle = false;
 	vdin->ring_running = true;
+	if (vdin->hdr_curve_pending && t7_hdmirx_stream_is_hdr(vdin->receiver)) {
+		/* Requests are gated at an AXI-complete frame boundary. Ignore the
+		 * first frame after a LUT change if programming crosses blanking.
+		 */
+		t7_vdin_hdr_reload(vdin);
+		vdin->ring_discard = true;
+	}
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR,
 		       VDIN_WR_REQ | VDIN_VCP_WR);
 }
@@ -301,8 +312,6 @@ static int t7_vdin_stop_dma(struct t7_vdin *vdin)
 	}
 	return ret;
 }
-
-#include "t7-vdin-hdr.h"
 
 static void t7_vdin_configure(struct t7_vdin *vdin)
 {
@@ -1226,6 +1235,71 @@ static void t7_vdin_free_frame(void *data)
 	dma_free_coherent(vdin->dev, vdin->frame_capacity, vdin->frame, vdin->frame_dma);
 }
 
+/* Both tables form one transaction. Never expose partially replaced LUTs to
+ * the IRQ; malformed input leaves the previous curve completely intact.
+ */
+static int t7_vdin_parse_hdr_curve(char *text, u32 *tables)
+{
+	char *token;
+	unsigned int i;
+	int ret;
+
+	text = strim(text);
+	for (i = 0; i < 298; i++) {
+		token = strsep(&text, ",\n");
+		if (!token || !*token)
+			return -EINVAL;
+		ret = kstrtou32(token, 10, &tables[i]);
+		if (ret || tables[i] > 4095)
+			return -EINVAL;
+		if (i < 149 && (!tables[i] || (i && tables[i] > tables[i - 1])))
+			return -EINVAL;
+		if (i > 149 && tables[i] < tables[i - 1])
+			return -EINVAL;
+	}
+	return text || tables[149] || tables[297] != 4095 ? -EINVAL : 0;
+}
+
+static ssize_t hdr_curve_store(struct device *dev, struct device_attribute *attr,
+			       const char *buffer, size_t count)
+{
+	struct t7_vdin *vdin = dev_get_drvdata(dev);
+	unsigned long flags;
+	u32 *tables;
+	char *text;
+	int ret;
+
+	tables = kmalloc_array(298, sizeof(*tables), GFP_KERNEL);
+	text = kmemdup_nul(buffer, count, GFP_KERNEL);
+	if (!tables || !text) {
+		ret = -ENOMEM;
+		goto free;
+	}
+	ret = t7_vdin_parse_hdr_curve(text, tables);
+	if (ret)
+		goto free;
+	mutex_lock(&vdin->lock);
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	memcpy(vdin->hdr_gain, tables, sizeof(vdin->hdr_gain));
+	memcpy(vdin->hdr_oetf, tables + 149, sizeof(vdin->hdr_oetf));
+	vdin->hdr_curve_pending = true;
+	spin_unlock_irqrestore(&vdin->irq_lock, flags);
+	mutex_unlock(&vdin->lock);
+free:
+	kfree(text);
+	kfree(tables);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR_WO(hdr_curve);
+
+static struct attribute *t7_vdin_attrs[] = {
+	&dev_attr_hdr_curve.attr,
+	NULL,
+};
+static const struct attribute_group t7_vdin_group = {
+	.attrs = t7_vdin_attrs,
+};
+
 static void t7_vdin_debugfs_remove(void *data)
 {
 	debugfs_remove_recursive(data);
@@ -1256,6 +1330,8 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	vdin->dev = dev;
+	memcpy(vdin->hdr_gain, t7_hdr_gain, sizeof(vdin->hdr_gain));
+	memcpy(vdin->hdr_oetf, t7_hdr_srgb, sizeof(vdin->hdr_oetf));
 	mutex_init(&vdin->lock);
 	mutex_init(&vdin->video_lock);
 	mutex_init(&vdin->queue_mutex);
@@ -1368,6 +1444,9 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	if (vdin->irq < 0)
 		return vdin->irq;
 	ret = devm_request_irq(dev, vdin->irq, t7_vdin_write_done, 0, dev_name(dev), vdin);
+	if (ret)
+		return ret;
+	ret = devm_device_add_group(dev, &t7_vdin_group);
 	if (ret)
 		return ret;
 	debugfs = debugfs_create_dir(dev_name(dev), NULL);
