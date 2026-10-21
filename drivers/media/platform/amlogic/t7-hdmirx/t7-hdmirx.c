@@ -232,6 +232,7 @@ struct t7_hdmirx {
 	bool hdr_capture;
 	bool lease_hdr;
 	bool lease_yuv;
+	bool lease_420;
 	unsigned long long drm_received_ns;
 	u8 saved_unrec_ctrl, saved_unrec_type;
 	u8 saved_packet_irq_mode;
@@ -789,10 +790,27 @@ static bool t7_hdmirx_sdr420_input(struct t7_hdmirx *rx)
 		!(avi[8] & 0xc0) && avi[7] == 97;
 }
 
+static bool t7_hdmirx_sdr444_input(struct t7_hdmirx *rx)
+{
+	u8 avi[17], again[17];
+	unsigned int i;
+
+	/* A zero GCP depth code means unspecified, which is also legal for 8-bit. */
+	if (readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4)
+		return false;
+	for (i = 0; i < sizeof(avi); i++)
+		avi[i] = readb(rx->cor + T7_RX_COR_AVI_PACKET + i);
+	for (i = 0; i < sizeof(again); i++)
+		again[i] = readb(rx->cor + T7_RX_COR_AVI_PACKET + i);
+	return !memcmp(avi, again, sizeof(avi)) &&
+		t7_hdmirx_packet_valid(avi, 0x82, 2, 13) &&
+		(avi[4] >> 5) == 2 && (avi[5] >> 6) == 2 && !(avi[8] & 0xc0);
+}
+
 static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 {
 	u32 ticks, reference;
-	bool hdr, yuv;
+	bool hdr, yuv, yuv420;
 
 	if (!rx || !rx->core_active)
 		return -ENOLINK;
@@ -807,17 +825,18 @@ static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 	if (readb(rx->cor + T7_RX_COR_FRAME_STATUS) & BIT(2))
 		return -ERANGE;
 	hdr = t7_hdmirx_hdr_input(rx);
-	yuv = hdr || t7_hdmirx_sdr420_input(rx);
+	yuv420 = hdr || t7_hdmirx_sdr420_input(rx);
+	yuv = yuv420 || t7_hdmirx_sdr444_input(rx);
 	if (!yuv && (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
 	    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4))
 		return -ERANGE;
 	if (rx->link && rx->link->users &&
-	    (hdr != rx->lease_hdr || yuv != rx->lease_yuv))
+	    (hdr != rx->lease_hdr || yuv != rx->lease_yuv || yuv420 != rx->lease_420))
 		return -ENOLINK;
-	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (yuv ? 1920 : rx->uhd60 ? 3840 : 1920) ||
+	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (yuv420 ? 1920 : rx->uhd60 ? 3840 : 1920) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != (rx->uhd60 ? 2160 : 1080) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_LOW) +
-	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH) != (yuv ? 2200 : rx->uhd60 ? 4400 : 2200) ||
+	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH) != (yuv420 ? 2200 : rx->uhd60 ? 4400 : 2200) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_LOW) +
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH) != (rx->uhd60 ? 2250 : 1125))
 		return -ERANGE;
@@ -1226,7 +1245,8 @@ int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int he
 		ret = -EPIPE;
 	if (!ret) {
 		rx->lease_hdr = t7_hdmirx_hdr_input(rx);
-		rx->lease_yuv = rx->lease_hdr || t7_hdmirx_sdr420_input(rx);
+		rx->lease_420 = rx->lease_hdr || t7_hdmirx_sdr420_input(rx);
+		rx->lease_yuv = rx->lease_420 || t7_hdmirx_sdr444_input(rx);
 		rx->link->users++;
 	}
 	mutex_unlock(&rx->link->lock);
