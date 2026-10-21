@@ -13,4 +13,8 @@ int t7_hdmirx_check_video_now(struct device *dev);
 /* Profile dimensions are immutable for the lifetime of the bound receiver. */
 int t7_hdmirx_get_size(struct device *dev, unsigned int *width, unsigned int *height);
 
+/* Hold the video PHY configuration until the consumer has stopped all DMA. */
+int t7_hdmirx_stream_get(struct device *dev);
+void t7_hdmirx_stream_put(struct device *dev);
+
 #endif

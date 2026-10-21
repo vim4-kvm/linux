@@ -20,6 +20,9 @@ prefix = r'''
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+struct mutex { int unused; };
+struct delayed_work { int unused; };
+#define READ_ONCE(value) (value)
 #ifdef __clang__
 /* The extracted register tables size real struct fields; core-only paths do not read them. */
 #pragma clang diagnostic ignored "-Wunneeded-internal-declaration"

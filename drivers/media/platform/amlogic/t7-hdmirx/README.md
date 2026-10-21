@@ -1,5 +1,22 @@
 # T7 HDMI receiver bring-up
 
+## Persistent receiver and recovery
+
+With `core_test=1`, probe publishes the EDID and keeps the receiver registered
+without requiring a live source. A delayed worker qualifies the cable clock and
+SCDC ratio, then configures the video PLL/PCS. Loss does not withdraw HPD or
+rewrite EDID. The supported profile is still selected by `uhd60`; automatic
+timings and format negotiation are a separate change.
+
+Capture holds a receiver lease from before DMA starts until the MIF is stopped.
+The worker never reconfigures a PHY with outstanding leases. Stop quarantine
+retains that lease until reboot. Audio PLL and DDC registers are not part of the
+video relock sequence. Status exposes `link_ready` and `capture_users`.
+`python3 test_link.py` covers delayed/absent source, PLL failure, late alignment,
+source changes during qualification and DMA lease exclusion using actual code.
+
+## Earlier bring-up stages
+
 The initial driver owns the receiver TOP MMIO window, HDMIRX power domain and
 pclk/sys/CFG/METER/2M/5M clocks. It reads source 5V and the HPD request register through
 `/sys/kernel/debug/fe398000.hdmi-receiver/status`. No capture device is exposed;

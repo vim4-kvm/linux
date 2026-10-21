@@ -188,6 +188,17 @@ static void vb2_queue_error(struct vb2_queue *q) {
     pthread_mutex_unlock(&gate);
 }
 static int t7_hdmirx_check_video(void *dev) { return fail_timing?-ENOLINK:0; }
+static unsigned int receiver_users;
+static int t7_hdmirx_stream_get(void *dev) {
+    int ret=t7_hdmirx_check_video(dev);
+    if (!ret) receiver_users++;
+    return ret;
+}
+static void t7_hdmirx_stream_put(void *dev) {
+    (void)dev;
+    assert(receiver_users && !receiver.ring_running && !receiver.armed);
+    receiver_users--;
+}
 static int t7_hdmirx_check_video_now(void *dev) {
     bool copying=false;
     for (int i=0;i<VDIN_DMA_SLOTS;i++) copying|=cpu_owned[i];
@@ -239,6 +250,7 @@ static void destroy_wait(wait_queue_head_t *w) {
     pthread_mutex_destroy(&w->lock); pthread_cond_destroy(&w->cond);
 }
 static void setup(struct t7_vdin_buffer b[4]) {
+    receiver_users=0;
     memset(&receiver,0,sizeof(receiver)); memset(b,0,4*sizeof(*b));
     memset(registers,0,sizeof(registers)); memset(cpu_owned,0,sizeof(cpu_owned));
     pthread_mutex_init(&receiver.lock.native,NULL); pthread_mutex_init(&receiver.queue_lock,NULL);
@@ -265,6 +277,7 @@ static void setup(struct t7_vdin_buffer b[4]) {
     }
 }
 static void teardown(struct t7_vdin_buffer b[4]) {
+    assert(receiver.receiver_lease ? receiver.faulted && receiver_users==1 : receiver_users==0);
     assert(list_empty(&receiver.queued) && !receiver.streaming && !receiver.thread);
     for (int i=0;i<VDIN_DMA_SLOTS;i++) { assert(!cpu_owned[i]); free(receiver.slots[i].data); }
     for (int i=0;i<4;i++) {
