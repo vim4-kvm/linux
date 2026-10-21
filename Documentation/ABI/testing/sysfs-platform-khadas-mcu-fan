@@ -7,12 +7,15 @@ Description:
                 Available in quiet automatic mode only. The worker samples
                 all six T7 thermal zones every 30 seconds, uses the hottest
                 reading, and applies the quiet curve with a 5 percentage
-                point slew limit. Starting, stopping, and full speed bypass
-                the slew limit. Any unavailable sensor requests full speed.
+                point slew limit. Starting, stopping, full speed, sensor
+                faults and the first valid sample after a fault bypass the
+                slew limit. Startup and unavailable sensors request at least
+                15 percent. Valid readings from other sensors can request a
+                higher output, including full speed at 100 degrees Celsius.
                 Unavailable sensors and failed MCU writes retry after one
                 second; normal sampling resumes after a successful sample
                 and MCU write. The first valid sample adopts the quiet
-                target directly instead of slewing down from full speed.
+                target directly.
                 khadas_mcu_fan.quiet_auto=0 selects the original thermal
                 cooling device instead. Other MCU variants are unaffected.
 
@@ -22,7 +25,9 @@ Contact:        https://github.com/vim4-kvm/linux/issues
 Description:
                 Read-only boolean: one or more required thermal zones were
                 unavailable in the last automatic sample. An unavailable
-                sensor requests full speed; it cannot prove fan rotation.
+                sensor requests at least 15 percent output, while valid
+                readings from other sensors can request more cooling.
+                This flag cannot prove fan rotation.
 
 What:           /sys/bus/platform/devices/khadas-mcu-fan-ctrl*/temperature_millic
 Date:           October 2026
