@@ -9,3 +9,10 @@ config MESON_SM
 	depends on ARM64_4K_PAGES
 	help
 	  Say y here to enable the Amlogic secure monitor driver
+
+config MESON_T7_TEE
+	bool "Amlogic T7 secure boot completion interface"
+	depends on ARM64 && OPTEE && ARCH_MESON
+	help
+	  The tee_info/sys_boot_complete interface required by the T7 firmware
+	  supplicant. Only the boot completion handshake is exposed.

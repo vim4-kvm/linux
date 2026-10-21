@@ -21,6 +21,28 @@
 };
 
 / {
+	optee {
+		compatible = "amlogic,t7-optee-tz", "linaro,optee-tz";
+		method = "smc";
+	};
+	tee-control {
+		compatible = "amlogic,t7-tee-control";
+	};
+
+	jpeg_test: jpeg-encoder@fe320000 {
+		compatible = "amlogic,t7-jpeg-encoder";
+		reg = <0x0 0xfe320000 0x0 0x10000>;
+		interrupts = <GIC_SPI 93 IRQ_TYPE_EDGE_RISING>;
+		power-domains = <&pwrc PWRC_T7_DOS_HCODEC_ID>;
+		clocks = <&clkc_periphs CLKID_SYS_DOS>,
+			 <&clkc_periphs CLKID_VAPB>, <&clkc_periphs CLKID_HCODEC>;
+		clock-names = "pclk", "apb", "core";
+		assigned-clocks = <&clkc_periphs CLKID_HCODEC>;
+		/* The secure JPEG loader uses the P0 HCODEC clock path. */
+		assigned-clock-parents = <&clkc_periphs CLKID_HCODEC_0>;
+		assigned-clock-rates = <666666666>;
+	};
+
 	wave_test: video-codec@fe310000 {
 		compatible = "amlogic,t7-wave521c";
 		reg = <0x0 0xfe310000 0x0 0x10000>;
