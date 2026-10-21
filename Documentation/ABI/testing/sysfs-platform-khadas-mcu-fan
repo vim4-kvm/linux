@@ -1,0 +1,31 @@
+What:           /sys/bus/platform/devices/khadas-mcu-fan-ctrl*/speed_percent
+Date:           October 2026
+Contact:        https://github.com/vim4-kvm/linux/issues
+Description:
+                Read-only requested VIM4 fan output, 0 through 100 percent.
+                This is the last successful MCU write, not a measured RPM.
+                Available in quiet automatic mode only. The worker samples
+                all six T7 thermal zones every 30 seconds, uses the hottest
+                reading, and applies the quiet curve with a 5 percentage
+                point slew limit. Starting, stopping, and full speed bypass
+                the slew limit. Any unavailable sensor requests full speed.
+                Failed MCU writes retry after one second.
+                khadas_mcu_fan.quiet_auto=0 selects the original thermal
+                cooling device instead. Other MCU variants are unaffected.
+
+What:           /sys/bus/platform/devices/khadas-mcu-fan-ctrl*/sensor_fault
+Date:           October 2026
+Contact:        https://github.com/vim4-kvm/linux/issues
+Description:
+                Read-only boolean: one or more required thermal zones were
+                unavailable in the last automatic sample. An unavailable
+                sensor requests full speed; it cannot prove fan rotation.
+
+What:           /sys/bus/platform/devices/khadas-mcu-fan-ctrl*/temperature_millic
+Date:           October 2026
+Contact:        https://github.com/vim4-kvm/linux/issues
+Description:
+                Read-only maximum temperature in millidegrees Celsius from
+                the last successful automatic sample. Returns ENODATA while
+                any required thermal zone is unavailable. Not an immediate
+                reading; the normal automatic sampling interval is 30 seconds.
