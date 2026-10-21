@@ -10,6 +10,9 @@ types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
                source.index('static int t7_hdmirx_validate_edid')]
 functions = source[source.index('static void t7_hdmirx_core_stop'):
                    source.index('static u32 t7_hdmirx_audio_word')]
+vdin = Path(__file__).with_name('t7-vdin-test.c').read_text()
+status_api = vdin[vdin.index('static int t7_vdin_enum_input'):
+                  vdin.index('static int t7_vdin_get_input')]
 prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -32,7 +35,7 @@ struct device { void *data; };
 mmio = r'''
 static u8 core[0x8000], top[0x4000];
 static bool allowed, changed, smc_error, readback_error;
-static unsigned int writes, pcs_resets;
+static unsigned int writes, pcs_resets, stability_waits;
 static u8 readb(void *address)
 {
     if (readback_error && address == core + T7_RX_COR_SYS_CTRL) return 0;
@@ -69,6 +72,7 @@ static void t7_hdmirx_set_hpd(struct t7_hdmirx *rx, bool high)
 static void usleep_range(unsigned int low, unsigned int high)
 {
     assert(high >= low);
+    if (low == 20000) stability_waits++;
     if (low == 20000 && changed) core[0x188e] = 0;
 }
 static void word(unsigned int address, unsigned int value)
@@ -86,6 +90,15 @@ static void timing(void)
     word(0x1888, 2777780 & 0xffff); core[0x188a] = 2777780 >> 16;
     core[0x1881] = 3;
 }
+'''
+status_stubs = r'''
+#define V4L2_INPUT_TYPE_CAMERA 2
+#define V4L2_IN_ST_NO_SYNC 0x10000
+struct v4l2_input { u32 index; unsigned char name[32]; u32 type, status, capabilities; };
+struct file { void *data; };
+struct t7_vdin { struct device *receiver; };
+static void *video_drvdata(struct file *file) { return file->data; }
+#define strscpy(dst, src, size) snprintf((char *)(dst), size, "%s", src)
 '''
 checks = r'''
 int main(void)
@@ -139,13 +152,38 @@ int main(void)
     assert(!t7_hdmirx_check_video(&dev));
     word(0x188e, 1080);
     assert(t7_hdmirx_check_video(&dev) == -ERANGE);
-    puts("Core access, stable progressive timing, signal loss and idempotent cleanup passed");
+    struct t7_vdin capture = { .receiver = &dev };
+    struct file file = { .data = &capture };
+    struct v4l2_input input = { 0 };
+    before = stability_waits;
+    /* Repeated live status polls must not wait for another frame while holding
+     * the V4L2 queue lock. Loss and recovery must still be reported immediately.
+     */
+    assert(!t7_vdin_enum_input(&file, NULL, &input) && input.status);
+    word(0x188e, 2160);
+    assert(!t7_vdin_enum_input(&file, NULL, &input));
+    assert(stability_waits == before);
+    assert(!input.status);
+    writel(0, top + T7_RX_TOP_TMDS_ALIGN_STAT);
+    assert(!t7_vdin_enum_input(&file, NULL, &input) && input.status);
+    writel(1, top + T7_RX_TOP_TMDS_ALIGN_STAT);
+    assert(!t7_vdin_enum_input(&file, NULL, &input) && !input.status);
+    for (int i = 0; i < 100; i++)
+        assert(!t7_vdin_enum_input(&file, NULL, &input) && !input.status);
+    assert(stability_waits == before);
+    input.index = 1;
+    assert(t7_vdin_enum_input(&file, NULL, &input) == -EINVAL);
+    /* Start-time qualification continues to reject a signal changing mid-wait. */
+    changed = true;
+    assert(t7_hdmirx_check_video(&dev) == -ERANGE);
+    assert(stability_waits == before + 1);
+    puts("Core lifecycle, stable start qualification and nonblocking status loss/recovery passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     code = Path(directory) / 'core.c'
     executable = Path(directory) / 'core'
-    code.write_text(prefix + defines + '\n' + types + mmio + functions + checks)
+    code.write_text(prefix + defines + '\n' + types + mmio + functions + status_stubs + status_api + checks)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', str(code), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
