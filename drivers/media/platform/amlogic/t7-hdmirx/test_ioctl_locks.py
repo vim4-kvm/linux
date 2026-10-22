@@ -247,6 +247,18 @@ int main(void) {
     assert(capture.width==1366 && capture.stride==1376);
     assert(capture.frame_size==1376*768*3/2);
     assert(capture.allocation_size>=capture.frame_size);
+    /* A 16-byte VDIN stride is too short for Wave5's 32-byte NV12 rows. */
+    input_width=720; input_height=400;
+    fmt.fmt.pix.width=720; fmt.fmt.pix.height=400;
+    assert(!dispatch(VIDIOC_S_FMT,&fmt));
+    assert(capture.width==720 && capture.stride==736);
+    assert(capture.frame_size==736*400*3/2);
+    input_width=1680; input_height=1050;
+    fmt.fmt.pix.width=1680; fmt.fmt.pix.height=1050;
+    assert(!dispatch(VIDIOC_S_FMT,&fmt));
+    assert(capture.width==1680 && capture.stride==1696);
+    assert(capture.frame_size==1696*1050*3/2);
+    assert(capture.allocation_size>=1696*1056*3/2);
     input_width=1920; input_height=1080;
     fmt.fmt.pix.width=1920; fmt.fmt.pix.height=1080;
     assert(!dispatch(VIDIOC_S_FMT,&fmt));
