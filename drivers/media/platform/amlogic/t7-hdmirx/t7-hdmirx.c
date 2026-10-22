@@ -1270,6 +1270,14 @@ bool t7_hdmirx_stream_is_yuv(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_yuv);
 
+bool t7_hdmirx_stream_is_yuv444(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+
+	return READ_ONCE(rx->lease_yuv) && !READ_ONCE(rx->lease_420);
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_yuv444);
+
 void t7_hdmirx_stream_put(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);

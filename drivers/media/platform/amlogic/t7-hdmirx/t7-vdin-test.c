@@ -366,6 +366,11 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	t7_vdin_write(vdin, VDIN_GCLK_CTRL2, 0);
 	/* The core supplies R/G/B; the packed MIF emits components 2/1/0. */
 	t7_vdin_write(vdin, VDIN_COM_CTRL0, vdin->nv12 ? 0x915 : 0x195);
+	/* Native 4:4:4 arrives as Cr/Y/Cb with this RX core mapping. Expanded
+	 * 4:2:0 already arrives as Y/Cb/Cr; keep its qualified HDR path intact.
+	 */
+	if (t7_hdmirx_stream_is_yuv444(vdin->receiver))
+		t7_vdin_write(vdin, VDIN_COM_CTRL0, 0x255);
 	t7_vdin_write(vdin, VDIN_ASFIFO_CTRL1, 0xe40000);
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), BIT(26));
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), 0);
