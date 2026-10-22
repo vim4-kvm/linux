@@ -146,6 +146,18 @@ int main(void)
         t7_hdmirx_ddc_stop(&receiver);
         assert(register_writes == writes);
     }
+    /* A running core survives DDC disable/re-enable. Reconnect must select
+     * exactly its PHY port, even after stop restored the pre-probe snapshot.
+     */
+    reset(); make_edid(data, 2); receiver.core_active=true; receiver.uhd60=true;
+    for (i=0;i<2;i++) {
+        written=verified=hpd_high=delay_calls=0;
+        assert(!t7_hdmirx_ddc_start(&receiver,data,256));
+        assert((readl(memory+T7_RX_TOP_PORT_SEL)&GENMASK(2,0))==BIT(receiver.port));
+        assert(!hpd_high);
+        t7_hdmirx_ddc_stop(&receiver);
+        assert(readl(memory+T7_RX_TOP_PORT_SEL)==0xa5a5a5a5);
+    }
     reset(); make_edid(data, 2); corrupt = true;
     assert(t7_hdmirx_ddc_start(&receiver, data, 256) == -EIO);
     assert(!receiver.ddc_active && !receiver.edid_blob.size && !hpd_high);

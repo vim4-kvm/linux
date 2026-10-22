@@ -349,6 +349,7 @@ static int t7_hdmirx_ddc_start(struct t7_hdmirx *rx, const u8 *edid, size_t size
 	unsigned int base = T7_RX_EDID_BASE + rx->port * T7_RX_EDID_CAPACITY;
 	unsigned int i;
 	u8 expected;
+	u32 port_sel;
 	int ret;
 
 	ret = t7_hdmirx_validate_edid(edid, size);
@@ -380,7 +381,13 @@ static int t7_hdmirx_ddc_start(struct t7_hdmirx *rx, const u8 *edid, size_t size
 	readl(rx->top + T7_RX_TOP_SW_RESET);
 	usleep_range(1000, 2000);
 	/* Enable the TOP port path used by T7's receiver initialization. */
-	writel(rx->saved_port_sel | BIT(4), rx->top + T7_RX_TOP_PORT_SEL);
+	/* A runtime DDC disable restores the pre-probe port snapshot. An active
+	 * core must reselect its PHY input as well as enabling the EDID path.
+	 */
+	port_sel = rx->saved_port_sel | BIT(4);
+	if (rx->core_active)
+		port_sel = (port_sel & ~GENMASK(2, 0)) | BIT(rx->port);
+	writel(port_sel, rx->top + T7_RX_TOP_PORT_SEL);
 	memcpy(rx->edid, edid, size);
 	rx->edid_blob.data = rx->edid;
 	rx->edid_blob.size = size;
