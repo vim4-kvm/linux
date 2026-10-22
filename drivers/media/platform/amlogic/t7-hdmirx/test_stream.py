@@ -108,6 +108,7 @@ static pthread_mutex_t gate=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed=PTHREAD_COND_INITIALIZER;
 static unsigned int started,entered,permits,completed,pins,stop_waiting;
 static bool stopping,fail_timing,cpu_owned[VDIN_DMA_SLOTS];
+static unsigned int transient_after;
 static unsigned int live_leases;
 static bool fail_lease;
 static void allocation_put(struct allocation *memory) {
@@ -208,6 +209,8 @@ static void t7_hdmirx_stream_put(void *dev) {
     receiver_users--;
 }
 static int t7_hdmirx_check_video_now(void *dev) {
+    if (__atomic_load_n(&transient_after,__ATOMIC_ACQUIRE) &&
+        !__atomic_sub_fetch(&transient_after,1,__ATOMIC_ACQ_REL)) return -EAGAIN;
     bool copying=false;
     for (int i=0;i<VDIN_DMA_SLOTS;i++) copying|=cpu_owned[i];
     if (!copying && !receiver.direct_dma) {
@@ -313,6 +316,21 @@ static void setup_direct(struct t7_vdin_buffer b[4]) {
 }
 static void check_direct(void) {
     struct t7_vdin_buffer b[4]; pthread_t stop;
+    /* A torn measurement before or after the DMA handoff drops one frame.
+     * The next frame completes without restarting the queue or PHY lease.
+     */
+    for (unsigned int check=1;check<=2;check++) {
+        setup_direct(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+        step(1,false); __atomic_store_n(&transient_after,check,__ATOMIC_RELEASE);
+        step(2,false); await(&completed,1);
+        assert(b[0].vb.vb2_buf.state==VB2_BUF_STATE_ERROR);
+        assert(!receiver.queue.error && !receiver.ring_stopping && receiver.receiver_lease);
+        for (unsigned int i=1;i<4;i++) { step(i+2,false); await(&completed,i+1); }
+        for (unsigned int i=1;i<4;i++) assert(b[i].vb.vb2_buf.state==VB2_BUF_STATE_DONE);
+        t7_vdin_stop_streaming(&receiver.queue);
+        assert(!receiver.faulted && !pins);
+        teardown(b); assert(!live_leases);
+    }
     /* Held/exported buffers are never selected again until explicitly queued. */
     setup_direct(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
     step(1,false); step(2,false); await(&completed,1);

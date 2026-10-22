@@ -762,7 +762,10 @@ static int t7_vdin_thread(void *data)
 		}
 		if (!vdin->direct_dma)
 			dma_sync_single_for_device(vdin->dev, slot->dma, vdin->frame_size, DMA_FROM_DEVICE);
-		if (ret) {
+		/* A torn RX measurement invalidates this frame, not the stream.
+		 * Persistent instability is bounded by the receiver recovery worker.
+		 */
+		if (ret && ret != -EAGAIN) {
 			unsigned long flags;
 
 			spin_lock_irqsave(&vdin->irq_lock, flags);
@@ -773,7 +776,7 @@ static int t7_vdin_thread(void *data)
 		mutex_unlock(&vdin->lock);
 		vb2_buffer_done(&buffer->vb.vb2_buf,
 				ret ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
-		if (ret)
+		if (ret && ret != -EAGAIN)
 			break;
 	}
 	if (t7_vdin_ring_stop(vdin))
