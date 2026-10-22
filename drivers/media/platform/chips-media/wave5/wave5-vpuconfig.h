@@ -51,8 +51,11 @@
 #define W5_MIN_ENC_PIC_HEIGHT           128U
 #define W5_MAX_ENC_PIC_WIDTH            8192U
 #define W5_MAX_ENC_PIC_HEIGHT           8192U
-#define W5_ENC_CODEC_STEP_WIDTH         8U
-#define W5_ENC_CODEC_STEP_HEIGHT        8U
+/* Visible 4:2:0 dimensions use two-pixel crop units. The hardware command
+ * handles codec block padding separately from the aligned raw DMA layout.
+ */
+#define W5_ENC_CODEC_STEP_WIDTH         2U
+#define W5_ENC_CODEC_STEP_HEIGHT        2U
 #define W5_ENC_RAW_STEP_WIDTH           32U
 #define W5_ENC_RAW_STEP_HEIGHT          16U
 
