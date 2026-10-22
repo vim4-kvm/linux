@@ -408,6 +408,20 @@ static int setup_wave5_properties(struct device *dev)
 	hw_config_def1 = vpu_read_reg(vpu_dev, W5_RET_STD_DEF1);
 	hw_config_feature = vpu_read_reg(vpu_dev, W5_RET_CONF_FEATURE);
 
+	/* Query return registers are reused by later firmware commands. */
+	if (vpu_dev->legacy_firmware) {
+		dev_info(dev, "GET_VPU_INFO product=%#x name=%s version[120]=%#010x fw[118]=%#010x customer[140]=%#010x\n",
+			 vpu_dev->product_code, p_attr->product_name,
+			 p_attr->product_version, p_attr->fw_version, p_attr->customer_id);
+		dev_info(dev, "GET_VPU_INFO DEF0[124]=%#010x DEF1[128]=%#010x FEATURE[12c]=%#010x\n",
+			 hw_config_def0, hw_config_def1, hw_config_feature);
+		dev_info(dev, "GET_VPU_INFO DATE[130]=%#010x REVISION[134]=%#010x TYPE[138]=%#010x ID[13c]=%#010x\n",
+			 vpu_read_reg(vpu_dev, W5_RET_CONF_DATE),
+			 vpu_read_reg(vpu_dev, W5_RET_CONF_REVISION),
+			 vpu_read_reg(vpu_dev, W5_RET_CONF_TYPE),
+			 vpu_read_reg(vpu_dev, W5_RET_PRODUCT_ID));
+	}
+
 	if (vpu_dev->product_code == WAVE515_CODE) {
 		p_attr->support_hevc10bit_dec = FIELD_GET(W515_FEATURE_HEVC10BIT_DEC,
 							  hw_config_feature);
