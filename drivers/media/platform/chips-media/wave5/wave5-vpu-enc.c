@@ -30,11 +30,23 @@ static const struct v4l2_frmsize_stepwise enc_frmsize[FMT_TYPES] = {
 	},
 };
 
+/* T7 HEVC firmware stalls on non-eight-aligned visible dimensions. AVC's
+ * conformance window supports the even dimensions advertised above.
+ */
+static const struct v4l2_frmsize_stepwise hevc_frmsize = {
+	.min_width = W5_MIN_ENC_PIC_WIDTH,
+	.max_width = W5_MAX_ENC_PIC_WIDTH,
+	.step_width = 8,
+	.min_height = W5_MIN_ENC_PIC_HEIGHT,
+	.max_height = W5_MAX_ENC_PIC_HEIGHT,
+	.step_height = 8,
+};
+
 static const struct vpu_format enc_fmt_list[FMT_TYPES][MAX_FMTS] = {
 	[VPU_FMT_TYPE_CODEC] = {
 		{
 			.v4l2_pix_fmt = V4L2_PIX_FMT_HEVC,
-			.v4l2_frmsize = &enc_frmsize[VPU_FMT_TYPE_CODEC],
+			.v4l2_frmsize = &hevc_frmsize,
 		},
 		{
 			.v4l2_pix_fmt = V4L2_PIX_FMT_H264,
@@ -364,7 +376,9 @@ static int wave5_vpu_enc_enum_framesizes(struct file *f, void *fh, struct v4l2_f
 	}
 
 	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
-	fsize->stepwise = enc_frmsize[VPU_FMT_TYPE_CODEC];
+	/* Raw caps describe visible input; storage alignment is set by TRY_FMT. */
+	fsize->stepwise = fsize->pixel_format == V4L2_PIX_FMT_HEVC ?
+		hevc_frmsize : enc_frmsize[VPU_FMT_TYPE_CODEC];
 
 	return 0;
 }
