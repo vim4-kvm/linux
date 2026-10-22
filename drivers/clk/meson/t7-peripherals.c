@@ -40,7 +40,9 @@
 #define HRX_CLK_CTRL3		0x134
 #define WAVE521_CLK_CTRL		0x150
 #define VDEC_CLK_CTRL		0x140
+#define VDEC2_CLK_CTRL		0x144
 #define VDEC3_CLK_CTRL		0x148
+#define VDEC4_CLK_CTRL		0x14c
 #define WAVE521_CLK_CTRL2		0x154
 #define TS_CLK_CTRL		0x158
 #define MALI_CLK_CTRL		0x15c
@@ -1030,6 +1032,85 @@ static struct clk_regmap t7_hcodec = {
 	},
 };
 
+/*
+ * The lower halves are independent of HCODEC in the same registers. Keep
+ * unused decode gates as firmware left them until a decoder owns its domain.
+ */
+static T7_COMP_SEL(vdec_0, VDEC_CLK_CTRL, 9, 0x7, t7_hcodec_parents);
+static T7_COMP_DIV(vdec_0, VDEC_CLK_CTRL, 0, 7);
+static T7_COMP_GATE(vdec_0, VDEC_CLK_CTRL, 8, CLK_IGNORE_UNUSED);
+static T7_COMP_SEL(vdec_1, VDEC3_CLK_CTRL, 9, 0x7, t7_hcodec_parents);
+static T7_COMP_DIV(vdec_1, VDEC3_CLK_CTRL, 0, 7);
+static T7_COMP_GATE(vdec_1, VDEC3_CLK_CTRL, 8, CLK_IGNORE_UNUSED);
+
+static struct clk_regmap t7_vdec = {
+	.data = &(struct clk_regmap_mux_data) {
+		.offset = VDEC3_CLK_CTRL,
+		.mask = 1,
+		.shift = 15,
+	},
+	.hw.init = &(struct clk_init_data) {
+		.name = "vdec",
+		.ops = &clk_regmap_mux_ops,
+		.parent_hws = (const struct clk_hw *[]) { &t7_vdec_0.hw, &t7_vdec_1.hw },
+		.num_parents = 2,
+		.flags = CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT,
+	},
+};
+
+static T7_COMP_SEL(hevcf_0, VDEC2_CLK_CTRL, 9, 0x7, t7_hcodec_parents);
+static T7_COMP_DIV(hevcf_0, VDEC2_CLK_CTRL, 0, 7);
+static T7_COMP_GATE(hevcf_0, VDEC2_CLK_CTRL, 8, CLK_IGNORE_UNUSED);
+static T7_COMP_SEL(hevcf_1, VDEC4_CLK_CTRL, 9, 0x7, t7_hcodec_parents);
+static T7_COMP_DIV(hevcf_1, VDEC4_CLK_CTRL, 0, 7);
+static T7_COMP_GATE(hevcf_1, VDEC4_CLK_CTRL, 8, CLK_IGNORE_UNUSED);
+
+static struct clk_regmap t7_hevcf = {
+	.data = &(struct clk_regmap_mux_data) {
+		.offset = VDEC4_CLK_CTRL,
+		.mask = 1,
+		.shift = 15,
+	},
+	.hw.init = &(struct clk_init_data) {
+		.name = "hevcf",
+		.ops = &clk_regmap_mux_ops,
+		.parent_hws = (const struct clk_hw *[]) { &t7_hevcf_0.hw, &t7_hevcf_1.hw },
+		.num_parents = 2,
+		.flags = CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT,
+	},
+};
+
+/* HEVC back-end only has the five fixed-clock parents. */
+static const struct clk_parent_data t7_hevcb_parents[] = {
+	{ .fw_name = "fdiv2p5" },
+	{ .fw_name = "fdiv3" },
+	{ .fw_name = "fdiv4" },
+	{ .fw_name = "fdiv5" },
+	{ .fw_name = "fdiv7" },
+};
+
+static T7_COMP_SEL(hevcb_0, VDEC2_CLK_CTRL, 25, 0x7, t7_hevcb_parents);
+static T7_COMP_DIV(hevcb_0, VDEC2_CLK_CTRL, 16, 7);
+static T7_COMP_GATE(hevcb_0, VDEC2_CLK_CTRL, 24, CLK_IGNORE_UNUSED);
+static T7_COMP_SEL(hevcb_1, VDEC4_CLK_CTRL, 25, 0x7, t7_hevcb_parents);
+static T7_COMP_DIV(hevcb_1, VDEC4_CLK_CTRL, 16, 7);
+static T7_COMP_GATE(hevcb_1, VDEC4_CLK_CTRL, 24, CLK_IGNORE_UNUSED);
+
+static struct clk_regmap t7_hevcb = {
+	.data = &(struct clk_regmap_mux_data) {
+		.offset = VDEC4_CLK_CTRL,
+		.mask = 1,
+		.shift = 31,
+	},
+	.hw.init = &(struct clk_init_data) {
+		.name = "hevcb",
+		.ops = &clk_regmap_mux_ops,
+		.parent_hws = (const struct clk_hw *[]) { &t7_hevcb_0.hw, &t7_hevcb_1.hw },
+		.num_parents = 2,
+		.flags = CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT,
+	},
+};
+
 static const struct clk_parent_data t7_vpu_parents[] = {
 	{ .fw_name = "fdiv3" },
 	{ .fw_name = "fdiv4" },
@@ -1506,6 +1587,27 @@ static struct clk_hw *t7_peripherals_hw_clks[] = {
 	[CLKID_HCODEC_1_DIV]		= &t7_hcodec_1_div.hw,
 	[CLKID_HCODEC_1]			= &t7_hcodec_1.hw,
 	[CLKID_HCODEC]			= &t7_hcodec.hw,
+	[CLKID_VDEC_0_SEL]		= &t7_vdec_0_sel.hw,
+	[CLKID_VDEC_0_DIV]		= &t7_vdec_0_div.hw,
+	[CLKID_VDEC_0]			= &t7_vdec_0.hw,
+	[CLKID_VDEC_1_SEL]		= &t7_vdec_1_sel.hw,
+	[CLKID_VDEC_1_DIV]		= &t7_vdec_1_div.hw,
+	[CLKID_VDEC_1]			= &t7_vdec_1.hw,
+	[CLKID_VDEC]			= &t7_vdec.hw,
+	[CLKID_HEVCF_0_SEL]		= &t7_hevcf_0_sel.hw,
+	[CLKID_HEVCF_0_DIV]		= &t7_hevcf_0_div.hw,
+	[CLKID_HEVCF_0]			= &t7_hevcf_0.hw,
+	[CLKID_HEVCF_1_SEL]		= &t7_hevcf_1_sel.hw,
+	[CLKID_HEVCF_1_DIV]		= &t7_hevcf_1_div.hw,
+	[CLKID_HEVCF_1]			= &t7_hevcf_1.hw,
+	[CLKID_HEVCF]			= &t7_hevcf.hw,
+	[CLKID_HEVCB_0_SEL]		= &t7_hevcb_0_sel.hw,
+	[CLKID_HEVCB_0_DIV]		= &t7_hevcb_0_div.hw,
+	[CLKID_HEVCB_0]			= &t7_hevcb_0.hw,
+	[CLKID_HEVCB_1_SEL]		= &t7_hevcb_1_sel.hw,
+	[CLKID_HEVCB_1_DIV]		= &t7_hevcb_1_div.hw,
+	[CLKID_HEVCB_1]			= &t7_hevcb_1.hw,
+	[CLKID_HEVCB]			= &t7_hevcb.hw,
 };
 
 static const struct meson_clkc_data t7_peripherals_data = {
