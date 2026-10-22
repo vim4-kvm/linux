@@ -15,6 +15,7 @@
 #include <fwil.h>
 #include <fwil_types.h>
 #include <fweh.h>
+#include <fwsignal.h>
 
 #include "vops.h"
 
@@ -68,8 +69,17 @@ static void brcmf_wcc_feat_attach(struct brcmf_if *ifp)
 	 */
 	if (!strcmp(ifp->drvr->fwver, "01-16e134aa"))
 		ifp->drvr->chip_quirks |= BIT(BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT) |
-					 BIT(BRCMF_FEAT_QUIRK_NDOE_PRIMARY);
+					 BIT(BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY);
 	err = brcmf_fil_iovar_data_get(ifp, "cap", caps, sizeof(caps) - 1);
+	/*
+	 * Concurrent channels need firmware TX credits instead of blindly
+	 * queueing frames for an interface whose radio context is absent.
+	 * Keep an explicit fcmode=0/1/2 request and other firmware defaults.
+	 */
+	if (!err && !strcmp(ifp->drvr->fwver, "01-16e134aa") &&
+	    strstr(caps, "proptxstatus ") &&
+	    ifp->drvr->settings->fcmode == BRCMF_FWS_FCMODE_AUTO)
+		ifp->drvr->settings->fcmode = BRCMF_FWS_FCMODE_EXPLICIT_CREDIT;
 	if (!err && strstr(caps, "extsae ") &&
 	    !(ifp->drvr->settings->feature_disable & BIT(BRCMF_FEAT_SAE_EXT)))
 		ifp->drvr->feat_flags |= BIT(BRCMF_FEAT_SAE_EXT);

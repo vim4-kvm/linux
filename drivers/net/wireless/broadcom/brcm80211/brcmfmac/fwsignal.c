@@ -339,13 +339,6 @@ enum brcmf_fws_txstatus {
 	BRCMF_FWS_TXSTATUS_FW_SUPPRESS_ACKED,
 	BRCMF_FWS_TXSTATUS_HOST_TOSSED
 };
-
-enum brcmf_fws_fcmode {
-	BRCMF_FWS_FCMODE_NONE,
-	BRCMF_FWS_FCMODE_IMPLIED_CREDIT,
-	BRCMF_FWS_FCMODE_EXPLICIT_CREDIT
-};
-
 enum brcmf_fws_mac_desc_state {
 	BRCMF_FWS_STATE_OPEN = 1,
 	BRCMF_FWS_STATE_CLOSE
@@ -2352,7 +2345,8 @@ struct brcmf_fws_info *brcmf_fws_attach(struct brcmf_pub *drvr)
 
 	/* store drvr reference */
 	fws->drvr = drvr;
-	fws->fcmode = drvr->settings->fcmode;
+	fws->fcmode = drvr->settings->fcmode == BRCMF_FWS_FCMODE_AUTO ?
+		      BRCMF_FWS_FCMODE_NONE : drvr->settings->fcmode;
 
 	if (!drvr->bus_if->always_use_fws_queue &&
 	    (fws->fcmode == BRCMF_FWS_FCMODE_NONE)) {

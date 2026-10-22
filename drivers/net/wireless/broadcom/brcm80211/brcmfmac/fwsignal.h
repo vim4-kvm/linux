@@ -29,6 +29,13 @@ enum brcmf_fws_fifo {
 	BRCMF_FWS_FIFO_COUNT
 };
 
+enum brcmf_fws_fcmode {
+	BRCMF_FWS_FCMODE_AUTO = -1,
+	BRCMF_FWS_FCMODE_NONE,
+	BRCMF_FWS_FCMODE_IMPLIED_CREDIT,
+	BRCMF_FWS_FCMODE_EXPLICIT_CREDIT
+};
+
 struct brcmf_fws_info *brcmf_fws_attach(struct brcmf_pub *drvr);
 void brcmf_fws_detach(struct brcmf_fws_info *fws);
 void brcmf_fws_debugfs_create(struct brcmf_pub *drvr);
