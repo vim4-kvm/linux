@@ -25,6 +25,7 @@ struct delayed_work { int unused; };
 #define READ_ONCE(value) (value)
 #define WRITE_ONCE(place, value) ((place) = (value))
 typedef uint64_t u64;
+#define div_u64(a,b) ((a)/(b))
 static u64 now_ns = 1000000000ULL;
 static u64 ktime_get_ns(void) { return now_ns; }
 #ifdef __clang__

@@ -111,8 +111,12 @@
 #define T7_RX_COR_HEIGHT		0x188e
 #define T7_RX_COR_HSYNC_LOW	0x1890
 #define T7_RX_COR_HSYNC_HIGH	0x1892
+#define T7_RX_COR_HFRONT		0x1894
+#define T7_RX_COR_HBACK		0x1896
 #define T7_RX_COR_VSYNC_LOW	0x1898
 #define T7_RX_COR_VSYNC_HIGH	0x189a
+#define T7_RX_COR_VFRONT		0x189c
+#define T7_RX_COR_VBACK		0x189e
 #define T7_RX_COR_DPLL_CONFIG	0x1f15
 #define T7_RX_COR_DPLL_HDMI2	0x1f52
 #define T7_RX_COR_PHY_CLOCK1	0x20a3
@@ -157,7 +161,7 @@ MODULE_PARM_DESC(uhd60, "Opt-in RGB8 3840x2160p60 HDMI 2.0 trial; requires match
 
 static bool dynamic_modes;
 module_param(dynamic_modes, bool, 0400);
-MODULE_PARM_DESC(dynamic_modes, "Automatically select RGB8 1080p60/UHD60; requires uhd60=1");
+MODULE_PARM_DESC(dynamic_modes, "Select PHY from the measured TMDS clock and capture progressive input timings; requires uhd60=1");
 
 static bool hdr_probe;
 module_param(hdr_probe, bool, 0400);
@@ -212,6 +216,17 @@ enum t7_hdmirx_clock {
 };
 
 struct t7_hdmirx;
+/* Raw FDET counters, before 420 horizontal expansion. */
+struct t7_hdmirx_measurement {
+	u32 width, height, hlow, hhigh, hfront, hback;
+	u32 vlow, vhigh, vfront, vback, ticks, polarity;
+};
+
+struct t7_hdmirx_color {
+	u32 space, depth, colorimetry;
+	u32 full;
+};
+
 struct t7_hdmirx_link {
 	struct mutex lock;
 	struct delayed_work work;
@@ -233,6 +248,9 @@ struct t7_hdmirx {
 	bool lease_hdr;
 	bool lease_yuv;
 	bool lease_420;
+	struct t7_hdmirx_measurement lease_mode;
+	struct t7_hdmirx_color lease_color;
+	u32 phy_band, pll_band;
 	unsigned long long drm_received_ns;
 	u8 saved_unrec_ctrl, saved_unrec_type;
 	u8 saved_packet_irq_mode;
@@ -452,9 +470,26 @@ static void t7_hdmirx_phy_stop(void *data)
 
 static void t7_hdmirx_phy_configure(struct t7_hdmirx *rx)
 {
+	static const u32 dcha[][4] = {
+		{ 0x17270888, 0x45ff4b58, 0x01ff28d4, 0x817 },
+		{ 0x17270888, 0x45ff4b58, 0x01ff28d4, 0x817 },
+		{ 0x17270fff, 0x45ff4b58, 0x01ff28c9, 0x630 },
+		{ 0x13270fff, 0x45ff4b58, 0x01ff28c9, 0x630 },
+		{ 0x10210fff, 0x45ff4b58, 0x01ff2a21, 0x1080 },
+		{ 0x10210fff, 0x45ff4b58, 0x01ff2a21, 0x1080 },
+	};
+	static const u32 dchd[][3] = {
+		{ 0xe3372103, 0x40000000, 0x0d4aaaaa },
+		{ 0xe3372103, 0x40000000, 0x0d4aaaaa },
+		{ 0xe3372103, 0x40009000, 0x0d422222 },
+		{ 0xe3372903, 0x40009000, 0x0d422222 },
+		{ 0xe3372903, 0x4004f000, 0x0d422222 },
+		{ 0xe3372903, 0x4004f000, 0x0d422222 },
+	};
+	u32 band = rx->dynamic_modes ? rx->phy_band : rx->uhd60 ? 5 : 2;
 	u32 trim = readl(rx->phy + T7_RX_PHY_MISC1);
 	u32 misc0;
-	/* Fixed PHY_BW_2 or PHY_BW_5; qualify the cable and SCDC ratio before APLL. */
+	/* T7 PHY bands follow character clock, including the SCDC 1:40 ratio. */
 	writel(0x200773f8, rx->phy + T7_RX_PHY_MISC0);
 	usleep_range(5, 10);
 	if (trim & BIT(0))
@@ -465,14 +500,20 @@ static void t7_hdmirx_phy_configure(struct t7_hdmirx *rx)
 	writel(trim, rx->phy + T7_RX_PHY_MISC1);
 	writel(0, rx->phy + T7_RX_PHY_MISC2);
 	writel(0x817, rx->phy + T7_RX_PHY_MISC3);
-	writel(rx->uhd60 ? 0x10210fff : 0x17270fff, rx->phy + T7_RX_PHY_DCHA0);
-	writel(0x45ff4b58, rx->phy + T7_RX_PHY_DCHA1);
-	writel(rx->uhd60 ? 0x01ff2a21 : 0x01ff28c9, rx->phy + T7_RX_PHY_DCHA2);
-	writel(rx->uhd60 ? 0x1080 : 0x630, rx->phy + T7_RX_PHY_DCHA3);
-	writel((rx->uhd60 ? 0xe3372903 : 0xe3372103) &
+	writel(dcha[band][0], rx->phy + T7_RX_PHY_DCHA0);
+	writel(dcha[band][1], rx->phy + T7_RX_PHY_DCHA1);
+	writel(dcha[band][2], rx->phy + T7_RX_PHY_DCHA2);
+	writel(dcha[band][3], rx->phy + T7_RX_PHY_DCHA3);
+	/* Low bands use the T7 automatic 4x oversampling policy (os_rate=3). */
+	if (rx->dynamic_modes && band <= 1) {
+		writel(0x630, rx->phy + T7_RX_PHY_DCHA3);
+		t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHA2,
+			GENMASK(9, 0) | GENMASK(26, 25), 0xc9 | (2 << 25));
+	}
+	writel((dchd[band][0] | (rx->dynamic_modes && band <= 1 ? 2 << 6 : 0)) &
 	       ~(BIT(28) | GENMASK(25, 24)), rx->phy + T7_RX_PHY_DCHD0);
-	writel(rx->uhd60 ? 0x4004f000 : 0x40009000, rx->phy + T7_RX_PHY_DCHD1);
-	writel(0x0d422222 & ~BIT(26), rx->phy + T7_RX_PHY_DCHD2);
+	writel(dchd[band][1], rx->phy + T7_RX_PHY_DCHD1);
+	writel(dchd[band][2] & ~BIT(26), rx->phy + T7_RX_PHY_DCHD2);
 	writel(0x10000000, rx->phy + T7_RX_PHY_DCHD3);
 	writel(0x3001, rx->phy + T7_RX_PHY_DCHD4);
 	writel(0x817 | (BIT(rx->port) << 6), rx->phy + T7_RX_PHY_MISC3);
@@ -532,25 +573,35 @@ static int t7_hdmirx_wait_cable(struct t7_hdmirx *rx, unsigned long reference_hz
 
 static int t7_hdmirx_phy_pll(struct t7_hdmirx *rx)
 {
+	/* T7 M/N, TMDS OD, secondary OD and recovered-audio divider. */
+	static const u32 pll[][4] = {
+		{ 160, 1, 5, 1 }, { 80, 1, 4, 0 }, { 40, 1, 3, 0 },
+		{ 40, 2, 2, 0 }, { 40, 1, 1, 0 },
+	};
+	u32 band = rx->dynamic_modes ? rx->pll_band : rx->uhd60 ? 4 : 2;
+	u32 phy_band = rx->dynamic_modes ? rx->phy_band : rx->uhd60 ? 5 : 2;
+	u32 od = pll[band][2] - (rx->dynamic_modes && phy_band <= 1 ? 2 : 0);
+	u32 data = 0x00090000 | pll[band][0] | (pll[band][1] << 10);
+	u32 ctrl3 = (phy_band <= 2 ? 0x10058f30 : 0x10058f00) | pll[band][3];
+	u32 ctrl4 = 0x080130c0 | (od << 24);
 	unsigned int attempt;
 
-	/* M=40, N=1; output divide by 8 for 1080p or by 2 for UHD's 1:40 link. */
 	for (attempt = 0; attempt < 3; attempt++) {
-		writel(0x20090428, rx->phy + T7_RX_PHY_APLL0);
+		writel(data | 0x20000000, rx->phy + T7_RX_PHY_APLL0);
 		usleep_range(5, 10);
-		writel(0x30090428, rx->phy + T7_RX_PHY_APLL0);
+		writel(data | 0x30000000, rx->phy + T7_RX_PHY_APLL0);
 		usleep_range(5, 10);
 		writel(0, rx->phy + T7_RX_PHY_APLL1);
 		writel(0x00001118, rx->phy + T7_RX_PHY_APLL2);
 		usleep_range(5, 10);
-		writel(rx->uhd60 ? 0x10058f00 : 0x10058f30, rx->phy + T7_RX_PHY_APLL3);
-		writel(rx->uhd60 ? 0x090130c0 : 0x0b0130c0, rx->phy + T7_RX_PHY_APLL4);
+		writel(ctrl3, rx->phy + T7_RX_PHY_APLL3);
+		writel(ctrl4, rx->phy + T7_RX_PHY_APLL4);
 		usleep_range(5, 10);
-		writel(rx->uhd60 ? 0x098130c0 : 0x0b8130c0, rx->phy + T7_RX_PHY_APLL4);
+		writel(ctrl4 | 0x00800000, rx->phy + T7_RX_PHY_APLL4);
 		usleep_range(5, 10);
-		writel(0x34090428, rx->phy + T7_RX_PHY_APLL0);
+		writel(data | 0x34000000, rx->phy + T7_RX_PHY_APLL0);
 		usleep_range(5, 10);
-		writel(0x14090428, rx->phy + T7_RX_PHY_APLL0);
+		writel(data | 0x14000000, rx->phy + T7_RX_PHY_APLL0);
 		usleep_range(5, 10);
 		writel(0x0000301c, rx->phy + T7_RX_PHY_APLL2);
 		usleep_range(100, 110);
@@ -573,7 +624,7 @@ static void t7_hdmirx_phy_equalize(struct t7_hdmirx *rx)
 	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(30), BIT(30));
 	usleep_range(10000, 10100);
 	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(27), BIT(27));
-	if (rx->uhd60)
+	if (rx->dynamic_modes ? rx->phy_band >= 3 : rx->uhd60)
 		t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(29), 0);
 	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, BIT(26), 0);
 	usleep_range(10, 20);
@@ -814,10 +865,128 @@ static bool t7_hdmirx_sdr444_input(struct t7_hdmirx *rx)
 		(avi[4] >> 5) == 2 && (avi[5] >> 6) == 2 && !(avi[8] & 0xc0);
 }
 
+static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *color)
+{
+	u8 avi[17], again[17], depth = readb(rx->cor + T7_RX_COR_COLOR_DEPTH);
+	u32 space = (readl(rx->top + T7_RX_TOP_VID_STAT) >> 20) & 15;
+	unsigned int i;
+
+	if (space > 3 || (depth != 0 && depth != 4 && depth != 5 && depth != 6))
+		return -ERANGE;
+	*color = (struct t7_hdmirx_color) {
+		.space = space, .depth = depth == 5 ? 10 : depth == 6 ? 12 : 8,
+		.colorimetry = 2, .full = !space,
+	};
+	/* RX_AUDP_STAT_DP2 bit 0 is the T7 HDMI/DVI detector. A cached AVI
+	 * bank can survive a switch to a DVI BIOS source and must be ignored.
+	 */
+	if (!(readb(rx->cor + T7_RX_COR_AUDIO_PACKET) & BIT(0)))
+		return space ? -ERANGE : 0;
+	for (i = 0; i < sizeof(avi); i++)
+		avi[i] = readb(rx->cor + T7_RX_COR_AVI_PACKET + i);
+	for (i = 0; i < sizeof(again); i++)
+		again[i] = readb(rx->cor + T7_RX_COR_AVI_PACKET + i);
+	if (memcmp(avi, again, sizeof(avi)))
+		return -EAGAIN;
+	if (!t7_hdmirx_packet_valid(avi, 0x82, 2, 13))
+		return -ERANGE;
+	if ((avi[4] >> 5) != space)
+		return -EAGAIN;
+	/* Repeated pixels require a separate de-repeat clock setup. */
+	if (avi[8] & 15)
+		return -ERANGE;
+	if ((avi[5] >> 6) == 3 && !t7_hdmirx_hdr_input(rx))
+		return -ERANGE;
+	if (!space) {
+		u32 range = (avi[6] >> 2) & 3;
+
+		if (range == 3)
+			return -ERANGE;
+		color->full = range == 2 || (!range && (!avi[7] || avi[7] == 1));
+	} else {
+		u32 range = avi[8] >> 6;
+
+		if (range > 1)
+			return -ERANGE;
+		color->full = range == 1;
+		color->colorimetry = avi[5] >> 6;
+		if (!color->colorimetry)
+			color->colorimetry = t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) <= 576 ? 1 : 2;
+		/* Keep the qualified PQ/2020 path; reject HLG and other extended spaces. */
+		if (color->colorimetry == 3 && !t7_hdmirx_hdr_input(rx))
+			return -ERANGE;
+	}
+	return 0;
+}
+
+static void t7_hdmirx_read_measurement(struct t7_hdmirx *rx,
+				     struct t7_hdmirx_measurement *m)
+{
+	*m = (struct t7_hdmirx_measurement) {
+		.width = t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH),
+		.height = t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT),
+		.hlow = t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_LOW),
+		.hhigh = t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_HIGH),
+		.hfront = t7_hdmirx_core_read16(rx, T7_RX_COR_HFRONT),
+		.hback = t7_hdmirx_core_read16(rx, T7_RX_COR_HBACK),
+		.vlow = t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_LOW),
+		.vhigh = t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH),
+		.vfront = t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT),
+		.vback = t7_hdmirx_core_read16(rx, T7_RX_COR_VBACK),
+		.ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
+			 (readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16),
+		.polarity = readb(rx->cor + T7_RX_COR_FRAME_STATUS),
+	};
+}
+
+static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
+			     struct t7_hdmirx_measurement *m)
+{
+	struct t7_hdmirx_measurement again;
+	u32 hsync, vsync, reference = clk_get_rate(rx->clocks[T7_RX_PCLK].clk);
+	u32 scale = yuv420 ? 2 : 1;
+	u64 pixelclock;
+
+	t7_hdmirx_read_measurement(rx, m);
+	t7_hdmirx_read_measurement(rx, &again);
+	if (memcmp(m, &again, sizeof(*m)))
+		return -EAGAIN;
+	/* FDET polarity bits select the pulse, not the much longer idle level. */
+	hsync = m->polarity & BIT(0) ? m->hhigh : m->hlow;
+	vsync = m->polarity & BIT(1) ? m->vhigh : m->vlow;
+	if (m->polarity & BIT(2) || !hsync || !vsync ||
+	    m->width * scale < 320 || m->width * scale > 3840 ||
+	    m->height < 180 || m->height > 2160 || (m->height & 1) ||
+	    (m->width & 1) || !m->ticks ||
+	    m->ticks < reference / 120 || m->ticks > reference / 20 ||
+	    m->width + m->hfront + hsync + m->hback != m->hlow + m->hhigh ||
+	    m->height + m->vfront + vsync + m->vback != m->vlow + m->vhigh)
+		return -ERANGE;
+	pixelclock = div_u64((u64)reference * (m->hlow + m->hhigh) * scale *
+			    (m->vlow + m->vhigh), m->ticks);
+	if (pixelclock < 24000000 || pixelclock > 600000000)
+		return -ERANGE;
+	return 0;
+}
+
+static bool t7_hdmirx_same_measurement(const struct t7_hdmirx_measurement *a,
+				      const struct t7_hdmirx_measurement *b)
+{
+	struct t7_hdmirx_measurement left = *a, right = *b;
+	u32 delta = a->ticks > b->ticks ? a->ticks - b->ticks : b->ticks - a->ticks;
+
+	left.ticks = right.ticks = 0;
+	/* Meter quantization is a few ticks; 60 versus 59.94 remains a change. */
+	return !memcmp(&left, &right, sizeof(left)) && delta <= a->ticks / 2000;
+}
+
 static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 {
+	struct t7_hdmirx_measurement measured;
+	struct t7_hdmirx_color color;
 	u32 ticks, reference;
 	bool hdr, yuv, yuv420;
+	int ret;
 
 	if (!rx || !rx->core_active)
 		return -ENOLINK;
@@ -834,12 +1003,28 @@ static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 	hdr = t7_hdmirx_hdr_input(rx);
 	yuv420 = hdr || t7_hdmirx_sdr420_input(rx);
 	yuv = yuv420 || t7_hdmirx_sdr444_input(rx);
-	if (!yuv && (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
+	if (rx->dynamic_modes) {
+		ret = t7_hdmirx_read_color(rx, &color);
+		if (ret)
+			return ret;
+		yuv420 = color.space == 3;
+		yuv = color.space != 0;
+		if (rx->link && rx->link->users &&
+		    memcmp(&color, &rx->lease_color, sizeof(color)))
+			return -ENOLINK;
+	} else if (!yuv && (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
 	    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4))
 		return -ERANGE;
 	if (rx->link && rx->link->users &&
 	    (hdr != rx->lease_hdr || yuv != rx->lease_yuv || yuv420 != rx->lease_420))
 		return -ENOLINK;
+	if (rx->dynamic_modes) {
+		ret = t7_hdmirx_measure(rx, yuv420, &measured);
+		if (!ret && rx->link && rx->link->users &&
+		    !t7_hdmirx_same_measurement(&measured, &rx->lease_mode))
+			return -ENOLINK;
+		return ret;
+	}
 	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (yuv420 ? 1920 : rx->uhd60 ? 3840 : 1920) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != (rx->uhd60 ? 2160 : 1080) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_LOW) +
@@ -900,6 +1085,39 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 	ret = t7_hdmirx_check_video_now(dev);
 	if (ret)
 		return ret;
+	if (rx->dynamic_modes) {
+		struct t7_hdmirx_measurement m;
+		struct t7_hdmirx_color color;
+		u32 scale;
+
+		ret = t7_hdmirx_read_color(rx, &color);
+		if (ret)
+			return ret;
+		scale = color.space == 3 ? 2 : 1;
+		ret = t7_hdmirx_measure(rx, scale == 2, &m);
+		if (ret)
+			return ret;
+		mode = (struct v4l2_dv_timings) { .type = V4L2_DV_BT_656_1120 };
+		mode.bt.width = m.width * scale;
+		mode.bt.height = m.height;
+		mode.bt.polarities = (m.polarity & BIT(0) ? V4L2_DV_HSYNC_POS_POL : 0) |
+			(m.polarity & BIT(1) ? V4L2_DV_VSYNC_POS_POL : 0);
+		mode.bt.hsync = (m.polarity & BIT(0) ? m.hhigh : m.hlow) * scale;
+		mode.bt.vsync = m.polarity & BIT(1) ? m.vhigh : m.vlow;
+		mode.bt.hfrontporch = m.hfront * scale;
+		mode.bt.hbackporch = m.hback * scale;
+		mode.bt.vfrontporch = m.vfront;
+		mode.bt.vbackporch = m.vback;
+		reference = clk_get_rate(rx->clocks[T7_RX_PCLK].clk);
+		mode.bt.pixelclock = div_u64((u64)reference * (m.hlow + m.hhigh) * scale *
+					    (m.vlow + m.vhigh), m.ticks);
+		ret = t7_hdmirx_check_video_now(dev);
+		if (ret)
+			return ret;
+		*timings = mode;
+		*interval = (struct v4l2_fract) { .numerator = m.ticks, .denominator = reference };
+		return 0;
+	}
 	selected_uhd = READ_ONCE(rx->uhd60);
 	/* Byte-addressed counters can roll over between bus reads. Retry through
 	 * userspace rather than publishing a torn period as a different frame rate.
@@ -1075,7 +1293,8 @@ static int t7_hdmirx_audio_hw_params_locked(struct snd_pcm_substream *substream,
 	writel(value & ~BIT(4), rx->top + T7_RX_TOP_CLK_CNTL);
 	writel(0x40001540, rx->phy + T7_RX_AUD_PLL0);
 	writel(2 << 2, rx->phy + T7_RX_AUD_PLL2);
-	writel(rx->uhd60 ? 0 : 2, rx->phy + T7_RX_AUD_PLL3);
+	writel(rx->dynamic_modes ? (rx->pll_band < 2 ? 3 : 4 - rx->pll_band) :
+		       rx->uhd60 ? 0 : 2, rx->phy + T7_RX_AUD_PLL3);
 	writel(0x60001540, rx->phy + T7_RX_AUD_PLL0);
 	writel(readl(rx->top + T7_RX_TOP_ACR_CTRL) | BIT(11),
 	       rx->top + T7_RX_TOP_ACR_CTRL);
@@ -1241,19 +1460,46 @@ EXPORT_SYMBOL_GPL(t7_hdmirx_set_edid);
 int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int height)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	struct t7_hdmirx_measurement measured;
+	struct t7_hdmirx_color color = { 0 };
+	bool yuv420;
 	int ret;
 
 	if (!rx || !rx->link)
 		return -ENOLINK;
 	mutex_lock(&rx->link->lock);
 	ret = t7_hdmirx_check_video(dev);
-	if (!ret && (width != (rx->uhd60 ? 3840 : 1920) ||
+	yuv420 = t7_hdmirx_hdr_input(rx) || t7_hdmirx_sdr420_input(rx);
+	if (!ret && rx->dynamic_modes) {
+		ret = t7_hdmirx_read_color(rx, &color);
+		yuv420 = color.space == 3;
+		if (!ret)
+			ret = t7_hdmirx_measure(rx, yuv420, &measured);
+		if (!ret && (width != measured.width * (yuv420 ? 2 : 1) ||
+			     height != measured.height))
+			ret = -EPIPE;
+		if (!ret)
+			rx->lease_mode = measured;
+	} else if (!ret && (width != (rx->uhd60 ? 3840 : 1920) ||
 		     height != (rx->uhd60 ? 2160 : 1080)))
 		ret = -EPIPE;
 	if (!ret) {
+		if (rx->dynamic_modes && !rx->link->users) {
+			u32 control = readl(rx->top + T7_RX_TOP_VID_CNTL);
+
+			rx->lease_color = color;
+			/* T7's 422 unpacker uses all three input-mapping selectors at 3. */
+			writeb(color.space == 1 ? 0xd8 : 0x40, rx->cor + T7_RX_COR_INPUT_MAP);
+			writeb(color.space == 1 ? 6 : 4, rx->cor + T7_RX_COR_INPUT_MAP + 1);
+			control &= ~GENMASK(26, 24);
+			control |= (color.space == 1 ? 1 : color.space == 2 ? 2 : 0) << 24;
+			writel(control, rx->top + T7_RX_TOP_VID_CNTL);
+		}
 		rx->lease_hdr = t7_hdmirx_hdr_input(rx);
-		rx->lease_420 = rx->lease_hdr || t7_hdmirx_sdr420_input(rx);
-		rx->lease_yuv = rx->lease_420 || t7_hdmirx_sdr444_input(rx);
+		rx->lease_420 = rx->dynamic_modes ? color.space == 3 :
+			rx->lease_hdr || t7_hdmirx_sdr420_input(rx);
+		rx->lease_yuv = rx->dynamic_modes ? color.space != 0 :
+			rx->lease_420 || t7_hdmirx_sdr444_input(rx);
 		rx->link->users++;
 	}
 	mutex_unlock(&rx->link->lock);
@@ -1281,9 +1527,26 @@ bool t7_hdmirx_stream_is_yuv444(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
 
-	return READ_ONCE(rx->lease_yuv) && !READ_ONCE(rx->lease_420);
+	return rx->dynamic_modes ? READ_ONCE(rx->lease_color.space) == 2 :
+		READ_ONCE(rx->lease_yuv) && !READ_ONCE(rx->lease_420);
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_yuv444);
+
+bool t7_hdmirx_stream_is_full_range(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+
+	return rx->dynamic_modes ? READ_ONCE(rx->lease_color.full) : !rx->lease_yuv;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_full_range);
+
+bool t7_hdmirx_stream_is_bt601(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+
+	return rx->dynamic_modes && READ_ONCE(rx->lease_color.colorimetry) == 1;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_bt601);
 
 void t7_hdmirx_stream_put(struct device *dev)
 {
@@ -1306,6 +1569,8 @@ static bool t7_hdmirx_sdr_cable(u32 cable)
 
 static bool t7_hdmirx_cable_supported(struct t7_hdmirx *rx, u32 cable, bool hdmi2)
 {
+	if (rx->dynamic_modes)
+		return cable >= 24000000 && (u64)cable * (hdmi2 ? 4 : 1) < 600000000;
 	if (t7_hdmirx_sdr_cable(cable))
 		return true;
 	/* 4K60 YCbCr420 10-bit uses a 371.25 MHz character clock at 1:40.
@@ -1316,21 +1581,46 @@ static bool t7_hdmirx_cable_supported(struct t7_hdmirx *rx, u32 cable, bool hdmi
 	return rx->hdr_probe && hdmi2 && cable >= 90812500 && cable <= 94812500;
 }
 
+static void t7_hdmirx_select_phy(struct t7_hdmirx *rx, u32 cable, bool hdmi2)
+{
+	u32 clock = cable * (hdmi2 ? 4 : 1);
+
+	/* T7 has different first PLL and PHY thresholds (35 versus 45 MHz). */
+	rx->phy_band = clock < 45000000 ? 0 : clock < 77000000 ? 1 :
+		clock < 155000000 ? 2 : clock < 340000000 ? 3 : clock < 525000000 ? 4 : 5;
+	rx->pll_band = clock < 35000000 ? 0 : clock < 75000000 ? 1 :
+		clock < 155000000 ? 2 : clock < 340000000 ? 3 : 4;
+}
+
 static void t7_hdmirx_link_work(struct work_struct *work)
 {
 	struct t7_hdmirx_link *link = container_of(to_delayed_work(work),
 						struct t7_hdmirx_link, work);
 	struct t7_hdmirx *rx = link->rx;
-	u32 cable;
+	u32 cable = 0;
 	bool next_uhd, yuv;
+	bool sampled = false;
+	u32 previous_pll;
 	int ret;
 
 	mutex_lock(&link->lock);
 	t7_hdmirx_update_drm(rx);
+	if (rx->dynamic_modes && rx->core_active && !link->users)
+		writeb(readb(rx->cor + T7_RX_COR_AUDIO_PACKET) & BIT(0) ? 6 : 0,
+		       rx->cor + T7_RX_COR_PREAMBLE);
 	ret = t7_hdmirx_video_status(rx);
+	if (ret == -EAGAIN)
+		goto out;
+	if (rx->dynamic_modes && link->configured && !link->users) {
+		cable = t7_hdmirx_sample_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
+		sampled = true;
+		if (abs((int)cable - (int)link->previous_cable) > 500000 ||
+		    !!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1)) != link->previous_uhd)
+			link->configured = false;
+	}
 	yuv = t7_hdmirx_hdr_input(rx) || t7_hdmirx_sdr420_input(rx);
 	if (!ret && link->configured &&
-	    (!rx->hdr_probe ||
+	    (rx->dynamic_modes || !rx->hdr_probe ||
 	     (t7_hdmirx_sdr_cable(link->previous_cable) && !yuv) ||
 	     (link->previous_cable && !t7_hdmirx_sdr_cable(link->previous_cable) && yuv))) {
 		if (!READ_ONCE(link->ready)) {
@@ -1342,12 +1632,15 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	}
 	WRITE_ONCE(link->ready, false);
 	/* A live or quarantined MIF owns its receiver until DMA is safe. */
-	if (link->users)
+	if (link->users) {
+		link->configured = false;
 		goto out;
+	}
 	/* SDR pixels after observation still need a newly qualified clock. */
 	if (!ret)
 		link->configured = false;
-	cable = t7_hdmirx_sample_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
+	if (!sampled)
+		cable = t7_hdmirx_sample_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
 	rx->cable_hz = cable;
 	next_uhd = !!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1));
 	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
@@ -1381,14 +1674,20 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		goto out;
 	link->stable_samples = 0;
 	mutex_lock(&rx->audio_lock);
-	if (rx->uhd60 != next_uhd) {
+	previous_pll = rx->dynamic_modes ? rx->pll_band : rx->uhd60 ? 4 : 2;
+	if (rx->dynamic_modes)
+		t7_hdmirx_select_phy(rx, cable, next_uhd);
+	if (rx->dynamic_modes || rx->uhd60 != next_uhd) {
 		WRITE_ONCE(rx->uhd60, next_uhd);
 		/* ACR CTS division tracks PHY_BW_2 versus PHY_BW_5. Preserve ALSA
 		 * routing and DMA while resetting only the recovered audio PLL.
 		 */
-		if (rx->audio_active) {
+		if (rx->audio_active && previous_pll != (rx->dynamic_modes ? rx->pll_band : next_uhd ? 4 : 2)) {
+			static const u32 audio_div[] = { 3, 3, 2, 1, 0 };
+
 			writel(0x40001540, rx->phy + T7_RX_AUD_PLL0);
-			writel(next_uhd ? 0 : 2, rx->phy + T7_RX_AUD_PLL3);
+			writel(audio_div[rx->dynamic_modes ? rx->pll_band : next_uhd ? 4 : 2],
+			       rx->phy + T7_RX_AUD_PLL3);
 			writel(0x60001540, rx->phy + T7_RX_AUD_PLL0);
 		}
 		t7_hdmirx_phy_configure(rx);
@@ -1450,6 +1749,8 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 	seq_printf(s, "hdr_input: %u\n", t7_hdmirx_hdr_input(rx));
 	seq_printf(s, "drm_received_ns: %llu\n", READ_ONCE(rx->drm_received_ns));
 	seq_printf(s, "selected_uhd: %u\n", READ_ONCE(rx->uhd60));
+	seq_printf(s, "phy_band: %u\n", READ_ONCE(rx->phy_band));
+	seq_printf(s, "pll_band: %u\n", READ_ONCE(rx->pll_band));
 	seq_printf(s, "core_active: %u\n", rx->core_active);
 	if (rx->link) {
 		seq_printf(s, "link_ready: %u\n", READ_ONCE(rx->link->ready));

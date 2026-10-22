@@ -62,6 +62,8 @@ static bool hdr_input, yuv_input, yuv444_input;
 static bool t7_hdmirx_stream_is_hdr(struct device *dev) { (void)dev; return hdr_input; }
 static bool t7_hdmirx_stream_is_yuv(struct device *dev) { (void)dev; return hdr_input || yuv_input; }
 static bool t7_hdmirx_stream_is_yuv444(struct device *dev) { (void)dev; return yuv444_input; }
+static bool t7_hdmirx_stream_is_full_range(struct device *dev) { (void)dev; return !hdr_input && !yuv_input; }
+static bool t7_hdmirx_stream_is_bt601(struct device *dev) { (void)dev; return false; }
 static bool timeout, busy, bad_timing, change_timing;
 static u32 readl(void *address)
 {

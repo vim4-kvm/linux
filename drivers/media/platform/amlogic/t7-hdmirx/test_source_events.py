@@ -13,7 +13,10 @@ fixture = r'''
 #include <stddef.h>
 #include <stdio.h>
 #include <errno.h>
+#include <stdint.h>
 #include <linux/videodev2.h>
+typedef uint64_t u64;
+#define div_u64(a,b) ((a)/(b))
 struct mutex { bool held; };
 struct work_struct { int unused; };
 struct delayed_work { struct work_struct work; };
@@ -23,18 +26,21 @@ struct t7_vdin {
     struct delayed_work source_work; struct mutex video_lock;
     struct device *receiver; struct video_device video;
     bool source_seen,source_locked; unsigned int source_width,source_height;
+    unsigned int source_period;
 };
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
 #define to_delayed_work(p) container_of(p,struct delayed_work,work)
 #define msecs_to_jiffies(n) (n)
 static unsigned int width=3840,height=2160,events,scheduled,canceled;
+static unsigned int frame_period=16667;
 static int input_error=-ENOLINK;
 static void mutex_lock(struct mutex *m) { assert(!m->held); m->held=true; }
 static void mutex_unlock(struct mutex *m) { assert(m->held); m->held=false; }
 static int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *mode,
                                   struct v4l2_fract *interval) {
-    (void)dev; (void)interval;
+    (void)dev;
     if (input_error) return input_error;
+    *interval=(struct v4l2_fract) {frame_period,1000000};
     mode->bt.width=width; mode->bt.height=height; return 0;
 }
 static void v4l2_event_queue(struct video_device *video, const struct v4l2_event *event) {
@@ -65,6 +71,10 @@ int main(void) {
     input_error=-ENOLINK; t7_vdin_source_work(&receiver.source_work.work); assert(events==3);
     input_error=0; width=3840; height=2160;
     t7_vdin_source_work(&receiver.source_work.work); assert(events==4 && receiver.source_locked);
+    frame_period=16668; t7_vdin_source_work(&receiver.source_work.work); assert(events==4);
+    frame_period=33333; t7_vdin_source_work(&receiver.source_work.work); assert(events==5);
+    frame_period=41667; t7_vdin_source_work(&receiver.source_work.work); assert(events==6);
+    frame_period=16667; t7_vdin_source_work(&receiver.source_work.work); assert(events==7);
     assert(!receiver.video_lock.held);
     t7_vdin_source_stop(&receiver); assert(canceled==1);
     puts("Source monitor: real mode/loss/recovery events, stable input and torn-counter retry passed");

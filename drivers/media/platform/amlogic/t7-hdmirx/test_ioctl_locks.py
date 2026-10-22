@@ -241,6 +241,15 @@ int main(void) {
     assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.width==1920 && capture.height==1080);
     assert(capture.frame_size==3110400 && capture.allocation_size==3133440);
     assert(capture.frame_capacity==12441600);
+    input_width=1366; input_height=768;
+    fmt.fmt.pix.width=1366; fmt.fmt.pix.height=768;
+    assert(!dispatch(VIDIOC_S_FMT,&fmt));
+    assert(capture.width==1366 && capture.stride==1376);
+    assert(capture.frame_size==1376*768*3/2);
+    assert(capture.allocation_size>=capture.frame_size);
+    input_width=1920; input_height=1080;
+    fmt.fmt.pix.width=1920; fmt.fmt.pix.height=1080;
+    assert(!dispatch(VIDIOC_S_FMT,&fmt));
     input_width=5000; input_height=3000;
     assert(dispatch(VIDIOC_S_FMT,&fmt)==-ERANGE && capture.width==1920);
     input_width=3840; input_height=2160;
