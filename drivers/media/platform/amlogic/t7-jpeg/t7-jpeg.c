@@ -19,6 +19,7 @@
 #include <linux/slab.h>
 #include <linux/sizes.h>
 #include <linux/uaccess.h>
+#include <media/meson-t7-dos.h>
 
 #include "jpeg-tables.h"
 
@@ -648,6 +649,7 @@ static int jpeg_release(struct inode *inode, struct file *file)
 
 	mutex_lock(&j->lock);
 	if (j->failed || power_off(j)) {
+		meson_t7_dos_poison();
 		/* Prevent module removal while quarantined DMA still has an owner. */
 		__module_get(THIS_MODULE);
 		mutex_unlock(&j->lock);
@@ -677,6 +679,9 @@ static int jpeg_probe(struct platform_device *pdev)
 	struct t7_jpeg *j;
 	int ret;
 
+	ret = devm_meson_t7_dos_get_shared(&pdev->dev);
+	if (ret)
+		return ret;
 	j = devm_kzalloc(&pdev->dev, sizeof(*j), GFP_KERNEL);
 	if (!j)
 		return -ENOMEM;

@@ -295,5 +295,6 @@
 int aml_h264_init(void *priv);
 void aml_h264_exit(void *priv);
 int aml_h264_dec_run(void *priv);
+void aml_h264_finish(void *priv);
 
 #endif
