@@ -51,7 +51,7 @@ static bool t7_hdmirx_sdr420_input(struct t7_hdmirx *rx) { (void)rx; return fals
 static bool t7_hdmirx_sdr444_input(struct t7_hdmirx *rx) { (void)rx; return false; }
 static void t7_hdmirx_update_drm(struct t7_hdmirx *rx) { (void)rx; }
 static bool signal_valid, source_present, hdmi2 = true, pll_fail, late_alignment, lose_during_wait;
-static bool unsupported_signal, unsupported_color;
+static bool unsupported_signal, unsupported_color, unstable_timings;
 static unsigned int pll_calls, pcs_calls, queued, canceled, last_delay, meter_resets;
 static unsigned int profile_changes;
 static u32 meter_reset;
@@ -72,6 +72,7 @@ static void mutex_lock(struct mutex *lock) { assert(!lock->held); lock->held = t
 static void mutex_unlock(struct mutex *lock) { assert(lock->held); lock->held = false; }
 static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 {
+    if (unstable_timings) return -EAGAIN;
     if (unsupported_signal) return -ERANGE;
     return signal_valid && (!rx->dynamic_modes || rx->uhd60==hdmi2) ? 0 : -ENOLINK;
 }
@@ -217,6 +218,16 @@ int main(void)
     unsupported_signal=true; tick(&link,4);
     assert(!link.ready && pll_calls>before_malformed);
     unsupported_signal=false; tick(&link,1); assert(link.ready);
+    unsigned int before_unstable=pll_calls;
+    unstable_timings=true; tick(&link,1);
+    assert(link.ready && pll_calls==before_unstable);
+    unstable_timings=false; tick(&link,1);
+    assert(link.ready && !link.timing_retries);
+    link.users=1; unstable_timings=true; tick(&link,12);
+    assert(!link.ready && pll_calls==before_unstable);
+    link.users=0; tick(&link,8);
+    assert(pll_calls>before_unstable && !link.ready);
+    unstable_timings=false; tick(&link,1); assert(link.ready);
     t7_hdmirx_link_stop(&link);
     assert(canceled == 1 && !link.ready);
     puts("Receiver recovery: absent/delayed source, DMA leases, PLL failure and late alignment passed");

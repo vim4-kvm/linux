@@ -234,6 +234,7 @@ struct t7_hdmirx_link {
 	unsigned int users;
 	u32 previous_cable;
 	unsigned int stable_samples;
+	unsigned int timing_retries;
 	bool previous_uhd;
 	bool ready;
 	bool configured;
@@ -1617,8 +1618,18 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		writeb(readb(rx->cor + T7_RX_COR_AUDIO_PACKET) & BIT(0) ? 6 : 0,
 		       rx->cor + T7_RX_COR_PREAMBLE);
 	ret = t7_hdmirx_video_status(rx);
-	if (ret == -EAGAIN)
-		goto out;
+	if (ret == -EAGAIN) {
+		/* One torn snapshot is harmless. A stuck FDET can change on every
+		 * read indefinitely; after a second, qualify clocks and recover PCS.
+		 * The users check below still protects live or quarantined DMA.
+		 */
+		if (link->timing_retries < 4) {
+			link->timing_retries++;
+			goto out;
+		}
+	} else {
+		link->timing_retries = 0;
+	}
 	if (rx->dynamic_modes && link->configured && !link->users) {
 		cable = t7_hdmirx_sample_cable(rx, clk_get_rate(rx->clocks[T7_RX_METER].clk));
 		sampled = true;
