@@ -62,7 +62,13 @@ static void mutex_unlock(struct mutex *m) { assert(m->held); m->held=false; }
 static u8 core[0x8000], top[0x4000], phy[0x90], fifo[0x30];
 static bool clocks, fail_clocks, pll_locked;
 static unsigned int writes, enables, disables;
-static u8 readb(void *p) { return *(u8 *)p; }
+static bool cts_jitter;
+static unsigned int cts_reads;
+static u8 readb(void *p) {
+    if (cts_jitter && p == core + T7_RX_COR_CTS + 2)
+        return *(u8 *)p + (cts_reads++ & 1);
+    return *(u8 *)p;
+}
 static void writeb(u8 v, void *p) { *(u8 *)p = v; writes++; }
 static u32 readl(void *p) { u32 v; memcpy(&v, p, 4); return v; }
 static void writel(u32 v, void *p) {
@@ -138,6 +144,9 @@ int main(void) {
     aif(3,2);
     assert(!t7_hdmirx_read_audio(&rx,&rx.audio_format));
     assert(rx.audio_format.rate==48000 && rx.audio_format.pcm);
+    cts_jitter=true;
+    assert(!t7_hdmirx_read_audio(&rx,&rx.audio_format) && rx.audio_format.rate==48000);
+    cts_jitter=false;
     fail_period_constraint=true;
     assert(t7_hdmirx_audio_startup(&stream,&dai)==-EINVAL && !writes && !enables);
     fail_period_constraint=false;

@@ -1256,7 +1256,7 @@ static int t7_hdmirx_read_audio(struct t7_hdmirx *rx,
 		0, 32000, 44100, 48000, 88200, 96000, 176400, 192000,
 	};
 	u8 aif[14], second[14], packet, channel_status, sum = 0;
-	u32 n, cts, tmds;
+	u32 n, cts, next_n, next_cts, tmds;
 	unsigned int i, declared;
 
 	if (!rx->core_active || (rx->link && !READ_ONCE(rx->link->ready)))
@@ -1269,9 +1269,9 @@ static int t7_hdmirx_read_audio(struct t7_hdmirx *rx,
 		aif[i] = readb(rx->cor + T7_RX_COR_AUDIO_AIF + i);
 	for (i = 0; i < ARRAY_SIZE(second); i++)
 		second[i] = readb(rx->cor + T7_RX_COR_AUDIO_AIF + i);
+	next_n = t7_hdmirx_audio_word(rx, T7_RX_COR_N);
+	next_cts = t7_hdmirx_audio_word(rx, T7_RX_COR_CTS);
 	if (memcmp(aif, second, sizeof(aif)) ||
-	    n != t7_hdmirx_audio_word(rx, T7_RX_COR_N) ||
-	    cts != t7_hdmirx_audio_word(rx, T7_RX_COR_CTS) ||
 	    packet != readb(rx->cor + T7_RX_COR_AUDIO_PACKET) ||
 	    channel_status != readb(rx->cor + T7_RX_COR_AUDIO_CHSTATUS))
 		return -EAGAIN;
@@ -1285,7 +1285,11 @@ static int t7_hdmirx_read_audio(struct t7_hdmirx *rx,
 	tmds = t7_hdmirx_meter_hz(readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
 				clk_get_rate(rx->clocks[T7_RX_METER].clk));
 	format->rate = t7_hdmirx_audio_rate(tmds, n, cts);
-	if (!format->rate)
+	/* CTS legitimately varies by a few ticks between consecutive ACR packets.
+	 * Require two complete snapshots to agree on the qualified rate, rather
+	 * than exact counter equality which can falsely stop a stable source.
+	 */
+	if (!format->rate || format->rate != t7_hdmirx_audio_rate(tmds, next_n, next_cts))
 		return -EAGAIN;
 	declared = aif_rates[(aif[5] >> 2) & 7];
 	if (declared && declared != format->rate)
