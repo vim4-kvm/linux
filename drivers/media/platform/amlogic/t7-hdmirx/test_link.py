@@ -51,14 +51,14 @@ static bool t7_hdmirx_sdr420_input(struct t7_hdmirx *rx) { (void)rx; return fals
 static bool t7_hdmirx_sdr444_input(struct t7_hdmirx *rx) { (void)rx; return false; }
 static void t7_hdmirx_update_drm(struct t7_hdmirx *rx) { (void)rx; }
 static bool signal_valid, source_present, hdmi2 = true, pll_fail, late_alignment, lose_during_wait;
-static bool unsupported_signal;
+static bool unsupported_signal, unsupported_color;
 static unsigned int pll_calls, pcs_calls, queued, canceled, last_delay, meter_resets;
 static unsigned int profile_changes;
 static u32 meter_reset;
 static u32 cable_hz;
 static struct t7_hdmirx receiver;
 static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *c) {
-    (void)rx; *c=(struct t7_hdmirx_color){.depth=8,.full=1}; return 0;
+    (void)rx; *c=(struct t7_hdmirx_color){.depth=8,.full=1}; return unsupported_color?-ERANGE:0;
 }
 static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
                              struct t7_hdmirx_measurement *m) {
@@ -199,7 +199,7 @@ int main(void)
     assert(!t7_hdmirx_cable_supported(&receiver,23999999,false));
     assert(!t7_hdmirx_cable_supported(&receiver,0,true));
     assert(!t7_hdmirx_cable_supported(&receiver,297000000,true));
-    cable_hz=92812500; unsupported_signal=true; link.configured=false;
+    cable_hz=92812500; unsupported_signal=unsupported_color=true; link.configured=false;
     link.stable_samples=0; link.previous_cable=0;
     unsigned int before_probe=pll_calls;
     tick(&link,4);
@@ -207,9 +207,16 @@ int main(void)
     tick(&link,100);
     assert(!link.ready && pll_calls==before_probe+1);
     assert(t7_hdmirx_stream_get(&dev,3840,2160)==-ENOLINK && !link.users);
-    unsupported_signal=false;cable_hz=148500000;
+    unsupported_signal=unsupported_color=false;cable_hz=148500000;
     tick(&link,3);assert(!link.ready && pll_calls==before_probe+1);
     tick(&link,1);assert(link.ready && pll_calls==before_probe+2);
+    /* An aligned but malformed FDET after HPD is not an unsupported HDR probe.
+     * It must retry PCS without waiting for a different cable clock.
+     */
+    unsigned int before_malformed=pll_calls;
+    unsupported_signal=true; tick(&link,4);
+    assert(!link.ready && pll_calls>before_malformed);
+    unsupported_signal=false; tick(&link,1); assert(link.ready);
     t7_hdmirx_link_stop(&link);
     assert(canceled == 1 && !link.ready);
     puts("Receiver recovery: absent/delayed source, DMA leases, PLL failure and late alignment passed");

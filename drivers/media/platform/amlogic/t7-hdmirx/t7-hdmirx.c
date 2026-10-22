@@ -1523,14 +1523,13 @@ bool t7_hdmirx_stream_is_yuv(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_yuv);
 
-bool t7_hdmirx_stream_is_yuv444(struct device *dev)
+bool t7_hdmirx_stream_needs_yuv444_swap(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
 
-	return rx->dynamic_modes ? READ_ONCE(rx->lease_color.space) == 2 :
-		READ_ONCE(rx->lease_yuv) && !READ_ONCE(rx->lease_420);
+	return !rx->dynamic_modes && READ_ONCE(rx->lease_yuv) && !READ_ONCE(rx->lease_420);
 }
-EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_yuv444);
+EXPORT_SYMBOL_GPL(t7_hdmirx_stream_needs_yuv444_swap);
 
 bool t7_hdmirx_stream_is_full_range(struct device *dev)
 {
@@ -1601,6 +1600,7 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	bool next_uhd, yuv;
 	bool sampled = false;
 	u32 previous_pll;
+	struct t7_hdmirx_color color;
 	int ret;
 
 	mutex_lock(&link->lock);
@@ -1652,10 +1652,13 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		goto out;
 	}
 	/* Keep an unsupported but aligned probe signal intact for packet reads.
+	 * A supported colour with malformed FDET geometry still needs PCS recovery:
+	 * alignment alone can survive a mode switch with height zero/width +2.
 	 * Remember its reference clock so returning SDR is requalified, including
 	 * fresh TMDS meter counts for the subsequent ALSA N/CTS validation.
 	 */
 	if (rx->hdr_probe && ret == -ERANGE && link->configured &&
+	    (!rx->dynamic_modes || t7_hdmirx_read_color(rx, &color) == -ERANGE) &&
 	    (readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK) &&
 	    (readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0))) {
 		link->previous_cable = cable;
