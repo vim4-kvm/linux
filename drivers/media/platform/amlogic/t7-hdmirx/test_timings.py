@@ -237,6 +237,23 @@ int main(void) {
     struct t7_hdmirx_color color;
     assert(t7_hdmirx_read_color(&rx,&color)==-ERANGE); /* Unmapped HLG/2020. */
     avi[5]^=1; assert(t7_hdmirx_read_color(&rx,&color)==-ERANGE);
+    /* PQ/2020 HDR2 follows normalized YUV, including 422's fixed transport
+     * container with an unspecified GCP depth. Fresh metadata is mandatory.
+     */
+    rx.hdr_capture=true;rx.drm_received_ns=1000000000ULL;
+    for (unsigned int space=1;space<4;space++) {
+        memset(avi,0,17);avi[0]=0x82;avi[1]=2;avi[2]=13;
+        avi[4]=space<<5;avi[5]=3<<6;avi[6]=6<<4;
+        for (unsigned int j=0;j<17;j++)if(j!=3)avi[3]-=avi[j];
+        u32 top_color=space<<20;memcpy(top+T7_RX_TOP_VID_STAT,&top_color,4);
+        core[T7_RX_COR_COLOR_DEPTH]=space==1?0:6;
+        assert(t7_hdmirx_hdr_input(&rx));
+        assert(!t7_hdmirx_read_color(&rx,&color));
+        rx.drm_received_ns=0;
+        assert(!t7_hdmirx_hdr_input(&rx));
+        assert(t7_hdmirx_read_color(&rx,&color)==-ERANGE);
+        rx.drm_received_ns=1000000000ULL;
+    }
     puts("RGB/444/422/420, 8/10/12-bit, range/601/709 and unsupported HDR guards passed");
     puts("Measured timing ioctls: UHD/FHD, fractional rate, torn counter, loss, unsupported modes passed");
 }

@@ -813,6 +813,7 @@ static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx)
 {
 	u8 avi[17], again[17];
 	u64 received = READ_ONCE(rx->drm_received_ns);
+	u8 depth = readb(rx->cor + T7_RX_COR_COLOR_DEPTH);
 	unsigned int i;
 
 	if (!rx->hdr_capture || !received || ktime_get_ns() - received > 1000000000ULL)
@@ -821,11 +822,18 @@ static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx)
 		avi[i] = readb(rx->cor + 0x1140 + i);
 	for (i = 0; i < sizeof(again); i++)
 		again[i] = readb(rx->cor + 0x1140 + i);
-	return !memcmp(avi, again, sizeof(avi)) &&
-		t7_hdmirx_packet_valid(avi, 0x82, 2, 13) &&
-		(avi[4] >> 5) == 3 && (avi[5] >> 6) == 3 &&
-		((avi[6] >> 4) & 7) == 6 && !(avi[8] & 0xc0) &&
-		avi[7] == 97 && readb(rx->cor + T7_RX_COR_COLOR_DEPTH) == 5;
+	if (memcmp(avi, again, sizeof(avi)) ||
+	    !t7_hdmirx_packet_valid(avi, 0x82, 2, 13) ||
+	    (avi[5] >> 6) != 3 || ((avi[6] >> 4) & 7) != 6 || (avi[8] & 0xc0))
+		return false;
+	/* HDR2 receives normalized Y/Cb/Cr after TOP's unpacker for each YUV
+	 * transport. Its PQ/2020 matrices and LUTs are independent of timing.
+	 * RGB/2020 needs a different input matrix and remains unsupported.
+	 */
+	if (rx->dynamic_modes)
+		return (avi[4] >> 5) >= 1 && (avi[4] >> 5) <= 3 &&
+			(depth == 0 || depth == 4 || depth == 5 || depth == 6);
+	return (avi[4] >> 5) == 3 && avi[7] == 97 && depth == 5;
 }
 
 /* macOS can keep the same 420/10-bit transport when HDR is disabled. Its
