@@ -95,6 +95,7 @@ struct brcmf_if *brcmf_get_ifp(struct brcmf_pub *drvr, int ifidx)
 
 void brcmf_configure_arp_nd_offload(struct brcmf_if *ifp, bool enable)
 {
+	struct brcmf_if *nd_ifp = ifp;
 	s32 err;
 	u32 mode;
 
@@ -125,7 +126,15 @@ void brcmf_configure_arp_nd_offload(struct brcmf_if *ifp, bool enable)
 		}
 	}
 
-	err = brcmf_fil_iovar_int_set(ifp, "ndoe", enable);
+	/* This firmware's ND enable belongs to the primary control interface,
+	 * even when a P2P group changes the radio's offload policy. Sending it
+	 * on a group interface traps the firmware before AP startup.
+	 */
+	if (brcmf_feat_is_quirk_enabled(ifp, BRCMF_FEAT_QUIRK_NDOE_PRIMARY))
+		nd_ifp = ifp->drvr->iflist[0];
+	if (!nd_ifp)
+		return;
+	err = brcmf_fil_iovar_int_set(nd_ifp, "ndoe", enable);
 	if (err) {
 		brcmf_dbg(TRACE, "failed to configure (%d) ND offload err = %d\n",
 			  enable, err);
