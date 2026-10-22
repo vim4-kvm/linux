@@ -20,6 +20,7 @@
 #include <linux/videodev2.h>
 #include <linux/v4l2-dv-timings.h>
 #include <sound/pcm_params.h>
+#include <sound/control.h>
 #include <sound/soc.h>
 
 #include "t7-hdmirx.h"
@@ -133,6 +134,7 @@
 #define T7_RX_COR_N		0x111d
 #define T7_RX_COR_AUDIO_PACKET	0x1127
 #define T7_RX_COR_AUDIO_INFO	0x1184
+#define T7_RX_COR_AUDIO_AIF	0x1180
 #define T7_RX_COR_AUDIO_CHSTATUS	0x1419
 #define T7_RX_COR_AUDIO_MCLK	0x1401
 #define T7_RX_COR_AUDIO_TDM1	0x1440
@@ -227,6 +229,12 @@ struct t7_hdmirx_color {
 	u32 full;
 };
 
+struct t7_hdmirx_audio_format {
+	u32 rate, channels;
+	u8 coding, allocation;
+	bool pcm;
+};
+
 struct t7_hdmirx_link {
 	struct mutex lock;
 	struct delayed_work work;
@@ -279,6 +287,13 @@ struct t7_hdmirx {
 	void __iomem *frhdmirx;
 	struct clk_bulk_data audio_clocks[3];
 	bool audio_active;
+	bool audio_invalid;
+	struct delayed_work audio_work;
+	struct snd_soc_component *audio_component;
+	struct snd_pcm_substream *audio_substream;
+	struct t7_hdmirx_audio_format audio_format, audio_pending;
+	u32 audio_generation;
+	unsigned int audio_stable_samples;
 	u32 audio_pll_saved[3];
 	u32 audio_fifo_saved;
 	u8 audio_core_saved[3];
@@ -1187,6 +1202,24 @@ static u32 t7_hdmirx_audio_word(struct t7_hdmirx *rx, unsigned int reg)
 	       (readb(rx->cor + reg + 1) << 8) | readb(rx->cor + reg + 2);
 }
 
+static unsigned int t7_hdmirx_audio_rate(u32 tmds, u32 n, u32 cts)
+{
+	static const unsigned int rates[] = {
+		32000, 44100, 48000, 88200, 96000, 176400, 192000,
+	};
+	u64 measured;
+	unsigned int i;
+
+	if (!tmds || !n || !cts)
+		return 0;
+	measured = div_u64((u64)tmds * n, 128 * cts);
+	for (i = 0; i < ARRAY_SIZE(rates); i++)
+		if (measured >= rates[i] - rates[i] / 100 &&
+		    measured <= rates[i] + rates[i] / 100)
+			return rates[i];
+	return 0;
+}
+
 static int t7_hdmirx_validate_audio(u32 tmds, u32 n, u32 cts,
 				  u8 info, u8 packet, u8 channel_status,
 				  unsigned int rate)
@@ -1195,7 +1228,8 @@ static int t7_hdmirx_validate_audio(u32 tmds, u32 n, u32 cts,
 
 	if (!tmds || !n || !cts)
 		return -ENOLINK;
-	if (rate != 32000 && rate != 44100 && rate != 48000)
+	if (rate != 32000 && rate != 44100 && rate != 48000 &&
+	    rate != 88200 && rate != 96000 && rate != 176400 && rate != 192000)
 		return -EINVAL;
 	/* Reject compressed, HBR and multichannel layouts before touching clocks. */
 	if ((info >> 4) > 1 || (info & 7) > 1 ||
@@ -1204,6 +1238,64 @@ static int t7_hdmirx_validate_audio(u32 tmds, u32 n, u32 cts,
 	measured = div_u64((u64)tmds * n, 128 * cts);
 	if (measured < rate - rate / 100 || measured > rate + rate / 100)
 		return -ERANGE;
+	return 0;
+}
+
+static bool t7_hdmirx_audio_same(const struct t7_hdmirx_audio_format *a,
+				const struct t7_hdmirx_audio_format *b)
+{
+	return a->rate == b->rate && a->channels == b->channels &&
+	       a->coding == b->coding && a->allocation == b->allocation && a->pcm == b->pcm;
+}
+
+static int t7_hdmirx_read_audio(struct t7_hdmirx *rx,
+			      struct t7_hdmirx_audio_format *format)
+{
+	static const unsigned int aif_rates[] = {
+		0, 32000, 44100, 48000, 88200, 96000, 176400, 192000,
+	};
+	u8 aif[14], second[14], packet, channel_status, sum = 0;
+	u32 n, cts, tmds;
+	unsigned int i, declared;
+
+	if (!rx->core_active || (rx->link && !READ_ONCE(rx->link->ready)))
+		return -ENOLINK;
+	n = t7_hdmirx_audio_word(rx, T7_RX_COR_N);
+	cts = t7_hdmirx_audio_word(rx, T7_RX_COR_CTS);
+	packet = readb(rx->cor + T7_RX_COR_AUDIO_PACKET);
+	channel_status = readb(rx->cor + T7_RX_COR_AUDIO_CHSTATUS);
+	for (i = 0; i < ARRAY_SIZE(aif); i++)
+		aif[i] = readb(rx->cor + T7_RX_COR_AUDIO_AIF + i);
+	for (i = 0; i < ARRAY_SIZE(second); i++)
+		second[i] = readb(rx->cor + T7_RX_COR_AUDIO_AIF + i);
+	if (memcmp(aif, second, sizeof(aif)) ||
+	    n != t7_hdmirx_audio_word(rx, T7_RX_COR_N) ||
+	    cts != t7_hdmirx_audio_word(rx, T7_RX_COR_CTS) ||
+	    packet != readb(rx->cor + T7_RX_COR_AUDIO_PACKET) ||
+	    channel_status != readb(rx->cor + T7_RX_COR_AUDIO_CHSTATUS))
+		return -EAGAIN;
+	/* T7 exposes the received AIF header/checksum and ten payload bytes. */
+	if (aif[0] != 0x84 || aif[1] != 1 || aif[2] != 10)
+		return -ENOLINK;
+	for (i = 0; i < ARRAY_SIZE(aif); i++)
+		sum += aif[i];
+	if (sum)
+		return -EAGAIN;
+	tmds = t7_hdmirx_meter_hz(readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
+				clk_get_rate(rx->clocks[T7_RX_METER].clk));
+	format->rate = t7_hdmirx_audio_rate(tmds, n, cts);
+	if (!format->rate)
+		return -ENOLINK;
+	declared = aif_rates[(aif[5] >> 2) & 7];
+	if (declared && declared != format->rate)
+		return -EAGAIN;
+	format->channels = (aif[4] & 7) ? (aif[4] & 7) + 1 :
+		(packet & GENMASK(4, 3) ? 0 : 2);
+	format->coding = aif[4] >> 4;
+	format->allocation = aif[7];
+	/* T7 FRHDMIRX has one SPDIF lane and no multichannel PAO path. */
+	format->pcm = !t7_hdmirx_validate_audio(tmds, n, cts, aif[4], packet,
+						channel_status, format->rate) && !aif[7];
 	return 0;
 }
 
@@ -1254,25 +1346,24 @@ static int t7_hdmirx_audio_hw_params_locked(struct snd_pcm_substream *substream,
 				    struct snd_soc_dai *dai)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dai->dev);
-	u32 status, value, n, cts, tmds;
+	struct t7_hdmirx_audio_format format = { 0 };
+	u32 status, value;
 	unsigned int i;
 	int ret;
 
 	if (!rx->core_active || params_channels(params) != 2 ||
 	    params_format(params) != SNDRV_PCM_FORMAT_S16_LE)
 		return -EINVAL;
-	if (rx->dynamic_modes && (!rx->link || !READ_ONCE(rx->link->ready)))
-		return -ENOLINK;
-	n = t7_hdmirx_audio_word(rx, T7_RX_COR_N);
-	cts = t7_hdmirx_audio_word(rx, T7_RX_COR_CTS);
-	tmds = t7_hdmirx_meter_hz(readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
-				clk_get_rate(rx->clocks[T7_RX_METER].clk));
-	ret = t7_hdmirx_validate_audio(tmds, n, cts,
-		readb(rx->cor + T7_RX_COR_AUDIO_INFO),
-		readb(rx->cor + T7_RX_COR_AUDIO_PACKET),
-		readb(rx->cor + T7_RX_COR_AUDIO_CHSTATUS), params_rate(params));
+	ret = t7_hdmirx_read_audio(rx, &format);
 	if (ret)
 		return ret;
+	if (!format.pcm)
+		return -EINVAL;
+	if (format.rate != params_rate(params))
+		return -ERANGE;
+	/* Qualification must have observed the same format twice. */
+	if (!t7_hdmirx_audio_same(&format, &rx->audio_format))
+		return -ENOLINK;
 	if (rx->audio_active)
 		return -EBUSY;
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(rx->audio_clocks), rx->audio_clocks);
@@ -1332,6 +1423,8 @@ static int t7_hdmirx_audio_hw_params_locked(struct snd_pcm_substream *substream,
 	writel(value | BIT(29), rx->frhdmirx);
 	writel(value | BIT(29) | BIT(28), rx->frhdmirx);
 	writel(value | BIT(29) | BIT(28) | BIT(31), rx->frhdmirx);
+	rx->audio_invalid = false;
+	rx->audio_substream = substream;
 	return 0;
 }
 
@@ -1351,11 +1444,49 @@ static int t7_hdmirx_audio_hw_params(struct snd_pcm_substream *substream,
 static int t7_hdmirx_audio_hw_free(struct snd_pcm_substream *substream,
 				  struct snd_soc_dai *dai)
 {
-	t7_hdmirx_audio_stop(dev_get_drvdata(dai->dev));
+	struct t7_hdmirx *rx = dev_get_drvdata(dai->dev);
+
+	mutex_lock(&rx->audio_lock);
+	rx->audio_substream = NULL;
+	t7_hdmirx_audio_stop_locked(rx);
+	mutex_unlock(&rx->audio_lock);
 	return 0;
 }
 
+static int t7_hdmirx_audio_startup(struct snd_pcm_substream *substream,
+				   struct snd_soc_dai *dai)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dai->dev);
+	unsigned int rate;
+
+	mutex_lock(&rx->audio_lock);
+	rate = rx->audio_format.pcm ? rx->audio_format.rate : 0;
+	mutex_unlock(&rx->audio_lock);
+	/* Keep enumeration available without a source. hw_params still validates
+	 * the live input; when qualified, ALSA plug can choose the native rate.
+	 */
+	if (rate)
+		return snd_pcm_hw_constraint_minmax(substream->runtime,
+					SNDRV_PCM_HW_PARAM_RATE, rate, rate);
+	return 0;
+}
+
+static int t7_hdmirx_audio_prepare(struct snd_pcm_substream *substream,
+				   struct snd_soc_dai *dai)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dai->dev);
+	int ret;
+
+	mutex_lock(&rx->audio_lock);
+	/* An old PCM must close and renegotiate after loss or a format change. */
+	ret = rx->audio_invalid || !rx->audio_active ? -ENOLINK : 0;
+	mutex_unlock(&rx->audio_lock);
+	return ret;
+}
+
 static const struct snd_soc_dai_ops t7_hdmirx_audio_ops = {
+	.startup = t7_hdmirx_audio_startup,
+	.prepare = t7_hdmirx_audio_prepare,
 	.hw_params = t7_hdmirx_audio_hw_params,
 	.hw_free = t7_hdmirx_audio_hw_free,
 };
@@ -1365,14 +1496,142 @@ static struct snd_soc_dai_driver t7_hdmirx_audio_dai = {
 	.capture = {
 		.stream_name = "HDMI RX Capture",
 		.channels_min = 2, .channels_max = 2,
-		.rates = SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000,
+		.rates = SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
+			 SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000 |
+			 SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_192000,
 		.formats = SNDRV_PCM_FMTBIT_S16_LE,
 	},
 	.ops = &t7_hdmirx_audio_ops,
 };
 
+static const char * const t7_hdmirx_audio_control_names[] = {
+	"HDMI RX Audio Rate", "HDMI RX Audio Channels",
+	"HDMI RX Audio Generation", "HDMI RX Audio State",
+};
+
+static void t7_hdmirx_audio_work(struct work_struct *work)
+{
+	struct t7_hdmirx *rx = container_of(to_delayed_work(work), struct t7_hdmirx, audio_work);
+	struct t7_hdmirx_audio_format format = { 0 };
+	struct snd_pcm_substream *stop = NULL;
+	struct snd_ctl_elem_id id = { .iface = SNDRV_CTL_ELEM_IFACE_MIXER };
+	unsigned int i;
+	int ret;
+
+	mutex_lock(&rx->audio_lock);
+	ret = t7_hdmirx_read_audio(rx, &format);
+	if (ret) {
+		memset(&format, 0, sizeof(format));
+		rx->audio_stable_samples = 0;
+	} else if (!t7_hdmirx_audio_same(&format, &rx->audio_format)) {
+		if (t7_hdmirx_audio_same(&format, &rx->audio_pending))
+			rx->audio_stable_samples++;
+		else
+			rx->audio_stable_samples = 1;
+		rx->audio_pending = format;
+		/* Mute the old stream immediately; publish a new format only after
+		 * consecutive samples. Never play new-rate data with old PCM params.
+		 */
+		if (rx->audio_stable_samples < 2)
+			memset(&format, 0, sizeof(format));
+	}
+	if (!t7_hdmirx_audio_same(&format, &rx->audio_format)) {
+		rx->audio_format = format;
+		rx->audio_generation = (rx->audio_generation + 1) & INT_MAX;
+		if (rx->audio_active) {
+			rx->audio_invalid = true;
+			writel(readl(rx->frhdmirx) & ~BIT(31), rx->frhdmirx);
+			stop = rx->audio_substream;
+		}
+		for (i = 0; i < ARRAY_SIZE(t7_hdmirx_audio_control_names); i++) {
+			strscpy(id.name, t7_hdmirx_audio_control_names[i], sizeof(id.name));
+			snd_ctl_notify(rx->audio_component->card->snd_card,
+				       SNDRV_CTL_EVENT_MASK_VALUE, &id);
+		}
+	}
+	mutex_unlock(&rx->audio_lock);
+	/* ALSA takes the stream lock here. Do not invert it with hw_free's
+	 * audio mutex; component removal joins this worker before freeing PCMs.
+	 */
+	if (stop)
+		snd_pcm_stop_xrun(stop);
+	schedule_delayed_work(&rx->audio_work, msecs_to_jiffies(100));
+}
+
+static int t7_hdmirx_audio_control_info(struct snd_kcontrol *control,
+				      struct snd_ctl_elem_info *info)
+{
+	info->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	info->count = 1;
+	info->value.integer.min = 0;
+	info->value.integer.max = control->private_value == 0 ? 192000 :
+		control->private_value == 1 ? 8 : control->private_value == 2 ? INT_MAX : 2;
+	return 0;
+}
+
+static int t7_hdmirx_audio_control_get(struct snd_kcontrol *control,
+				     struct snd_ctl_elem_value *value)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(control);
+	struct t7_hdmirx *rx = dev_get_drvdata(component->dev);
+	unsigned int result;
+
+	mutex_lock(&rx->audio_lock);
+	switch (control->private_value) {
+	case 0:
+		result = rx->audio_format.rate;
+		break;
+	case 1:
+		result = rx->audio_format.channels;
+		break;
+	case 2:
+		result = rx->audio_generation;
+		break;
+	default:
+		result = !rx->audio_format.rate ? 0 : rx->audio_format.pcm ? 1 : 2;
+		break;
+	}
+	mutex_unlock(&rx->audio_lock);
+	value->value.integer.value[0] = result;
+	return 0;
+}
+
+#define HDMIRX_AUDIO_CONTROL(label, index) { \
+	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = label, .private_value = index, \
+	.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE, \
+	.info = t7_hdmirx_audio_control_info, .get = t7_hdmirx_audio_control_get, \
+}
+
+static const struct snd_kcontrol_new t7_hdmirx_audio_controls[] = {
+	HDMIRX_AUDIO_CONTROL("HDMI RX Audio Rate", 0),
+	HDMIRX_AUDIO_CONTROL("HDMI RX Audio Channels", 1),
+	HDMIRX_AUDIO_CONTROL("HDMI RX Audio Generation", 2),
+	HDMIRX_AUDIO_CONTROL("HDMI RX Audio State", 3),
+};
+
+static int t7_hdmirx_audio_component_probe(struct snd_soc_component *component)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(component->dev);
+
+	rx->audio_component = component;
+	schedule_delayed_work(&rx->audio_work, 0);
+	return 0;
+}
+
+static void t7_hdmirx_audio_component_remove(struct snd_soc_component *component)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(component->dev);
+
+	cancel_delayed_work_sync(&rx->audio_work);
+	rx->audio_component = NULL;
+}
+
 static const struct snd_soc_component_driver t7_hdmirx_audio_component = {
 	.name = "t7-hdmirx-audio",
+	.probe = t7_hdmirx_audio_component_probe,
+	.remove = t7_hdmirx_audio_component_remove,
+	.controls = t7_hdmirx_audio_controls,
+	.num_controls = ARRAY_SIZE(t7_hdmirx_audio_controls),
 };
 
 static int t7_hdmirx_audio_register(struct platform_device *pdev, struct t7_hdmirx *rx)
@@ -1383,6 +1642,7 @@ static int t7_hdmirx_audio_register(struct platform_device *pdev, struct t7_hdmi
 
 	if (!audio_test)
 		return 0;
+	INIT_DELAYED_WORK(&rx->audio_work, t7_hdmirx_audio_work);
 	if (!core_test || !phy || resource_size(phy) < 0x90)
 		return -EINVAL;
 	rx->frhdmirx = devm_platform_ioremap_resource_byname(pdev, "frhdmirx");
