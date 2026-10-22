@@ -111,6 +111,7 @@ struct pm_pd_s {
  * @gates: Clk instance used by curr decoder context.
  * @dec_irq: Irq registered.
  * @curr_ctx: Pointer to curr decoder context.
+ * @has_dbus_ctrl: Isolate VDEC through DOS instead of DMC; no local PD writes.
  */
 struct aml_vdec_hw {
 	struct platform_device *pdev;
@@ -123,6 +124,7 @@ struct aml_vdec_hw {
 	struct clk_bulk_data gates[DOS_CLK_MAX];
 	int dec_irq;
 	void *curr_ctx;
+	bool has_dbus_ctrl;
 };
 
 /**
@@ -138,8 +140,8 @@ struct power_manager_s {
 	struct pm_pd_s *pd_data;
 	int (*init)(struct aml_vdec_hw *hw);
 	void (*release)(struct aml_vdec_hw *hw);
-	void (*power_on)(struct aml_vdec_hw *hw, int id);
-	void (*power_off)(struct aml_vdec_hw *hw, int id);
+	int (*power_on)(struct aml_vdec_hw *hw, int id);
+	int (*power_off)(struct aml_vdec_hw *hw, int id);
 	bool (*power_state)(struct aml_vdec_hw *hw, int id);
 };
 
@@ -153,6 +155,6 @@ void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
 void aml_stop_vdec_hw(struct aml_vdec_hw *hw);
 int load_firmware(struct aml_vdec_hw *hw, const char *path);
-void aml_vdec_reset_core(struct aml_vdec_hw *hw);
+int aml_vdec_reset_core(struct aml_vdec_hw *hw);
 
 #endif
