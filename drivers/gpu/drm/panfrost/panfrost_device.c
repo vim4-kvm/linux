@@ -296,8 +296,9 @@ int panfrost_device_init(struct panfrost_device *pfdev)
 		goto out_clk;
 	}
 
-	/* OPP will handle regulators */
-	if (!pfdev->pfdevfreq.opp_of_table_added) {
+	/* OPP handles supplies only when the table describes voltages. */
+	if (!pfdev->pfdevfreq.opp_of_table_added ||
+	    !pfdev->pfdevfreq.opp_regulators) {
 		err = panfrost_regulator_init(pfdev);
 		if (err)
 			goto out_devfreq;

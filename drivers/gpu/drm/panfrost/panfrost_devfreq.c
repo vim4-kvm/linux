@@ -5,6 +5,7 @@
 #include <linux/devfreq.h>
 #include <linux/devfreq_cooling.h>
 #include <linux/nvmem-consumer.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 
@@ -116,6 +117,23 @@ static int panfrost_read_speedbin(struct device *dev)
 	return devm_pm_opp_set_supported_hw(dev, &val, 1);
 }
 
+static bool panfrost_opp_has_voltage(struct device *dev)
+{
+	struct device_node *opp_table __free(device_node) =
+		dev_pm_opp_of_get_opp_desc_node(dev);
+
+	/* Preserve regulator setup for platforms without an OPP v2 table. */
+	if (!opp_table)
+		return true;
+
+	for_each_available_child_of_node_scoped(opp_table, opp) {
+		if (of_property_present(opp, "opp-microvolt"))
+			return true;
+	}
+
+	return false;
+}
+
 int panfrost_devfreq_init(struct panfrost_device *pfdev)
 {
 	int ret;
@@ -140,13 +158,18 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 	if (ret)
 		return ret;
 
-	ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
-	if (ret) {
-		/* Continue if the optional regulator is missing */
-		if (ret != -ENODEV) {
-			if (ret != -EPROBE_DEFER)
-				DRM_DEV_ERROR(dev, "Couldn't set OPP regulators\n");
-			return ret;
+	/* Frequency-only tables leave supply enablement to the device code. */
+	if (panfrost_opp_has_voltage(dev)) {
+		ret = devm_pm_opp_set_regulators(dev, pfdev->comp->supply_names);
+		if (ret) {
+			/* Continue if the optional regulator is missing */
+			if (ret != -ENODEV) {
+				if (ret != -EPROBE_DEFER)
+					DRM_DEV_ERROR(dev, "Couldn't set OPP regulators\n");
+				return ret;
+			}
+		} else {
+			pfdevfreq->opp_regulators = true;
 		}
 	}
 
