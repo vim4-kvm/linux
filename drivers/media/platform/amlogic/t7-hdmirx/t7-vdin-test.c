@@ -1005,7 +1005,11 @@ static int t7_vdin_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *
 static void t7_vdin_fill_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 			     unsigned int width, unsigned int height)
 {
-	unsigned int stride = ALIGN(width * (vdin->nv12 ? 1 : 3), 16);
+	/* VDIN needs 16-byte rows; Wave5 imports NV12 with 32-byte rows.
+	 * Preserve the visible width while sharing the same DMA allocation.
+	 */
+	unsigned int stride = ALIGN(width * (vdin->nv12 ? 1 : 3),
+				    vdin->nv12 ? 32 : 16);
 
 	fmt->fmt.pix = (struct v4l2_pix_format) {
 		.width = width,
