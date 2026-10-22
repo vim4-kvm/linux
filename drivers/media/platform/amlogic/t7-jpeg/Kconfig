@@ -3,6 +3,7 @@ config VIDEO_MESON_T7_JPEG
 	depends on ARCH_MESON || COMPILE_TEST
 	depends on ARM64 && PM
 	select DMA_SHARED_BUFFER
+	select VIDEO_MESON_T7_DOS
 	help
 	  JPEG 4:2:0 hardware encoding of linear NV12/NV21 buffers on T7.
 	  Provides the jpegenc DMA import ABI used by vim4jpegenc.

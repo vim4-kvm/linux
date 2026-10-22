@@ -138,19 +138,19 @@ union param {
 };
 
 struct h264_canvas {
-	u32 canvas_pos;
+	int canvas_pos;
 	int poc;
 };
 
 struct h264_decode_buf_spec {
 	struct v4l2_h264_dpb_entry *dpb;
-	u32 canvas_pos;
+	int canvas_pos;
 	u32 dpb_index;
 	int poc;
 	int col_buf_index;
-	u8 y_canvas_index;
-	u8 u_canvas_index;
-	u8 v_canvas_index;
+	int y_canvas_index;
+	int u_canvas_index;
+	int v_canvas_index;
 	u8 used;
 	u8 long_term_flag;
 	dma_addr_t y_dma_addr;
@@ -278,6 +278,10 @@ static int h264_prepare_input(struct aml_vdec_ctx *ctx)
 	}
 	vb = &src->vb2_buf;
 	payload_size = vb2_get_plane_payload(vb, 0);
+	/* The FIFO write pointer includes padding, which must remain allocated. */
+	if (!payload_size || vb2_plane_size(vb, 0) < VLD_PADDING_SIZE ||
+	    payload_size > vb2_plane_size(vb, 0) - VLD_PADDING_SIZE)
+		return -EINVAL;
 	src_dma = vb2_dma_contig_plane_dma_addr(vb, 0);
 
 	regmap_write(hw->map[DOS_BUS], VLD_MEM_VIFIFO_CONTROL, 0);
@@ -516,15 +520,25 @@ static void h264_config_params(struct aml_vdec_ctx *ctx)
 	config_pps_params(h264_ctx, p_pps_base, pps);
 }
 
-static void config_decode_canvas(struct aml_vdec_hw *hw,
-				 struct h264_decode_buf_spec *buf_spec,
-				 u32 mb_width, u32 mb_height)
+static int config_decode_canvas(struct aml_vdec_hw *hw,
+				struct h264_decode_buf_spec *buf_spec,
+				u32 mb_width, u32 mb_height)
 {
 	int canvas_alloc_result = 0;
 	int blkmode = 0x0;
+	u8 index;
 
-	canvas_alloc_result = meson_canvas_alloc(hw->canvas, &buf_spec->y_canvas_index);
-	canvas_alloc_result = meson_canvas_alloc(hw->canvas, &buf_spec->u_canvas_index);
+	canvas_alloc_result = meson_canvas_alloc(hw->canvas, &index);
+	if (canvas_alloc_result)
+		return canvas_alloc_result;
+	buf_spec->y_canvas_index = index;
+	canvas_alloc_result = meson_canvas_alloc(hw->canvas, &index);
+	if (canvas_alloc_result) {
+		meson_canvas_free(hw->canvas, buf_spec->y_canvas_index);
+		buf_spec->y_canvas_index = -1;
+		return canvas_alloc_result;
+	}
+	buf_spec->u_canvas_index = index;
 	buf_spec->v_canvas_index = buf_spec->u_canvas_index;
 
 	if (!canvas_alloc_result) {
@@ -557,6 +571,7 @@ static void config_decode_canvas(struct aml_vdec_hw *hw,
 		regmap_write(hw->map[DOS_BUS], ANC0_CANVAS_ADDR + (buf_spec->canvas_pos << 2),
 			     spec2canvas(buf_spec));
 	}
+	return 0;
 }
 
 static int allocate_colocate_buf(struct aml_h264_ctx *h264_ctx, int poc)
@@ -1192,7 +1207,7 @@ static void clear_unused_col_buf(struct aml_h264_ctx *h264_ctx,
 	}
 }
 
-static void h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
+static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
 {
 	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->curr_ctx;
 	struct vdec_h264_stateless_ctrl_ref *ctrls = &h264_ctx->ctrl_ref;
@@ -1219,7 +1234,7 @@ static void h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx 
 	h264_ctx->curr_spec.canvas_pos =
 	    allocate_canvas_pos(h264_ctx, decode->top_field_order_cnt);
 	if (h264_ctx->curr_spec.canvas_pos < 0)
-		dev_err(&ctx->dev->plat_dev->dev, "curr_spec.canvas error\n");
+		return -EINVAL;
 
 	if (decode->nal_ref_idc)
 		h264_ctx->curr_spec.col_buf_index =
@@ -1227,6 +1242,8 @@ static void h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx 
 					  decode->top_field_order_cnt);
 	else
 		h264_ctx->curr_spec.col_buf_index = -1;
+	if (decode->nal_ref_idc && h264_ctx->curr_spec.col_buf_index < 0)
+		return -EINVAL;
 	h264_ctx->curr_spec.poc = decode->top_field_order_cnt;
 
 	h264_config_ref_lists(ctx);
@@ -1237,7 +1254,7 @@ static void h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx 
 		struct v4l2_h264_dpb_entry *dpb = &decode->dpb[i];
 
 		if (!(dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE))
-			break;
+			continue;
 
 		buf_spec_l0 = find_spec_by_dpb_index(h264_ctx, i, 0);
 		if (buf_spec_l0) {
@@ -1248,13 +1265,13 @@ static void h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx 
 				dev_err(&ctx->dev->plat_dev->dev,
 					"l0 canvas_pos %d error\n",
 					buf_spec_l0->canvas_pos);
-				continue;
+				return -EINVAL;
 			}
 			vb = vb2_find_buffer(vq, dpb->reference_ts);
 			if (!vb) {
 				dev_err(&ctx->dev->plat_dev->dev,
 					"ref pic for ts %llu lost\n", dpb->reference_ts);
-				continue;
+				return -EINVAL;
 			}
 
 			buf_spec_l0->y_dma_addr =
@@ -1283,13 +1300,13 @@ static void h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx 
 				dev_err(&ctx->dev->plat_dev->dev,
 					"l1 canvas_pos %d error\n",
 					buf_spec_l1->canvas_pos);
-				continue;
+				return -EINVAL;
 			}
 			vb = vb2_find_buffer(vq, dpb->reference_ts);
 			if (!vb) {
 				dev_err(&ctx->dev->plat_dev->dev,
 					"ref pic for ts %llu lost\n", dpb->reference_ts);
-				continue;
+				return -EINVAL;
 			}
 
 			buf_spec_l1->y_dma_addr =
@@ -1318,6 +1335,7 @@ static void h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx 
 				&buf_spec_l1->c_dma_addr);
 		}
 	}
+	return 0;
 }
 
 static int get_poc_by_canvas_pos(struct aml_h264_ctx *h264_ctx, int canvas_pos)
@@ -1582,29 +1600,36 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 	return 0;
 }
 
-static void get_canvas_index(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
+static int get_canvas_index(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
 {
 	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->curr_ctx;
-	int i;
+	int i, ret;
 	struct h264_decode_buf_spec *buf;
 
-	config_decode_canvas(hw, &h264_ctx->curr_spec,
-			     h264_ctx->mb_width, h264_ctx->mb_height);
+	ret = config_decode_canvas(hw, &h264_ctx->curr_spec,
+				   h264_ctx->mb_width, h264_ctx->mb_height);
+	if (ret)
+		return ret;
 	if (h264_ctx->list_size[0] > 0) {
 		for (i = 0; i < h264_ctx->list_size[0]; i++) {
 			buf = &h264_ctx->ref_list0[i];
-			config_decode_canvas(hw, buf, h264_ctx->mb_width,
-					     h264_ctx->mb_height);
+			ret = config_decode_canvas(hw, buf, h264_ctx->mb_width,
+						   h264_ctx->mb_height);
+			if (ret)
+				return ret;
 		}
 	}
 
 	if (h264_ctx->list_size[1] > 0) {
 		for (i = 0; i < h264_ctx->list_size[1]; i++) {
 			buf = &h264_ctx->ref_list1[i];
-			config_decode_canvas(hw, buf, h264_ctx->mb_width,
-					     h264_ctx->mb_height);
+			ret = config_decode_canvas(hw, buf, h264_ctx->mb_width,
+						   h264_ctx->mb_height);
+			if (ret)
+				return ret;
 		}
 	}
+	return 0;
 }
 
 static void release_canvas_index(struct aml_vdec_hw *hw,
@@ -1736,19 +1761,24 @@ static irqreturn_t h264_threaded_isr_func(int irq, void *priv)
 				h264_ctx->dpb_param.l.data[i + ii] = p[i + 3 - ii];
 		save_reg_status(h264_ctx);
 		h264_get_slice_params(h264_ctx);
+		if (h264_ctx->mslice.first_mb_in_slice >= h264_ctx->mb_total ||
+		    h264_ctx->mslice.num_ref_idx_l0 > V4L2_H264_NUM_DPB_ENTRIES ||
+		    h264_ctx->mslice.num_ref_idx_l1 > V4L2_H264_NUM_DPB_ENTRIES)
+			goto header_error;
+		/* First T7 experiment never recycles canvases between slice IRQs. */
+		if (hw->has_dbus_ctrl && h264_ctx->mslice.first_mb_in_slice)
+			goto header_error;
 		if (h264_ctx->mslice.first_mb_in_slice != 0)
 			h264_release_decode_spec(hw, ctx);
 
-		h264_config_decode_spec(hw, ctx);
+		if (h264_config_decode_spec(hw, ctx))
+			goto header_error;
 		h264_reorder_reflists(h264_ctx);
-		get_canvas_index(hw, ctx);
+		if (get_canvas_index(hw, ctx))
+			goto header_error;
 
-		if (h264_config_decode_buf(hw, ctx) < 0) {
-			h264_release_decode_spec(hw, ctx);
-			ctx->int_cond = 1;
-			wake_up_interruptible(&ctx->queue);
-			goto irq_handled;
-		}
+		if (h264_config_decode_buf(hw, ctx) < 0)
+			goto header_error;
 		if (h264_ctx->new_pic_flag == 1) {
 			regmap_write(hw->map[DOS_BUS], DPB_STATUS_REG, H264_ACTION_DECODE_NEWPIC);
 			dev_dbg(&dev->plat_dev->dev, "action decode new pic\n");
@@ -1759,21 +1789,23 @@ static irqreturn_t h264_threaded_isr_func(int irq, void *priv)
 		}
 		break;
 	case H264_SLICE_DATA_DONE:
-		h264_release_decode_spec(hw, ctx);
 		h264_ctx->decode_pic_count++;
+		ctx->decode_result = 0;
 		ctx->int_cond = 1;
-		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx,
-						 VB2_BUF_STATE_DONE);
 		wake_up_interruptible(&ctx->queue);
 		break;
 	default:
-		h264_release_decode_spec(hw, ctx);
+		ctx->decode_result = -EIO;
 		ctx->int_cond = 1;
-		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx,
-						 VB2_BUF_STATE_ERROR);
 		wake_up_interruptible(&ctx->queue);
 		break;
 	}
+	goto irq_handled;
+header_error:
+	/* Keep every allocated canvas until the worker confirms DMA stop. */
+	ctx->decode_result = -EIO;
+	ctx->int_cond = 1;
+	wake_up_interruptible(&ctx->queue);
 irq_handled:
 	return IRQ_HANDLED;
 }
@@ -1816,7 +1848,9 @@ static int h264_restore_hw_ctx(struct aml_vdec_ctx *ctx)
 	regmap_write(hw->map[DOS_BUS], LMEM_DUMP_ADR, h264_ctx->lmem_phy_addr);
 	regmap_write(hw->map[DOS_BUS], FRAME_COUNTER_REG, h264_ctx->decode_pic_count);
 	regmap_write(hw->map[DOS_BUS], AV_SCRATCH_8, h264_ctx->workspace_offset);
-	regmap_write(hw->map[DOS_BUS], AV_SCRATCH_G, h264_ctx->mc_cpu_paddr);
+	/* The secure loader owns scratch G and its swap area on T7. */
+	if (!hw->has_dbus_ctrl)
+		regmap_write(hw->map[DOS_BUS], AV_SCRATCH_G, h264_ctx->mc_cpu_paddr);
 
 	regmap_write(hw->map[DOS_BUS], AV_SCRATCH_F,
 		     ((h264_ctx->save_avscratch_f & 0xffffffc3) | (1 << 4)));
@@ -1863,11 +1897,23 @@ static int aml_h264_get_stateless_ctrl_ref(struct aml_h264_ctx *h264_ctx)
 			V4L2_CID_STATELESS_H264_SPS);
 	if (WARN_ON(!ctrls->sps))
 		return -EINVAL;
+	if (ctrls->sps->bit_depth_luma_minus8 ||
+	    ctrls->sps->bit_depth_chroma_minus8 ||
+	    ctrls->sps->chroma_format_idc != 1 ||
+	    !(ctrls->sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) ||
+	    ctrls->sps->max_num_ref_frames > V4L2_H264_NUM_DPB_ENTRIES ||
+	    (ctrls->sps->pic_width_in_mbs_minus1 + 1) * 16 > ctx->pic_info.coded_width ||
+	    (ctrls->sps->pic_height_in_map_units_minus1 + 1) * 16 > ctx->pic_info.coded_height)
+		return -EINVAL;
 
 	ctrls->pps =
 		(struct v4l2_ctrl_h264_pps *)aml_h264_get_ctrl(&ctx->ctrl_handler,
 			V4L2_CID_STATELESS_H264_PPS);
 	if (WARN_ON(!ctrls->pps))
+		return -EINVAL;
+	if (ctrls->pps->seq_parameter_set_id != ctrls->sps->seq_parameter_set_id ||
+	    ctrls->pps->num_ref_idx_l0_default_active_minus1 +
+	    ctrls->pps->num_ref_idx_l1_default_active_minus1 + 2 > V4L2_H264_NUM_DPB_ENTRIES)
 		return -EINVAL;
 
 	ctrls->decode =
@@ -1922,8 +1968,10 @@ static int aml_h264_load_fw_ext(void *priv, const u8 *data, u32 len)
 		return 0;
 
 	dec_hw = vdec_get_hw(ctx->dev);
-	if (!dec_hw)
-		return -1;
+	if (!dec_hw) {
+		kfree(h264_ctx);
+		return -ENODEV;
+	}
 
 	if (len > MC_TOTAL_SIZE) {
 		dev_info(dec_hw->dev, "size of mc_cpu_fw id invalid\n");
@@ -1950,7 +1998,7 @@ int aml_h264_init(void *priv)
 	struct aml_vdec_ctx *ctx = (struct aml_vdec_ctx *)priv;
 	struct aml_vdec_hw *dec_hw;
 	struct aml_h264_ctx *h264_ctx;
-	int ret = 0;
+	int i, ret = 0;
 
 	h264_ctx = kzalloc_obj(*h264_ctx, GFP_KERNEL);
 	if (!h264_ctx)
@@ -1964,7 +2012,23 @@ int aml_h264_init(void *priv)
 	h264_ctx->mc_cpu_loaded = false;
 	dec_hw->hw_ops.irq_handler = h264_isr;
 	dec_hw->hw_ops.irq_threaded_func = h264_threaded_isr_func;
-	dec_hw->hw_ops.load_firmware_ex = aml_h264_load_fw_ext;
+	dec_hw->hw_ops.load_firmware_ex =
+		dec_hw->has_dbus_ctrl ? NULL : aml_h264_load_fw_ext;
+	h264_ctx->curr_spec.y_canvas_index = -1;
+	h264_ctx->curr_spec.u_canvas_index = -1;
+	h264_ctx->curr_spec.v_canvas_index = -1;
+	for (i = 0; i < ARRAY_SIZE(h264_ctx->ref_list0); i++) {
+		h264_ctx->ref_list0[i].y_canvas_index = -1;
+		h264_ctx->ref_list0[i].u_canvas_index = -1;
+		h264_ctx->ref_list0[i].v_canvas_index = -1;
+		h264_ctx->ref_list1[i].y_canvas_index = -1;
+		h264_ctx->ref_list1[i].u_canvas_index = -1;
+		h264_ctx->ref_list1[i].v_canvas_index = -1;
+		h264_ctx->ref_canvas[i].poc = INVALID_POC;
+		h264_ctx->ref_canvas[i].canvas_pos = -1;
+	}
+	for (i = 0; i < ARRAY_SIZE(h264_ctx->colocated_buf_poc); i++)
+		h264_ctx->colocated_buf_poc[i] = INVALID_POC;
 
 	h264_ctx->lmem_addr = dma_alloc_coherent(dec_hw->dev, LMEM_DUMP_SIZE,
 						 &h264_ctx->lmem_phy_addr,
@@ -2017,10 +2081,16 @@ void aml_h264_exit(void *priv)
 		return;
 	}
 	dec_hw = vdec_get_hw(ctx->dev);
+	if (dec_hw->faulted)
+		return;
 	h264_ctx->param_set = 0;
 
-	if (ctx->dos_clk_en)
-		aml_stop_vdec_hw(dec_hw);
+	if (ctx->dos_clk_en && aml_stop_vdec_hw(dec_hw)) {
+		aml_vdec_fault(ctx);
+		return;
+	}
+	ctx->dos_clk_en = false;
+	aml_h264_finish(ctx);
 
 	if (h264_ctx->collated_cma_vaddr) {
 		dma_free_coherent(dec_hw->dev, h264_ctx->col_buf_alloc_size,
@@ -2067,7 +2137,6 @@ int aml_h264_dec_run(void *priv)
 	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)ctx->codec_priv;
 	struct aml_vdec_hw *dec_hw = vdec_get_hw(ctx->dev);
 	int ret = -1;
-	int i;
 
 	ret = aml_h264_get_stateless_ctrl_ref(h264_ctx);
 	if (ret < 0) {
@@ -2076,12 +2145,15 @@ int aml_h264_dec_run(void *priv)
 	}
 
 	h264_ctx->new_pic_flag = 1;
+	ctx->decode_result = -EIO;
 	h264_config_params(ctx);
 
-	if (h264_prepare_input(ctx) < 0)
+	ret = h264_prepare_input(ctx);
+	if (ret)
 		return ret;
 
-	if (alloc_colocate_cma(h264_ctx, ctx) < 0)
+	ret = alloc_colocate_cma(h264_ctx, ctx);
+	if (ret)
 		return ret;
 
 	h264_restore_hw_ctx(ctx);
@@ -2104,26 +2176,30 @@ int aml_h264_dec_run(void *priv)
 
 	regmap_write(dec_hw->map[DOS_BUS], DPB_STATUS_REG, H264_ACTION_SEARCH_HEAD);
 
-	ret = wait_event_interruptible_timeout(ctx->queue, ctx->int_cond,
+	ret = wait_event_interruptible_timeout(ctx->queue, READ_ONCE(ctx->int_cond),
 					       msecs_to_jiffies(DECODER_TIMEOUT_MS));
 	ctx->int_cond = 0;
 	if (!ret) {
-		ret = -1;
+		ret = -ETIMEDOUT;
 		dev_err(&ctx->dev->plat_dev->dev, "dec timeout=%u\n", DECODER_TIMEOUT_MS);
-		for (i = 0; i < 16; i++) {	/* 16 : show ucode PC 16 times when timeout */
-			dev_info(&ctx->dev->plat_dev->dev, "decoder timeout, pc 0x%x\n",
-				 read_dos_reg(dec_hw, MPC_E));
-			usleep_range(10, 20);
-		}
-		h264_release_decode_spec(dec_hw, ctx);
 	} else if (-ERESTARTSYS == ret) {
 		ret = -1;
-		h264_release_decode_spec(dec_hw, ctx);
 		dev_err(&ctx->dev->plat_dev->dev, "dec inter fail\n");
 	}
 
-	aml_stop_vdec_hw(dec_hw);
-	h264_ctx->init_flag = 0;
+	if (ret > 0)
+		ret = ctx->decode_result;
 
 	return ret;
+}
+
+void aml_h264_finish(void *priv)
+{
+	struct aml_vdec_ctx *ctx = priv;
+	struct aml_h264_ctx *h264_ctx = ctx->codec_priv;
+
+	if (!h264_ctx)
+		return;
+	h264_release_decode_spec(ctx->dev->dec_hw, ctx);
+	h264_ctx->init_flag = 0;
 }

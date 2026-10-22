@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Manual module opt-in is still required; the normal DTB remains disabled. */
+#include "amlogic-t7-a311d2-khadas-vim4-audio-test.dts"
+
+&vdec {
+	status = "okay";
+};

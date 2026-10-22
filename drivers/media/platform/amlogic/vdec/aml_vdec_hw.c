@@ -3,6 +3,7 @@
  * Copyright (C) 2025 Amlogic, Inc. All rights reserved
  */
 
+#include <linux/arm-smccc.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/of.h>
@@ -72,13 +73,23 @@ int aml_vdec_reset_core(struct aml_vdec_hw *hw)
 		regmap_update_bits(hw->map[DMC_BUS], 0x0, mask, 0);
 		usleep_range(60, 70);
 	}
-	regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0,
-		     (1 << 3) | (1 << 4) | (1 << 5) | (1 << 7) |
-		     (1 << 8) | (1 << 9));
-	regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, 0);
-	regmap_update_bits(hw->map[DOS_BUS], VDEC_ASSIST_MMC_CTRL1, 1 << 3, 0);
-	regmap_update_bits(hw->map[DOS_BUS], MDEC_PIC_DC_MUX_CTRL, 1 << 31, 0);
-	regmap_write(hw->map[DOS_BUS], MDEC_EXTIF_CFG1, 0);
+	ret = regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0,
+			   (1 << 3) | (1 << 4) | (1 << 5) | (1 << 7) |
+			   (1 << 8) | (1 << 9));
+	if (ret)
+		return ret;
+	ret = regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, 0);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(hw->map[DOS_BUS], VDEC_ASSIST_MMC_CTRL1, 1 << 3, 0);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(hw->map[DOS_BUS], MDEC_PIC_DC_MUX_CTRL, 1 << 31, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(hw->map[DOS_BUS], MDEC_EXTIF_CFG1, 0);
+	if (ret)
+		return ret;
 
 	if (hw->has_dbus_ctrl)
 		return regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_DBUS_DISABLE, 0);
@@ -104,44 +115,74 @@ void aml_start_vdec_hw(struct aml_vdec_hw *hw)
 	regmap_write(hw->map[DOS_BUS], MPSR, 0x0001);
 }
 
-void aml_stop_vdec_hw(struct aml_vdec_hw *hw)
+int aml_stop_vdec_hw(struct aml_vdec_hw *hw)
 {
 	u32 reg_val = 0;
+	unsigned int i;
 	int ret;
 
-	regmap_write(hw->map[DOS_BUS], MPSR, 0);
-	regmap_write(hw->map[DOS_BUS], CPSR, 0);
-
-	ret = read_poll_timeout_atomic(read_dos_reg, reg_val,
-				       !(reg_val & 0x8000),
-				       10, 100000, true,
-				       hw, IMEM_DMA_CTRL);
-
-	ret = read_poll_timeout_atomic(read_dos_reg, reg_val,
-				       !(reg_val & 0x8000),
-				       10, 100000, true,
-				       hw, LMEM_DMA_CTRL);
-
-	ret = read_poll_timeout_atomic(read_dos_reg, reg_val,
-				       !(reg_val & 0xfff),
-				       10, 800000, true,
-				       hw, WRRSP_LMEM);
+	ret = regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_MASK, 0);
 	if (ret)
-		dev_err(hw->dev, "%s, ctrl %x, rsp %x, pc %x status %x,%x\n",
-			__func__, read_dos_reg(hw, LMEM_DMA_CTRL),
-			read_dos_reg(hw, WRRSP_LMEM), read_dos_reg(hw, MPC_E),
-			read_dos_reg(hw, AV_SCRATCH_J), read_dos_reg(hw, AV_SCRATCH_9));
+		return ret;
+	synchronize_irq(hw->dec_irq);
+	ret = regmap_write(hw->map[DOS_BUS], MPSR, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(hw->map[DOS_BUS], CPSR, 0);
+	if (ret)
+		return ret;
 
-	regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &reg_val);
-	regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &reg_val);
-	regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &reg_val);
+	ret = regmap_read_poll_timeout(hw->map[DOS_BUS], IMEM_DMA_CTRL,
+				       reg_val, !(reg_val & BIT(15)), 10, 100000);
+	if (ret)
+		return ret;
 
-	regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, (1 << 12) | (1 << 11));
-	regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, 0);
+	ret = regmap_read_poll_timeout(hw->map[DOS_BUS], LMEM_DMA_CTRL,
+				       reg_val, !(reg_val & BIT(15)), 10, 100000);
+	if (ret)
+		return ret;
 
-	regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &reg_val);
-	regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &reg_val);
-	regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &reg_val);
+	ret = regmap_read_poll_timeout(hw->map[DOS_BUS], WRRSP_LMEM,
+				       reg_val, !(reg_val & 0xfff), 10, 12500);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < 3; i++) {
+		ret = regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &reg_val);
+		if (ret)
+			return ret;
+	}
+
+	ret = regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, BIT(12) | BIT(11));
+	if (ret)
+		return ret;
+	ret = regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, 0);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < 3; i++) {
+		ret = regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &reg_val);
+		if (ret)
+			return ret;
+	}
+
+	/*
+	 * T7 has no DMC request bit. Keep DBUS isolated after stopping the
+	 * CPUs; only the next reset may re-enable it. Failure to acknowledge
+	 * isolation is not permission to return vb2 or codec DMA memory.
+	 */
+	if (hw->has_dbus_ctrl) {
+		ret = regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_DBUS_DISABLE, 0xffff);
+		if (ret)
+			return ret;
+		ret = regmap_read_poll_timeout(hw->map[DOS_BUS], VDEC_ASSIST_DBUS_DISABLE,
+					       reg_val, reg_val == 0xffff, 1, 100000);
+		if (ret)
+			return ret;
+		for (i = 0; i < 200; i++)
+			cpu_relax();
+	}
+	return 0;
 }
 
 int load_firmware(struct aml_vdec_hw *hw, const char *path)
@@ -153,6 +194,22 @@ int load_firmware(struct aml_vdec_hw *hw, const char *path)
 	int fw_head_len;
 	ulong timeout;
 	int ret;
+
+	if (hw->has_dbus_ctrl) {
+		struct arm_smccc_res result;
+
+		/* Vendor tee_load_video_fw(H264_MULTI=15, VDEC_LEGENCY=0). */
+		arm_smccc_smc(0xb200000f, 15, 0, 0, 0, 0, 0, 0, &result);
+		if ((s32)result.a0) {
+			dev_err(dev, "secure H264 load failed: %#lx\n", result.a0);
+			return -EIO;
+		}
+		ret = regmap_read(hw->map[DOS_BUS], AV_SCRATCH_G, &hw->secure_swap);
+		if (ret)
+			return ret;
+		dev_dbg(dev, "secure H264 loaded, scratch G=%#x\n", hw->secure_swap);
+		return 0;
+	}
 
 	ret = request_firmware(&fw, path, dev);
 	if (ret < 0) {
@@ -261,7 +318,7 @@ static int pm_vdec_power_domain_init(struct aml_vdec_hw *hw)
 		}
 
 		pd[i].link = device_link_add(hw->dev, pd[i].dev,
-					     DL_FLAG_PM_RUNTIME |
+					     (hw->has_dbus_ctrl ? 0 : DL_FLAG_PM_RUNTIME) |
 					     DL_FLAG_STATELESS);
 		if (IS_ERR_OR_NULL(pd[i].link)) {
 			dev_err(hw->dev, "Adding %s device link failed!\n", pd[i].name);
@@ -482,11 +539,56 @@ out:
 
 int vdec_enable(struct aml_vdec_hw *hw)
 {
+	int ret;
+
+	if (hw->has_dbus_ctrl) {
+		if (hw->faulted)
+			return -EIO;
+		ret = clk_set_rate(hw->gates[VDEC_MUX].clk, 500000000);
+		if (ret)
+			return ret;
+		ret = clk_bulk_prepare_enable(2, hw->gates);
+		if (ret)
+			return ret;
+		ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_1].dev);
+		if (ret < 0) {
+			clk_bulk_disable_unprepare(2, hw->gates);
+			return ret;
+		}
+		hw->powered = true;
+		dos_enable(hw);
+		regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_MASK, 0);
+		regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_CLR_REG, 1);
+		enable_irq(hw->dec_irq);
+		return 0;
+	}
 	return vdec_poweron(hw, VDEC_1);
 }
 
 int vdec_disable(struct aml_vdec_hw *hw)
 {
+	int ret;
+
+	if (hw->has_dbus_ctrl) {
+		if (hw->faulted)
+			return -EIO;
+		if (!hw->powered)
+			return 0;
+		regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_MASK, 0);
+		disable_irq(hw->dec_irq);
+		/* No automatic consumer link may put the domain before clocks. */
+		clk_bulk_disable_unprepare(2, hw->gates);
+		ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_1].dev);
+		if (ret < 0) {
+			if (clk_bulk_prepare_enable(2, hw->gates))
+				dev_crit(hw->dev, "VDEC clock recovery failed; reset required\n");
+			/* Power-off failed: do not issue any further DOS accesses. */
+			hw->powered = false;
+			return ret;
+		}
+		hw->powered = false;
+		return 0;
+	}
 	return vdec_poweroff(hw, VDEC_1);
 }
 
@@ -570,7 +672,8 @@ int dev_request_hw_resources(void *priv)
 		return hw->dec_irq;
 	}
 	ret = devm_request_threaded_irq(&pdev->dev, hw->dec_irq, vdec_irq_handler,
-					vdec_threaded_isr_handler, IRQF_ONESHOT,
+					vdec_threaded_isr_handler,
+					IRQF_ONESHOT | (hw->has_dbus_ctrl ? IRQF_NO_AUTOEN : 0),
 					"vdec-1", dev);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to install irq %d (%d)",
@@ -604,14 +707,15 @@ int dev_request_hw_resources(void *priv)
 			(unsigned long long)res.end, reg_base[i]);
 	}
 	hw->canvas = meson_canvas_get(&pdev->dev);
-	if (IS_ERR(&pdev->dev))
-		return PTR_ERR(&pdev->dev);
+	if (IS_ERR(hw->canvas))
+		return PTR_ERR(hw->canvas);
 
 	hw->pm = &pm[dev->pvdec_data->power_type];
 	if (hw->pm->init) {
 		ret = hw->pm->init(hw);
 		if (ret < 0) {
 			dev_err(&pdev->dev, "power mgr init failed!\n");
+			hw->pm->release(hw);
 			return ret;
 		}
 	}
@@ -619,6 +723,7 @@ int dev_request_hw_resources(void *priv)
 	ret = vdec_clock_gate_init(hw);
 	if (ret) {
 		dev_err(&pdev->dev, "clk bulk init failed!\n");
+		hw->pm->release(hw);
 		return ret;
 	}
 

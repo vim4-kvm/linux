@@ -8,6 +8,7 @@ config VIDEO_WAVE_VPU
 	select VIDEOBUF2_VMALLOC
 	select V4L2_MEM2MEM_DEV
 	select GENERIC_ALLOCATOR
+	select VIDEO_MESON_T7_DOS
 	help
 	  Chips&Media stateful encoder and decoder driver.
 	  The driver supports HEVC and H264 formats.
