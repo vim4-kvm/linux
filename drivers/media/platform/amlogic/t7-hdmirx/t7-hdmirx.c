@@ -1515,7 +1515,6 @@ static void t7_hdmirx_audio_work(struct work_struct *work)
 	struct t7_hdmirx *rx = container_of(to_delayed_work(work), struct t7_hdmirx, audio_work);
 	struct t7_hdmirx_audio_format format = { 0 };
 	struct snd_pcm_substream *stop = NULL;
-	struct snd_ctl_elem_id id = { .iface = SNDRV_CTL_ELEM_IFACE_MIXER };
 	unsigned int i;
 	int ret;
 
@@ -1556,9 +1555,8 @@ static void t7_hdmirx_audio_work(struct work_struct *work)
 			stop = rx->audio_substream;
 		}
 		for (i = 0; i < ARRAY_SIZE(t7_hdmirx_audio_control_names); i++) {
-			strscpy(id.name, t7_hdmirx_audio_control_names[i], sizeof(id.name));
-			snd_ctl_notify(rx->audio_component->card->snd_card,
-				       SNDRV_CTL_EVENT_MASK_VALUE, &id);
+			snd_soc_component_notify_control(rx->audio_component,
+						 t7_hdmirx_audio_control_names[i]);
 		}
 	}
 out:
