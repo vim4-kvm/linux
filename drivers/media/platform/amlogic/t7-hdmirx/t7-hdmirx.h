@@ -32,5 +32,7 @@ void t7_hdmirx_stream_put(struct device *dev);
 bool t7_hdmirx_stream_is_hdr(struct device *dev);
 bool t7_hdmirx_stream_is_yuv(struct device *dev);
 bool t7_hdmirx_stream_is_yuv444(struct device *dev);
+bool t7_hdmirx_stream_is_full_range(struct device *dev);
+bool t7_hdmirx_stream_is_bt601(struct device *dev);
 
 #endif

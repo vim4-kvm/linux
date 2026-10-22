@@ -73,6 +73,43 @@ struct file { void *data; };
 static void *video_drvdata(struct file *file) { return file->data; }
 '''
 checks = r'''
+static const struct v4l2_dv_timings modes[] = {
+    V4L2_DV_BT_CEA_640X480P59_94,
+    { .type=V4L2_DV_BT_656_1120, .bt={.width=720,.height=400,
+        .polarities=V4L2_DV_VSYNC_POS_POL,.pixelclock=28322000,
+        .hfrontporch=18,.hsync=108,.hbackporch=54,
+        .vfrontporch=12,.vsync=2,.vbackporch=35} },
+    V4L2_DV_BT_DMT_800X600P60, V4L2_DV_BT_DMT_1024X768P60,
+    V4L2_DV_BT_CEA_1280X720P60, V4L2_DV_BT_CEA_1280X720P50,
+    V4L2_DV_BT_DMT_1280X1024P60, V4L2_DV_BT_DMT_1366X768P60,
+    V4L2_DV_BT_DMT_1440X900P60_RB, V4L2_DV_BT_DMT_1600X900P60_RB,
+    V4L2_DV_BT_DMT_1680X1050P60_RB, V4L2_DV_BT_CEA_1920X1080P24,
+    V4L2_DV_BT_CEA_1920X1080P25, V4L2_DV_BT_CEA_1920X1080P30,
+    V4L2_DV_BT_CEA_1920X1080P50, V4L2_DV_BT_DMT_1920X1200P60_RB,
+    { .type=V4L2_DV_BT_656_1120, .bt={.width=2560,.height=1440,
+        .polarities=V4L2_DV_HSYNC_POS_POL,.pixelclock=241500000,
+        .hfrontporch=48,.hsync=32,.hbackporch=80,
+        .vfrontporch=3,.vsync=5,.vbackporch=33} },
+    V4L2_DV_BT_CEA_3840X2160P30, V4L2_DV_BT_CEA_3840X2160P60,
+};
+
+static void measured_mode(const struct v4l2_dv_timings *t) {
+    const struct v4l2_bt_timings *b=&t->bt;
+    unsigned int ht=b->width+b->hfrontporch+b->hsync+b->hbackporch;
+    unsigned int vt=b->height+b->vfrontporch+b->vsync+b->vbackporch;
+    memset(core,0,sizeof(core));
+    core[T7_RX_COR_FRAME_STATUS]=(b->polarities&V4L2_DV_HSYNC_POS_POL?BIT(0):0) |
+        (b->polarities&V4L2_DV_VSYNC_POS_POL?BIT(1):0);
+    word(T7_RX_COR_WIDTH,b->width); word(T7_RX_COR_HEIGHT,b->height);
+    word(T7_RX_COR_HSYNC_LOW,(b->polarities&V4L2_DV_HSYNC_POS_POL)?ht-b->hsync:b->hsync);
+    word(T7_RX_COR_HSYNC_HIGH,(b->polarities&V4L2_DV_HSYNC_POS_POL)?b->hsync:ht-b->hsync);
+    word(T7_RX_COR_HFRONT,b->hfrontporch); word(T7_RX_COR_HBACK,b->hbackporch);
+    word(T7_RX_COR_VSYNC_LOW,(b->polarities&V4L2_DV_VSYNC_POS_POL)?vt-b->vsync:b->vsync);
+    word(T7_RX_COR_VSYNC_HIGH,(b->polarities&V4L2_DV_VSYNC_POS_POL)?b->vsync:vt-b->vsync);
+    word(T7_RX_COR_VFRONT,b->vfrontporch); word(T7_RX_COR_VBACK,b->vbackporch);
+    period((u64)166666664*ht*vt/b->pixelclock);
+}
+
 static void setup(bool uhd, unsigned int ticks) {
     memset(core,0,sizeof(core)); memset(top,0,sizeof(top));
     u32 value = BIT(21); memcpy(top + T7_RX_TOP_HPD_PWR5V,&value,4);
@@ -139,6 +176,68 @@ int main(void) {
     assert(t7_vdin_get_parm(&file,NULL,&parm)==-ENOLINK);
     parm.type=V4L2_BUF_TYPE_VIDEO_OUTPUT;
     assert(t7_vdin_get_parm(&file,NULL,&parm)==-EINVAL);
+    setup(false,2777778); rx.dynamic_modes=true; rx.uhd60=false; link.ready=true;
+    for (unsigned int i=0;i<ARRAY_SIZE(modes);i++) {
+        measured_mode(&modes[i]);
+        assert(!t7_hdmirx_query_timings(&dev,&timing,&interval));
+        const struct v4l2_bt_timings *a=&modes[i].bt,*b=&timing.bt;
+        assert(a->width==b->width && a->height==b->height);
+        assert(a->hsync==b->hsync && a->vsync==b->vsync && a->polarities==b->polarities);
+        assert(a->hfrontporch==b->hfrontporch && a->hbackporch==b->hbackporch);
+        assert(a->vfrontporch==b->vfrontporch && a->vbackporch==b->vbackporch);
+        assert(b->pixelclock>=a->pixelclock-1000 && b->pixelclock<=a->pixelclock+1000);
+        t7_hdmirx_read_measurement(&rx,&rx.lease_mode);
+        assert(!t7_hdmirx_read_color(&rx,&rx.lease_color)); link.users=1;
+        assert(!t7_hdmirx_video_status(&rx));
+        period(rx.lease_mode.ticks+1); assert(!t7_hdmirx_video_status(&rx));
+        period((u64)rx.lease_mode.ticks*1001/1000);
+        assert(t7_hdmirx_video_status(&rx)==-ENOLINK);
+        link.users=0;
+        printf("Measured mode %ux%u pixelclock=%llu passed\n",b->width,b->height,
+               (unsigned long long)b->pixelclock);
+    }
+    measured_mode(&modes[0]); word(T7_RX_COR_HBACK,1);
+    assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-ERANGE);
+    measured_mode(&modes[0]); core[T7_RX_COR_FRAME_STATUS]|=BIT(2);
+    assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-ERANGE);
+    measured_mode(&modes[0]); period_reads=0; change_read=2; changed_period=1234567;
+    assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-EAGAIN);
+    change_read=0;
+    for (unsigned int space=0;space<4;space++)
+        for (unsigned int depth=4;depth<=6;depth++)
+            for (unsigned int full=0;full<2;full++)
+                for (unsigned int c=1;c<=2;c++) {
+        measured_mode(&modes[13]);
+        u32 top_color=space<<20; memcpy(top+T7_RX_TOP_VID_STAT,&top_color,4);
+        core[T7_RX_COR_COLOR_DEPTH]=depth;
+        core[T7_RX_COR_AUDIO_PACKET]=1;
+        u8 *avi=core+T7_RX_COR_AVI_PACKET;
+        avi[0]=0x82;avi[1]=2;avi[2]=13;avi[4]=space<<5;avi[5]=c<<6;
+        avi[6]=space?0:(full?2:1)<<2;avi[8]=space?full<<6:0;
+        for (unsigned int j=0;j<17;j++) if(j!=3)avi[3]-=avi[j];
+        if (space==3) {
+            for (unsigned int r=T7_RX_COR_WIDTH;r<=T7_RX_COR_HBACK;r+=2)
+                if (r!=T7_RX_COR_HEIGHT)word(r,t7_hdmirx_core_read16(&rx,r)/2);
+        }
+        struct t7_hdmirx_color color;
+        assert(!t7_hdmirx_read_color(&rx,&color));
+        assert(color.space==space && color.depth==(depth==4?8:depth==5?10:12) && color.full==full);
+        assert(!t7_hdmirx_query_timings(&dev,&timing,&interval));
+        assert(timing.bt.width==1920 && timing.bt.height==1080);
+        assert(timing.bt.pixelclock>74249000 && timing.bt.pixelclock<74251000);
+        rx.lease_color=color;rx.lease_yuv=space!=0;rx.lease_420=space==3;
+        t7_hdmirx_read_measurement(&rx,&rx.lease_mode);link.users=1;
+        assert(!t7_hdmirx_video_status(&rx));
+        core[T7_RX_COR_COLOR_DEPTH]=depth==4?5:4;
+        assert(t7_hdmirx_video_status(&rx)==-ENOLINK);link.users=0;
+    }
+    u8 *avi=core+T7_RX_COR_AVI_PACKET;
+    avi[5]=3<<6;avi[3]=0;
+    for (unsigned int j=0;j<17;j++)if(j!=3)avi[3]-=avi[j];
+    struct t7_hdmirx_color color;
+    assert(t7_hdmirx_read_color(&rx,&color)==-ERANGE); /* Unmapped HLG/2020. */
+    avi[5]^=1; assert(t7_hdmirx_read_color(&rx,&color)==-ERANGE);
+    puts("RGB/444/422/420, 8/10/12-bit, range/601/709 and unsupported HDR guards passed");
     puts("Measured timing ioctls: UHD/FHD, fractional rate, torn counter, loss, unsupported modes passed");
 }
 '''

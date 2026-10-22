@@ -26,8 +26,10 @@ prefix = r'''
 #endif
 typedef uint8_t u8;
 typedef uint32_t u32;
+typedef uint64_t u64;
 #define __iomem
 #define BIT(n) (1U << (n))
+#define GENMASK(h,l) ((~0U >> (31-(h))) & (~0U << (l)))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define READ_ONCE(value) (value)
 #define WRITE_ONCE(place, value) ((place) = (value))
@@ -55,6 +57,16 @@ static unsigned int profile_changes;
 static u32 meter_reset;
 static u32 cable_hz;
 static struct t7_hdmirx receiver;
+static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *c) {
+    (void)rx; *c=(struct t7_hdmirx_color){.depth=8,.full=1}; return 0;
+}
+static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
+                             struct t7_hdmirx_measurement *m) {
+    (void)rx; (void)yuv420;
+    *m = (struct t7_hdmirx_measurement) { .width=hdmi2?3840:1920,
+        .height=hdmi2?2160:1080, .ticks=2777778 };
+    return 0;
+}
 static void *dev_get_drvdata(struct device *dev) { return dev->data; }
 static void mutex_lock(struct mutex *lock) { assert(!lock->held); lock->held = true; }
 static void mutex_unlock(struct mutex *lock) { assert(lock->held); lock->held = false; }
@@ -70,6 +82,7 @@ static int t7_hdmirx_check_video(struct device *dev)
 }
 static u32 readl(void *address)
 {
+    if (address == receiver.top + T7_RX_TOP_VID_CNTL) return 0;
     if (address == receiver.phy + T7_RX_PHY_APLL0) return T7_RX_PHY_PLL_LOCK;
     if (address == receiver.top + T7_RX_TOP_TMDS_ALIGN_STAT) return BIT(0);
     if (address == receiver.top + T7_RX_TOP_SW_RESET) return meter_reset;
@@ -80,6 +93,7 @@ static u32 readl(void *address)
 }
 static void writel(u32 value, void *address)
 {
+    if (address == receiver.top + T7_RX_TOP_VID_CNTL) {assert(!receiver.link->users);return;}
     if (address == receiver.phy + T7_RX_AUD_PLL0 || address == receiver.phy + T7_RX_AUD_PLL3) {
         assert(!receiver.link->users && receiver.audio_lock.held);
         memcpy(address,&value,4); return;
@@ -93,6 +107,11 @@ static u8 readb(void *address)
 {
     assert(address == receiver.cor + T7_RX_COR_TMDS_CONFIG);
     return hdmi2 ? BIT(1) : 0;
+}
+static void writeb(u8 value, void *address) {
+    (void)value;
+    assert(address==receiver.cor+T7_RX_COR_INPUT_MAP || address==receiver.cor+T7_RX_COR_INPUT_MAP+1);
+    assert(!receiver.link->users);
 }
 static unsigned long clk_get_rate(void *clk) { (void)clk; return 24000000; }
 static u32 t7_hdmirx_meter_hz(u32 value, unsigned long rate) { (void)rate; return value; }
@@ -172,12 +191,12 @@ int main(void)
     /* Observing an HDR cable must not enable capture or reset a locked link
      * on each polling tick. Disabled probes still reject the extra clock.
      */
-    assert(!t7_hdmirx_cable_supported(&receiver,92812500,true));
+    assert(t7_hdmirx_cable_supported(&receiver,92812500,true));
     receiver.hdr_probe=true;
     assert(t7_hdmirx_cable_supported(&receiver,92812500,true));
-    assert(!t7_hdmirx_cable_supported(&receiver,92812500,false));
-    assert(!t7_hdmirx_cable_supported(&receiver,90812499,true));
-    assert(!t7_hdmirx_cable_supported(&receiver,94812501,true));
+    assert(t7_hdmirx_cable_supported(&receiver,92812500,false));
+    assert(t7_hdmirx_cable_supported(&receiver,24000000,false));
+    assert(!t7_hdmirx_cable_supported(&receiver,23999999,false));
     assert(!t7_hdmirx_cable_supported(&receiver,0,true));
     assert(!t7_hdmirx_cable_supported(&receiver,297000000,true));
     cable_hz=92812500; unsupported_signal=true; link.configured=false;

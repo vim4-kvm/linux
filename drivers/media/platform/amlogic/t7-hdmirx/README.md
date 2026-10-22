@@ -6,8 +6,23 @@ With `core_test=1`, probe publishes the EDID and keeps the receiver registered
 without requiring a live source. A delayed worker qualifies the cable clock and
 SCDC ratio, then configures the video PLL/PCS. Loss does not withdraw HPD or
 rewrite EDID. `uhd60` selects the fixed profile by default. With the additional
-`dynamic_modes=1`, the stable cable clock and SCDC ratio select RGB8 1080p60 or
-UHD60 automatically. Other resolutions/rates/formats are rejected.
+`dynamic_modes=1`, the stable cable clock and SCDC ratio select the T7 PHY and
+PLL frequency bands automatically (24 MHz <= character clock < 600 MHz).
+FDET supplies active geometry, front/back porches, sync polarity and frame
+period, independently of the PHY bands. Progressive even-sized inputs from
+320x180 through 3840x2160 at 20..120 Hz are bounded by the measured pixel clock
+(24..600 MHz); this is a configuration envelope, not a claim that every mode
+and cable has passed hardware qualification. Interlacing and pixel repetition
+are rejected. Low PHY bands follow T7's automatic 4x oversampling policy.
+
+Dynamic capture accepts RGB and YCbCr 444/422/420 at 8/10/12 bits. The RX mapper
+expands subsampled input, and VDIN truncates to 8 bits. AVI range and 601/709
+colorimetry select a matrix into limited BT.709 NV12; YCbCr709 limited bypasses
+the matrix. A DVI source uses the hardware HDMI/DVI detector and ignores cached
+AVI bytes. Unsupported extended colorimetry (including HLG) fails qualification
+rather than exposing unmapped HDR as SDR. The existing PQ/2020 420/10 path below
+is retained. Format/depth/range, timing and refresh changes invalidate an active
+lease before any RX mapping or PHY write. Raw RGB24 capture still rejects YUV.
 
 `hdr_probe=1` additionally allows the 92.8125 MHz reference of a 371.25 MHz
 HDMI 2.0 character clock to lock for metadata observation. It requires the
@@ -16,13 +31,12 @@ coefficients/dividers match the UHD profile; an aligned unsupported signal is
 kept intact rather than repeatedly reset. The unrecognized-packet bank selects
 DRM type 0x87 without enabling packet DMA, and is restored on core shutdown.
 Debugfs exposes raw AVI/DRM candidates, without a freshness or HDR-readiness
-claim. YCbCr/deep-colour frames remain rejected before a capture lease is
-acquired. This is receiver characterization, not HDR capture or tone mapping.
+claim. Observation alone does not enable HDR capture or tone mapping.
 
 With the additional `hdr_capture=1`, HDR10 PQ / BT.2020 limited YCbCr420
 10-bit VIC97 can acquire an NV12 capture lease. The RX output mapper performs
 420/deep-colour unpacking; its half-width timing counters are normalized to
-3840x2160. Other YUV/deep formats still fail qualification. A valid DRM packet
+3840x2160. A valid DRM packet
 must have arrived through the new-packet latch within one second; packet IRQ
 mode bit 4 requests every receipt rather than only content changes. Both the
 packet selection and IRQ mode are restored on shutdown. AVI/DRM checksums and
@@ -45,11 +59,12 @@ does not load pending curves. This reuses vim4-hdr-curve and the existing
 manager white/peak controls without shared writable vendor globals.
 
 `VIDIOC_QUERY_DV_TIMINGS` and `VIDIOC_G_PARM` report a live measurement for the
-qualified profile, including fractional rates near 60 Hz. Frame period comes
+qualified input, including fractional frame rates. Frame period comes
 from the RX reference-clock counter, not from the capture buffer dimensions.
 The query rejects loss, unsupported sync widths and a counter changing during
-its byte reads; it never returns cached timing while unlocked. The fixed CEA
-profile supplies porches only after its totals and sync widths have matched.
+its byte reads; it never returns cached timing while unlocked. Dynamic queries
+read porches directly and reject inconsistent totals; fixed mode retains its
+original CEA profile checks.
 Queries do not wait for another frame or reconfigure PHY, DMA, EDID or HPD.
 `G_PARM` does not advertise `S_PARM` capability: capture cannot set the HDMI
 source clock. `test_timings.py` exercises the actual query and VDIN handlers

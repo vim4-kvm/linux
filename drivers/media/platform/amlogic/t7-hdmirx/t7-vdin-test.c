@@ -146,6 +146,7 @@ struct t7_vdin {
 	struct delayed_work source_work;
 	bool source_seen, source_locked;
 	unsigned int source_width, source_height;
+	unsigned int source_period;
 	spinlock_t queue_lock;
 	struct list_head queued;
 	wait_queue_head_t buffer_wait;
@@ -358,6 +359,36 @@ static void t7_vdin_configure_scale(struct t7_vdin *vdin)
 
 static void t7_vdin_configure(struct t7_vdin *vdin)
 {
+	/* HDR2 matrix-I uses the same signed coefficients/offsets as T7 VDIN.
+	 * Output is always limited BT.709, regardless of the HDMI quantization.
+	 */
+	static const u32 matrices[][9] = {
+		/* RGB full, RGB limited. */
+		{ 0, 0, 0x00bb0275, 0x003f1f99, 0x1ea601c2, 0x01c21e67,
+		  0x00001fd7, 0x00400200, 0x00000200 },
+		{ 0x07c007c0, 0x000007c0, 0x00da02dc, 0x004a1f87, 0x1e6d020b,
+		  0x020b1e25, 0x00001fd0, 0x00400200, 0x00000200 },
+		/* YCbCr601 limited, YCbCr601 full, YCbCr709 full. */
+		{ 0x07c00600, 0x00000600, 0x04001f8a, 0x1f2c0000, 0x04120075,
+		  0x0000004d, 0x0000041a, 0x00400200, 0x00000200 },
+		{ 0x00000600, 0x00000600, 0x03701f99, 0x1f460000, 0x03930066,
+		  0x00000044, 0x0000039a, 0x00400200, 0x00000200 },
+		{ 0x00000600, 0x00000600, 0x03700000, 0, 0x03830000,
+		  0, 0x00000383, 0x00400200, 0x00000200 },
+	};
+	const u32 *matrix = NULL;
+	bool yuv = t7_hdmirx_stream_is_yuv(vdin->receiver);
+	bool full = t7_hdmirx_stream_is_full_range(vdin->receiver);
+	unsigned int i;
+
+	if (vdin->nv12) {
+		if (!yuv)
+			matrix = matrices[full ? 0 : 1];
+		else if (t7_hdmirx_stream_is_bt601(vdin->receiver))
+			matrix = matrices[full ? 3 : 2];
+		else if (full)
+			matrix = matrices[4];
+	}
 	t7_vdin_write(vdin, VDIN_WR_CTRL, 0);
 	t7_vdin_update(vdin, VDIN_TOP_MISC, BIT(26) | BIT(29), BIT(26) | BIT(29));
 	udelay(1);
@@ -382,28 +413,16 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	t7_vdin_write(vdin, VDIN_HDR_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 0);
 	t7_vdin_write(vdin, VDIN_HDR_MATRIX_OUT, 0);
-	if (vdin->nv12) {
-		/* Full-range RGB to limited BT.709 before 4:2:0 subsampling. */
-		t7_vdin_write(vdin, 0x128c, 0);
-		t7_vdin_write(vdin, 0x128d, 0);
-		t7_vdin_write(vdin, 0x1282, 0x00bb0275);
-		t7_vdin_write(vdin, 0x1283, 0x003f1f99);
-		t7_vdin_write(vdin, 0x1284, 0x1ea601c2);
-		t7_vdin_write(vdin, 0x1285, 0x01c21e67);
-		t7_vdin_write(vdin, 0x1286, 0x00001fd7);
-		t7_vdin_write(vdin, 0x128a, 0x00400200);
-		t7_vdin_write(vdin, 0x128b, 0x00000200);
+	if (matrix) {
+		t7_vdin_write(vdin, 0x128c, matrix[0]);
+		t7_vdin_write(vdin, 0x128d, matrix[1]);
+		for (i = 0; i < 5; i++)
+			t7_vdin_write(vdin, 0x1282 + i, matrix[2 + i]);
+		t7_vdin_write(vdin, 0x128a, matrix[7]);
+		t7_vdin_write(vdin, 0x128b, matrix[8]);
 		t7_vdin_write(vdin, VDIN_HDR_CTRL, BIT(16));
 		t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 1);
 		t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 1);
-	}
-	if (t7_hdmirx_stream_is_yuv(vdin->receiver)) {
-		/* The RX has already expanded limited BT.709 YCbCr to 4:4:4;
-		 * MIF subsampling/truncation supplies limited NV12 directly.
-		 */
-		t7_vdin_write(vdin, VDIN_HDR_CTRL, 0);
-		t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 0);
-		t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 0);
 	}
 	if (t7_hdmirx_stream_is_hdr(vdin->receiver))
 		t7_vdin_hdr_configure(vdin);
@@ -922,6 +941,7 @@ static void t7_vdin_source_work(struct work_struct *work)
 	struct v4l2_dv_timings timings;
 	struct v4l2_fract interval;
 	struct v4l2_event event = { .type = V4L2_EVENT_SOURCE_CHANGE };
+	unsigned int period = 0, delta;
 	bool locked;
 	int ret;
 
@@ -930,9 +950,14 @@ static void t7_vdin_source_work(struct work_struct *work)
 	/* A torn period is a retry, not evidence that the source disappeared. */
 	if (ret != -EAGAIN) {
 		locked = !ret;
+		if (locked && interval.denominator)
+			period = div_u64((u64)interval.numerator * 1000000, interval.denominator);
+		delta = period > vdin->source_period ? period - vdin->source_period :
+			vdin->source_period - period;
 		if (vdin->source_seen && (locked != vdin->source_locked ||
 		    (locked && (timings.bt.width != vdin->source_width ||
-				timings.bt.height != vdin->source_height)))) {
+				timings.bt.height != vdin->source_height ||
+				delta > vdin->source_period / 2000)))) {
 			event.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION;
 			v4l2_event_queue(&vdin->video, &event);
 		}
@@ -941,6 +966,7 @@ static void t7_vdin_source_work(struct work_struct *work)
 		if (locked) {
 			vdin->source_width = timings.bt.width;
 			vdin->source_height = timings.bt.height;
+			vdin->source_period = period;
 		}
 	}
 	mutex_unlock(&vdin->video_lock);
@@ -978,7 +1004,7 @@ static int t7_vdin_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *
 static void t7_vdin_fill_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 			     unsigned int width, unsigned int height)
 {
-	unsigned int stride = width * (vdin->nv12 ? 1 : 3);
+	unsigned int stride = ALIGN(width * (vdin->nv12 ? 1 : 3), 16);
 
 	fmt->fmt.pix = (struct v4l2_pix_format) {
 		.width = width,
@@ -1019,7 +1045,8 @@ static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 		width = timings->bt.width;
 		height = timings->bt.height;
 	} else {
-		/* MIF strides are 16-byte units; NV12 chroma needs even height.
+		/* MIF strides are aligned independently; preserve the active width.
+		 * NV12 chroma needs even dimensions.
 		 * Keep downscale ratios within the scaler's phase-step range.
 		 */
 		if (width < 320)
@@ -1030,7 +1057,7 @@ static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 			width = timings->bt.width;
 		if (height > timings->bt.height)
 			height = timings->bt.height;
-		width &= ~15U;
+		width &= ~1U;
 		height &= ~1U;
 	}
 	t7_vdin_fill_fmt(vdin, fmt, width, height);
