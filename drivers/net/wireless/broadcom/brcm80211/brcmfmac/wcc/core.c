@@ -69,7 +69,8 @@ static void brcmf_wcc_feat_attach(struct brcmf_if *ifp)
 	 */
 	if (!strcmp(ifp->drvr->fwver, "01-16e134aa"))
 		ifp->drvr->chip_quirks |= BIT(BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT) |
-					 BIT(BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY);
+					 BIT(BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY) |
+					 BIT(BRCMF_FEAT_QUIRK_ND_HOSTIP_V1);
 	err = brcmf_fil_iovar_data_get(ifp, "cap", caps, sizeof(caps) - 1);
 	/*
 	 * Concurrent channels need firmware TX credits instead of blindly

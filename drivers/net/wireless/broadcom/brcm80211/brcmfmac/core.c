@@ -221,19 +221,40 @@ static void _brcmf_update_ndtable(struct work_struct *work)
 	struct brcmf_if *ifp = container_of(work, struct brcmf_if,
 					    ndoffload_work);
 	struct brcmf_pub *drvr = ifp->drvr;
+	struct brcmf_nd_hostip_v1 request = {
+		.version = cpu_to_le16(BRCMF_ND_HOSTIP_VERSION),
+		.operation = cpu_to_le16(BRCMF_ND_HOSTIP_DEL_UC),
+		.length = cpu_to_le32(offsetof(struct brcmf_nd_hostip_v1, address)),
+	};
+	bool v1 = brcmf_feat_is_quirk_enabled(ifp, BRCMF_FEAT_QUIRK_ND_HOSTIP_V1);
 	int i, ret;
 
-	/* clear the table in firmware */
-	ret = brcmf_fil_iovar_data_set(ifp, "nd_hostip_clear", NULL, 0);
+	/*
+	 * Replace unicast addresses without deleting firmware-owned anycast
+	 * entries. The versioned protocol uses an operation header even when
+	 * there is no address payload; legacy firmware uses separate iovars.
+	 */
+	if (v1)
+		ret = brcmf_fil_iovar_data_set(ifp, "nd_hostip", &request,
+					       offsetof(struct brcmf_nd_hostip_v1, address));
+	else
+		ret = brcmf_fil_iovar_data_set(ifp, "nd_hostip_clear", NULL, 0);
 	if (ret) {
 		brcmf_dbg(TRACE, "fail to clear nd ip table err:%d\n", ret);
 		return;
 	}
 
 	for (i = 0; i < ifp->ipv6addr_idx; i++) {
-		ret = brcmf_fil_iovar_data_set(ifp, "nd_hostip",
-					       &ifp->ipv6_addr_tbl[i],
-					       sizeof(struct in6_addr));
+		if (v1) {
+			request.operation = cpu_to_le16(BRCMF_ND_HOSTIP_ADD);
+			request.length = cpu_to_le32(sizeof(request));
+			memcpy(request.address, &ifp->ipv6_addr_tbl[i], sizeof(request.address));
+			ret = brcmf_fil_iovar_data_set(ifp, "nd_hostip", &request, sizeof(request));
+		} else {
+			ret = brcmf_fil_iovar_data_set(ifp, "nd_hostip",
+						       &ifp->ipv6_addr_tbl[i],
+						       sizeof(struct in6_addr));
+		}
 		if (ret)
 			bphy_err(drvr, "add nd ip err %d\n", ret);
 	}

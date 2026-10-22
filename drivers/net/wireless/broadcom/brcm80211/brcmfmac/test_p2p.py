@@ -47,8 +47,10 @@ typedef uint32_t __le32;
 #define BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY 0
 #define BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT 1
 #define BRCMF_FEAT_SAE_EXT 2
+#define BRCMF_FEAT_QUIRK_ND_HOSTIP_V1 3
 #define BRCM_CC_43752_CHIP_ID 43752
 #define BIT(n) (1UL << (n))
+#define container_of(p, t, m) ((t *)((char *)(p) - offsetof(t, m)))
 #define BRCMF_VIF_STATUS_CONNECTED 0
 #define BRCMF_SCAN_STATUS_BUSY 0
 #define BRCMF_P2P_STATUS_ENABLED 0
@@ -67,7 +69,11 @@ struct brcmf_mp_device { int fcmode; unsigned long feature_disable; };
 struct brcmf_pub { void *wiphy; struct brcmf_if *iflist[16];
     struct brcmf_bus *bus_if; struct brcmf_mp_device *settings;
     const char *fwver; unsigned long chip_quirks, feat_flags; };
-struct brcmf_if { struct brcmf_pub *drvr; int ifidx; bool v2, primary_nd; };
+struct work_struct { unsigned int unused; };
+struct in6_addr { u8 bytes[16]; };
+struct brcmf_if { struct brcmf_pub *drvr; int ifidx; bool v2, primary_nd, nd_v1;
+    struct work_struct ndoffload_work;
+    struct in6_addr ipv6_addr_tbl[8]; u8 ipv6addr_idx; };
 struct brcmf_cfg80211_vif { struct brcmf_if *ifp; };
 struct brcmf_cfg80211_info { struct brcmf_pub *pub; unsigned long scan_status; };
 enum p2p_bss_type { P2PAPI_BSSCFG_PRIMARY, P2PAPI_BSSCFG_DEVICE, P2PAPI_BSSCFG_MAX };
@@ -76,7 +82,7 @@ struct brcmf_p2p_info { struct brcmf_cfg80211_info *cfg; unsigned long status;
 static bool connected, ap_running;
 static unsigned int apsta;
 static int op_count, fail_op = -1;
-static struct { const char *name; int ifidx; unsigned int value; } ops[32];
+static struct { const char *name; int ifidx; unsigned int value; u8 data[64]; } ops[32];
 static int record(struct brcmf_if *ifp, const char *name, u32 value) {
     int i = op_count++;
     assert(i < 32);
@@ -94,7 +100,10 @@ static int brcmf_fil_iovar_int_set(struct brcmf_if *ifp, const char *name, u32 v
 }
 static int brcmf_fil_iovar_data_set(struct brcmf_if *ifp, const char *name,
                                    const void *data, size_t n) {
-    (void)data; return record(ifp, name, n);
+    int error = record(ifp, name, n);
+    assert(n <= sizeof(ops[0].data));
+    if (n) memcpy(ops[op_count-1].data, data, n);
+    return error;
 }
 static int caps_error;
 static const char *firmware_caps = "p2p proptxstatus extsae ";
@@ -117,7 +126,7 @@ static bool brcmf_feat_is_enabled(struct brcmf_if *ifp, int feature) {
     (void)feature; return ifp->v2;
 }
 static bool brcmf_feat_is_quirk_enabled(struct brcmf_if *ifp, int quirk) {
-    (void)quirk; return ifp->primary_nd;
+    return quirk == BRCMF_FEAT_QUIRK_ND_HOSTIP_V1 ? ifp->nd_v1 : ifp->primary_nd;
 }
 static bool brcmf_is_apmode_operating(void *wiphy) { (void)wiphy; return ap_running; }
 static bool brcmf_get_vif_state_any(struct brcmf_cfg80211_info *cfg, int state) {
@@ -138,6 +147,7 @@ for line in wire.splitlines():
     if line.startswith('#define ') and line.split()[1] in {
         'BRCMF_SCAN_PARAMS_FIXED_SIZE', 'BRCMF_SCAN_PARAMS_V2_FIXED_SIZE',
         'BRCMF_SCAN_PARAMS_VERSION_V2', 'BRCMF_SCANTYPE_ACTIVE',
+        'BRCMF_ND_HOSTIP_VERSION', 'BRCMF_ND_HOSTIP_ADD', 'BRCMF_ND_HOSTIP_DEL_UC',
         'BRCMF_ESCAN_REQ_VERSION', 'BRCMF_ESCAN_REQ_VERSION_V2'}:
         constants.append(line)
 p2p = (root / 'p2p.c').read_text()
@@ -152,6 +162,7 @@ for line in p2p.splitlines():
 constants += ['#define DOT11_BSSTYPE_ANY 2', '#define WL_ESCAN_ACTION_START 1']
 layouts = '\n'.join([
     block('fwsignal.h', 'enum brcmf_fws_fcmode {', '\n};'),
+    block('fwil_types.h', 'struct brcmf_nd_hostip_v1 {', '\n};'),
     block('fwil_types.h', 'struct brcmf_ssid_le {', '\n};'),
     block('fwil_types.h', 'struct brcmf_scan_params_le {', '\n};'),
     block('fwil_types.h', 'struct brcmf_scan_params_v2_le {', '\n};'),
@@ -166,6 +177,7 @@ functions = '\n'.join([
     block('p2p.c', 'static s32 brcmf_p2p_escan('),
     block('p2p.c', 'static s32 brcmf_p2p_deinit_discovery('),
     block('core.c', 'void brcmf_configure_arp_nd_offload('),
+    block('core.c', 'static void _brcmf_update_ndtable('),
 ])
 tests = r'''
 int main(void) {
@@ -252,6 +264,38 @@ int main(void) {
     ap_running=true; op_count=0;
     brcmf_configure_arp_nd_offload(&group,true);
     assert(!op_count);
+    /* Address operations retain the group's BSS, including an empty table.
+     * Check serialized lengths, operations, padding and the actual addresses.
+     */
+    for (int version=0; version<2; version++) {
+        group.nd_v1=version;
+        for (int count=0; count<=8; count++) {
+            group.ipv6addr_idx=count; op_count=0;
+            for (int i=0; i<count; i++)
+                memset(&group.ipv6_addr_tbl[i], i+1, sizeof(struct in6_addr));
+            _brcmf_update_ndtable(&group.ndoffload_work);
+            assert(op_count == count+1 && ops[0].ifidx == 1);
+            if (version) {
+                assert(!strcmp(ops[0].name,"nd_hostip") && ops[0].value == 8);
+                assert(ops[0].data[0] == 1 && ops[0].data[2] == 3 && ops[0].data[4] == 8);
+            } else assert(!strcmp(ops[0].name,"nd_hostip_clear") && !ops[0].value);
+            for (int i=0; i<count; i++) {
+                assert(ops[i+1].ifidx == 1 && !strcmp(ops[i+1].name,"nd_hostip"));
+                int offset=version ? 8 : 0;
+                assert(ops[i+1].value == (version ? 28 : 16));
+                if (version) {
+                    assert(ops[i+1].data[0] == 1 && ops[i+1].data[2] == 1);
+                    assert(ops[i+1].data[4] == 28);
+                    for (int j=24; j<28; j++) assert(!ops[i+1].data[j]);
+                }
+                assert(!memcmp(ops[i+1].data+offset, &group.ipv6_addr_tbl[i], 16));
+            }
+        }
+        op_count=0; fail_op=0;
+        _brcmf_update_ndtable(&group.ndoffload_work);
+        assert(op_count == 1); /* Do not append to a table we failed to clear. */
+        fail_op=-1;
+    }
     /* Automatic flow control is scoped to the qualified radio/firmware.
      * Explicit module parameter values remain authoritative.
      */
