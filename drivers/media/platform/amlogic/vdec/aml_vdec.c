@@ -129,7 +129,9 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 	dos_enable(dev->dec_hw);
 	/* incase of bus hang in stop_streaming */
 	ctx->dos_clk_en = 1;
-	aml_vdec_reset_core(dev->dec_hw);
+	ret = aml_vdec_reset_core(dev->dec_hw);
+	if (ret)
+		goto err_cancel_job;
 
 	if (load_firmware(dev->dec_hw, fw_path))
 		goto err_cancel_job;
