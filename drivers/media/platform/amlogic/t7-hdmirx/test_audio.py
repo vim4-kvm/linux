@@ -209,6 +209,13 @@ int main(void) {
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(rx.audio_format.rate==48000 && notifications==4 && rx.audio_generation==1);
     assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    before=rx.audio_generation;
+    core[T7_RX_COR_AUDIO_AIF+3]++;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(rx.audio_generation==before && !rx.audio_invalid && !xruns);
+    core[T7_RX_COR_AUDIO_AIF+3]--;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(!rx.audio_read_retries);
     acr(T7_RX_COR_N,6272); acr(T7_RX_COR_CTS,660000); aif(2,2);
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(!rx.audio_format.rate && xruns==1 && !(readl(fifo)&BIT(31)));
@@ -230,6 +237,16 @@ int main(void) {
     before=notifications;
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(before==notifications); /* no repeated events on a stable source */
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    before=xruns;
+    core[T7_RX_COR_AUDIO_AIF+3]++;
+    for(unsigned int i=0;i<2;i++) {
+        t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+        assert(rx.audio_format.rate==44100 && before==xruns);
+    }
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(!rx.audio_format.rate && xruns==before+1);
+    assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
     puts("seven ACR/AIF rates, malformed/unsupported packets, native constraints, stale PCM, PLL unwind passed");
 }
 '''

@@ -294,6 +294,7 @@ struct t7_hdmirx {
 	struct t7_hdmirx_audio_format audio_format, audio_pending;
 	u32 audio_generation;
 	unsigned int audio_stable_samples;
+	unsigned int audio_read_retries;
 	u32 audio_pll_saved[3];
 	u32 audio_fifo_saved;
 	u8 audio_core_saved[3];
@@ -1285,7 +1286,7 @@ static int t7_hdmirx_read_audio(struct t7_hdmirx *rx,
 				clk_get_rate(rx->clocks[T7_RX_METER].clk));
 	format->rate = t7_hdmirx_audio_rate(tmds, n, cts);
 	if (!format->rate)
-		return -ENOLINK;
+		return -EAGAIN;
 	declared = aif_rates[(aif[5] >> 2) & 7];
 	if (declared && declared != format->rate)
 		return -EAGAIN;
@@ -1520,6 +1521,17 @@ static void t7_hdmirx_audio_work(struct work_struct *work)
 
 	mutex_lock(&rx->audio_lock);
 	ret = t7_hdmirx_read_audio(rx, &format);
+	/* ACR counters can update between byte reads. One incoherent snapshot
+	 * is not a source change; bound retries so a persistently invalid packet
+	 * still stops capture. A real video/link loss remains immediate.
+	 */
+	if (ret == -EAGAIN) {
+		rx->audio_stable_samples = 0;
+		if (++rx->audio_read_retries < 3)
+			goto out;
+	} else {
+		rx->audio_read_retries = 0;
+	}
 	if (ret) {
 		memset(&format, 0, sizeof(format));
 		rx->audio_stable_samples = 0;
@@ -1549,6 +1561,7 @@ static void t7_hdmirx_audio_work(struct work_struct *work)
 				       SNDRV_CTL_EVENT_MASK_VALUE, &id);
 		}
 	}
+out:
 	mutex_unlock(&rx->audio_lock);
 	/* ALSA takes the stream lock here. Do not invert it with hw_free's
 	 * audio mutex; component removal joins this worker before freeing PCMs.
