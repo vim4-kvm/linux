@@ -99,8 +99,8 @@ struct snd_ctl_elem_id { int iface; char name[44]; };
 #define strscpy(dst,src,size) snprintf(dst,size,"%s",src)
 static unsigned int notifications, xruns;
 static struct t7_hdmirx *watched;
-static void snd_ctl_notify(void *card, unsigned int mask, struct snd_ctl_elem_id *id) {
-    assert(mask==1 && id->name[0]); notifications++;
+static int snd_soc_component_notify_control(struct snd_soc_component *component, const char *name) {
+    assert(component && !strncmp(name,"HDMI RX Audio ",14)); notifications++; return 0;
 }
 static void snd_pcm_stop_xrun(struct snd_pcm_substream *stream) {
     assert(stream && watched && !watched->audio_lock.held); xruns++;
