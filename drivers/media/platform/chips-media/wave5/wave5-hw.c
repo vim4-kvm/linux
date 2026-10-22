@@ -2645,6 +2645,14 @@ int wave5_vpu_enc_check_open_param(struct vpu_instance *inst, struct enc_open_pa
 		return -EINVAL;
 	}
 
+	/* Enforce the negotiated size contract at the firmware boundary too. */
+	if (!IS_ALIGNED(pic_width, inst->std == W_HEVC_ENC ? 8 : 2) ||
+	    !IS_ALIGNED(pic_height, inst->std == W_HEVC_ENC ? 8 : 2)) {
+		dev_err(inst->dev->dev, "Unaligned encoding dimension: %ux%u\n",
+			pic_width, pic_height);
+		return -EINVAL;
+	}
+
 	if (param->profile) {
 		if (inst->std == W_HEVC_ENC) {
 			if ((param->profile != HEVC_PROFILE_MAIN ||
