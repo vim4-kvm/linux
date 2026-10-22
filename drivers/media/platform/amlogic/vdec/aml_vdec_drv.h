@@ -134,6 +134,7 @@ struct dec_pic_info {
  * @pic_info: Pic information for curr decoder context. See struct dec_pic_info.
  * @curr_dec_type: Current decoder type. (CODEC_TYPE_H264, etc.)
  * @codec_priv: Pointer to current decoder instance.
+ * @decode_result: Result signaled by the firmware IRQ; completed after stop.
  */
 struct aml_vdec_ctx {
 	struct aml_vdec_dev *dev;
@@ -155,7 +156,10 @@ struct aml_vdec_ctx {
 	struct dec_pic_info pic_info;
 	u32 curr_dec_type;
 	void *codec_priv;
+	int decode_result;
 };
+
+void aml_vdec_fault(struct aml_vdec_ctx *ctx);
 
 static inline struct aml_vdec_ctx *fh_to_dec_ctx(struct file *file)
 {

@@ -774,6 +774,7 @@ struct vpu_device {
 	u32 bus_idle_value;
 	u32 encoder_mask;
 	bool legacy_firmware;
+	bool experimental_decoder;
 	u32 reset_mask;
 	struct ida inst_ida;
 	struct clk_bulk_data *clks;

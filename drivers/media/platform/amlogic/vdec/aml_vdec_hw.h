@@ -112,6 +112,9 @@ struct pm_pd_s {
  * @dec_irq: Irq registered.
  * @curr_ctx: Pointer to curr decoder context.
  * @has_dbus_ctrl: Isolate VDEC through DOS instead of DMC; no local PD writes.
+ * @faulted: DMA ownership could not be returned; reset the system to recover.
+ * @powered: Domain and functional clocks are held.
+ * @secure_swap: Scratch G supplied by the secure microcode loader.
  */
 struct aml_vdec_hw {
 	struct platform_device *pdev;
@@ -125,6 +128,9 @@ struct aml_vdec_hw {
 	int dec_irq;
 	void *curr_ctx;
 	bool has_dbus_ctrl;
+	bool faulted;
+	bool powered;
+	u32 secure_swap;
 };
 
 /**
@@ -153,7 +159,7 @@ int vdec_enable(struct aml_vdec_hw *hw);
 int vdec_disable(struct aml_vdec_hw *hw);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
-void aml_stop_vdec_hw(struct aml_vdec_hw *hw);
+int aml_stop_vdec_hw(struct aml_vdec_hw *hw);
 int load_firmware(struct aml_vdec_hw *hw, const char *path);
 int aml_vdec_reset_core(struct aml_vdec_hw *hw);
 

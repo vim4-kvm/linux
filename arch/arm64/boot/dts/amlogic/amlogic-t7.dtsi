@@ -1993,7 +1993,7 @@
 		reg = <0x0 0x36048 0x0 0x14>;
 	};
 
-	/* Firmware loading and DMA timeout recovery are not ready for T7. */
+	/* Experimental decoder: normal boards retain the tested encode paths. */
 	vdec: video-codec@320000 {
 		compatible = "amlogic,t7-vcodec-dec";
 		reg = <0x0 0x320000 0x0 0x10000>;
