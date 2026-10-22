@@ -160,7 +160,8 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 				 "Waiting for fan thermal zones; requesting %u%% output\n", target);
 		else
 			dev_warn_ratelimited(ctx->dev,
-				"Fan temperature unavailable; requesting %u%% output\n", target);
+					     "Fan temperature unavailable; requesting %u%% output\n",
+					     target);
 	}
 	ctx->quiet_sampled = true;
 
