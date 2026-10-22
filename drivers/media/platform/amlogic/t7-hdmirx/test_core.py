@@ -126,8 +126,10 @@ int main(void)
     t7_hdmirx_core_stop(&rx); readback_error = false;
     assert(!t7_hdmirx_core_start(&rx)); timing();
     assert(!pcs_resets);
+    core[T7_RX_COR_POWER_RESET] = BIT(6);
     t7_hdmirx_reset_pcs(&rx);
     assert(pcs_resets == 1 && !readl(top + T7_RX_TOP_SW_RESET));
+    assert(core[T7_RX_COR_POWER_RESET] == BIT(6));
     assert(rx.core_active && !t7_hdmirx_check_video(&dev));
     core[T7_RX_COR_COLOR_DEPTH] = 5;
     assert(t7_hdmirx_check_video(&dev) == -ERANGE);

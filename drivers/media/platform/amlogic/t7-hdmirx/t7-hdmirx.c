@@ -667,12 +667,21 @@ static void t7_hdmirx_core_stop(void *data)
 
 static void t7_hdmirx_reset_pcs(struct t7_hdmirx *rx)
 {
+	u8 reset;
+
 	/* Re-align the PCS after the input PLL and equalizer have settled. */
 	writel(BIT(13) | BIT(7), rx->top + T7_RX_TOP_SW_RESET);
 	readl(rx->top + T7_RX_TOP_SW_RESET);
 	usleep_range(1, 5);
 	writel(0, rx->top + T7_RX_TOP_SW_RESET);
 	readl(rx->top + T7_RX_TOP_SW_RESET);
+	/* T7 rx_cor_reset also pulses the deep-colour FIFO after TMDS relock.
+	 * PCS alignment alone can leave FDET at width+2/height zero.
+	 */
+	reset = readb(rx->cor + T7_RX_COR_POWER_RESET) & ~BIT(4);
+	writeb(reset | BIT(4), rx->cor + T7_RX_COR_POWER_RESET);
+	usleep_range(1, 5);
+	writeb(reset, rx->cor + T7_RX_COR_POWER_RESET);
 }
 
 static int t7_hdmirx_core_start(struct t7_hdmirx *rx)
