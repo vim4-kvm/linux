@@ -135,6 +135,7 @@
 #define BRCMF_WOWL_SECURE		(1 << 25)
 /* Wakeup on finding preferred network */
 #define BRCMF_WOWL_PFN_FOUND		(1 << 27)
+
 /* Wakeup on receiving pairwise key EAP packets: */
 #define WIPHY_WOWL_EAP_PK		(1 << 28)
 /* Link Down indication in WoWL mode: */
@@ -212,6 +213,19 @@ enum brcmf_wowl_pattern_type {
 	BRCMF_WOWL_PATTERN_TYPE_BITMAP = 0,
 	BRCMF_WOWL_PATTERN_TYPE_ARP,
 	BRCMF_WOWL_PATTERN_TYPE_NA
+};
+
+#define BRCMF_ND_HOSTIP_VERSION		1
+#define BRCMF_ND_HOSTIP_ADD		1
+#define BRCMF_ND_HOSTIP_DEL_UC		3
+
+struct brcmf_nd_hostip_v1 {
+	__le16 version;
+	__le16 operation;
+	__le32 length;
+	u8 address[16];
+	u8 type;
+	u8 pad[3];
 };
 
 struct brcmf_fil_p2p_if_le {

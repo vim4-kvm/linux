@@ -70,12 +70,14 @@
  * NEED_MPC: driver needs to disable MPC during scanning operation.
  * P2P_DEV_NO_IF_EVT: discovery BSS shares the primary firmware interface.
  * ARP_ND_PRIMARY: ARP/ND mode and enable use the primary control interface.
+ * ND_HOSTIP_V1: ND addresses require the versioned host-address protocol.
  */
 #define BRCMF_QUIRK_LIST \
 	BRCMF_QUIRK_DEF(AUTO_AUTH) \
 	BRCMF_QUIRK_DEF(NEED_MPC) \
 	BRCMF_QUIRK_DEF(P2P_DEV_NO_IF_EVT) \
-	BRCMF_QUIRK_DEF(ARP_ND_PRIMARY)
+	BRCMF_QUIRK_DEF(ARP_ND_PRIMARY) \
+	BRCMF_QUIRK_DEF(ND_HOSTIP_V1)
 
 #define BRCMF_FEAT_DEF(_f) \
 	BRCMF_FEAT_ ## _f,
