@@ -73,6 +73,14 @@
 			no-map;
 		};
 
+		/* Keep the boot firmware's 1 MiB diagnostic RAM window. */
+		ramoops@7400000 {
+			compatible = "ramoops";
+			reg = <0x0 0x07400000 0x0 0x00100000>;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+		};
+
 		/* 16 MiB reserved for PCIe BL31 memory-protection via SMC */
 		pcie_dma_pool: pcie-dma-pool {
 			compatible = "restricted-dma-pool";
