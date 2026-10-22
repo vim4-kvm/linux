@@ -83,3 +83,16 @@ const struct aml_dev_platform_data aml_vdec_s4_pdata = {
 		VIDEO_DEC_H264,
 	},
 };
+
+/*
+ * Do not inherit S4's codec or raw firmware: the T7 NEWP package supplies
+ * metadata to the normal world and loads executable microcode through TEE.
+ * A safe timeout path must also retain DMA ownership until DBUS is idle.
+ */
+const struct aml_dev_platform_data aml_vdec_t7_pdata = {
+	.power_type = AML_PM_PD,
+	.req_hw_resource = dev_request_hw_resources,
+	.destroy_hw_resource = dev_destroy_hw_resources,
+	.has_dbus_ctrl = true,
+	.unavailable_reason = "T7 requires verified secure firmware loading and DMA shutdown",
+};

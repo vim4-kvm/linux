@@ -107,10 +107,18 @@ static const struct media_device_ops aml_m2m_media_ops = {
 
 static int aml_vdec_drv_probe(struct platform_device *pdev)
 {
+	const struct aml_dev_platform_data *pdata;
 	struct aml_vdec_dev *dev;
 	struct video_device *vfd_dec;
 	struct aml_vdec_hw *hw;
 	int ret = 0;
+
+	pdata = of_device_get_match_data(&pdev->dev);
+	if (!pdata)
+		return -ENODEV;
+	if (pdata->unavailable_reason)
+		return dev_err_probe(&pdev->dev, -EOPNOTSUPP, "%s\n",
+				     pdata->unavailable_reason);
 
 	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
 	if (!dev)
@@ -143,7 +151,7 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 	}
 	dev->dec_hw = hw;
 
-	dev->pvdec_data = of_device_get_match_data(&pdev->dev);
+	dev->pvdec_data = pdata;
 	ret = dev->pvdec_data->req_hw_resource(dev);
 	if (ret < 0)
 		goto err_hw_init;
@@ -179,7 +187,11 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		v4l2_err(&dev->v4l2_dev, "Failed to register media device");
 		goto err_media_dev_register;
 	}
-	vdec_enable(dev->dec_hw);
+	ret = vdec_enable(dev->dec_hw);
+	if (ret) {
+		media_device_unregister(&dev->mdev);
+		goto err_media_dev_register;
+	}
 	return 0;
 
 err_media_dev_register:
@@ -221,6 +233,7 @@ static void aml_vdec_drv_remove(struct platform_device *pdev)
 
 static const struct of_device_id aml_vdec_match[] = {
 	{.compatible = "amlogic,s4-vcodec-dec", .data = &aml_vdec_s4_pdata},
+	{.compatible = "amlogic,t7-vcodec-dec", .data = &aml_vdec_t7_pdata},
 	{},
 };
 MODULE_DEVICE_TABLE(of, aml_vdec_match);

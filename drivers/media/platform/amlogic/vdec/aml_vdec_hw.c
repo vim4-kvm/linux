@@ -50,14 +50,28 @@ void dos_enable(struct aml_vdec_hw *hw)
 	regmap_update_bits(hw->map[DOS_BUS], MDEC_PIC_DC_CTRL, (1 << 31), 0);
 }
 
-void aml_vdec_reset_core(struct aml_vdec_hw *hw)
+int aml_vdec_reset_core(struct aml_vdec_hw *hw)
 {
-	unsigned int mask = 0;
+	unsigned int mask = BIT(21);
+	unsigned int value;
+	unsigned int i;
+	int ret;
 
-	mask = (1 << 21);
-
-	regmap_update_bits(hw->map[DMC_BUS], 0x0, mask, 0);
-	usleep_range(60, 70);
+	if (hw->has_dbus_ctrl) {
+		ret = regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_DBUS_DISABLE, 0xffff);
+		if (ret)
+			return ret;
+		ret = regmap_read_poll_timeout(hw->map[DOS_BUS], VDEC_ASSIST_DBUS_DISABLE,
+					       value, value == 0xffff, 1, 100000);
+		if (ret)
+			return ret;
+		/* Retain the vendor DBUS settling loop after the acknowledgment. */
+		for (i = 0; i < 200; i++)
+			cpu_relax();
+	} else {
+		regmap_update_bits(hw->map[DMC_BUS], 0x0, mask, 0);
+		usleep_range(60, 70);
+	}
 	regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0,
 		     (1 << 3) | (1 << 4) | (1 << 5) | (1 << 7) |
 		     (1 << 8) | (1 << 9));
@@ -66,7 +80,10 @@ void aml_vdec_reset_core(struct aml_vdec_hw *hw)
 	regmap_update_bits(hw->map[DOS_BUS], MDEC_PIC_DC_MUX_CTRL, 1 << 31, 0);
 	regmap_write(hw->map[DOS_BUS], MDEC_EXTIF_CFG1, 0);
 
-	regmap_update_bits(hw->map[DMC_BUS], 0x0, mask, mask);
+	if (hw->has_dbus_ctrl)
+		return regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_DBUS_DISABLE, 0);
+
+	return regmap_update_bits(hw->map[DMC_BUS], 0x0, mask, mask);
 }
 
 void aml_start_vdec_hw(struct aml_vdec_hw *hw)
@@ -206,7 +223,8 @@ static int vdec_clock_gate_init(struct aml_vdec_hw *hw)
 	hw->gates[VDEC_MUX].id = "clk_vdec_mux";
 	hw->gates[HEVCF_MUX].id = "clk_hevcf_mux";
 
-	return devm_clk_bulk_get(hw->dev, DOS_CLK_MAX, hw->gates);
+	return devm_clk_bulk_get(hw->dev, hw->has_dbus_ctrl ? 2 : DOS_CLK_MAX,
+				 hw->gates);
 }
 
 static struct clk_bulk_data *vdec_get_clk_by_name(struct aml_vdec_hw *hw,
@@ -231,12 +249,14 @@ static int pm_vdec_power_domain_init(struct aml_vdec_hw *hw)
 
 	mutex_init(&hw->pm_mutex);
 
-	for (i = 0; i < VDEC_MAX; i++) {
+	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : VDEC_MAX); i++) {
 		pd[i].dev = dev_pm_domain_attach_by_name(hw->dev, pd[i].name);
 		if (IS_ERR_OR_NULL(pd[i].dev)) {
-			err = PTR_ERR(pd[i].dev);
+			err = pd[i].dev ? PTR_ERR(pd[i].dev) : -ENODEV;
 			dev_dbg(hw->dev, "Get %s failed, pm-domain: %d\n",
 				pd[i].name, err);
+			if (hw->has_dbus_ctrl)
+				return err;
 			continue;
 		}
 
@@ -261,7 +281,7 @@ static void pm_vdec_power_domain_release(struct aml_vdec_hw *hw)
 	const struct power_manager_s *pm = hw->pm;
 	struct pm_pd_s *pd = pm->pd_data;
 
-	for (i = 0; i < VDEC_MAX; i++) {
+	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : VDEC_MAX); i++) {
 		if (!IS_ERR_OR_NULL(pd[i].link))
 			device_link_del(pd[i].link);
 
@@ -272,6 +292,10 @@ static void pm_vdec_power_domain_release(struct aml_vdec_hw *hw)
 
 static void dos_local_config(struct aml_vdec_hw *hw, bool is_on, int id)
 {
+	/* T7 delegates memory power, isolation and local reset to secure genpd. */
+	if (hw->has_dbus_ctrl)
+		return;
+
 	if (is_on) {
 		usleep_range(20, 100);
 
@@ -321,11 +345,15 @@ static void dos_local_config(struct aml_vdec_hw *hw, bool is_on, int id)
 	dev_dbg(hw->dev, "%s end, id %d, is_on %d\n", __func__, id, is_on);
 }
 
-static void pm_vdec_power_domain_power_on(struct aml_vdec_hw *hw, int id)
+static int pm_vdec_power_domain_power_on(struct aml_vdec_hw *hw, int id)
 {
 	const struct power_manager_s *pm = hw->pm;
 	struct device *dev = pm->pd_data[id].dev;
 	struct clk_bulk_data *gate_node = NULL;
+	int ret;
+
+	if (IS_ERR_OR_NULL(dev))
+		return -ENODEV;
 
 	if (id == VDEC_1)
 		gate_node = vdec_get_clk_by_name(hw, "clk_vdec_mux");
@@ -333,27 +361,34 @@ static void pm_vdec_power_domain_power_on(struct aml_vdec_hw *hw, int id)
 		gate_node = vdec_get_clk_by_name(hw, "clk_hevcf_mux");
 
 	if (gate_node) {
-		clk_prepare_enable(gate_node->clk);
+		ret = clk_prepare_enable(gate_node->clk);
+		if (ret)
+			return ret;
 		if (id == VDEC_1) {
-			clk_set_rate(gate_node->clk, 499999992);
+			ret = clk_set_rate(gate_node->clk, 499999992);
+			if (ret) {
+				clk_disable_unprepare(gate_node->clk);
+				return ret;
+			}
 			dev_dbg(hw->dev, "after set, vdec mux clock is %lu Hz\n",
 				clk_get_rate(gate_node->clk));
 		}
 		dev_dbg(hw->dev, "the %-15s clock on\n", gate_node->id);
 	} else {
-		dev_info(hw->dev, "clk %d, unreachable\n", id);
+		return -ENODEV;
 	}
 
-	if (dev) {
-		pm_runtime_get_sync(dev);
-		dev_dbg(dev, "dev: %p link %p the %-15s power on\n",
-			dev, pm->pd_data[id].link, pm->pd_data[id].name);
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0) {
+		clk_disable_unprepare(gate_node->clk);
+		return ret;
 	}
 
 	dos_local_config(hw, 1, id);
+	return 0;
 }
 
-static void pm_vdec_power_domain_power_off(struct aml_vdec_hw *hw, int id)
+static int pm_vdec_power_domain_power_off(struct aml_vdec_hw *hw, int id)
 {
 	const struct power_manager_s *pm = hw->pm;
 	struct device *dev = pm->pd_data[id].dev;
@@ -361,7 +396,7 @@ static void pm_vdec_power_domain_power_off(struct aml_vdec_hw *hw, int id)
 
 	dos_local_config(hw, 0, id);
 
-	if (dev) {
+	if (!IS_ERR_OR_NULL(dev) && !hw->has_dbus_ctrl) {
 		pm_runtime_put_sync(dev);
 		dev_dbg(dev, "dev: %p link %p the %-15s power off\n",
 			dev, pm->pd_data[id].link, pm->pd_data[id].name);
@@ -378,6 +413,12 @@ static void pm_vdec_power_domain_power_off(struct aml_vdec_hw *hw, int id)
 	} else {
 		dev_info(hw->dev, "clk %d, unreachable\n", id);
 	}
+
+	/* T7's secure power switch follows functional clock shutdown. */
+	if (!IS_ERR_OR_NULL(dev) && hw->has_dbus_ctrl)
+		return pm_runtime_put_sync(dev);
+
+	return 0;
 }
 
 static bool pm_vdec_power_domain_power_state(struct aml_vdec_hw *hw, int id)
@@ -388,32 +429,41 @@ static bool pm_vdec_power_domain_power_state(struct aml_vdec_hw *hw, int id)
 		return false;
 }
 
-static void vdec_poweron(struct aml_vdec_hw *hw, enum vdec_type_e core)
+static int vdec_poweron(struct aml_vdec_hw *hw, enum vdec_type_e core)
 {
+	int ret = 0;
+
 	if (core >= VDEC_MAX)
-		return;
+		return -EINVAL;
 
 	mutex_lock(&hw->pm_mutex);
-	if (!hw->pm->pd_data[core].dev)
+	if (IS_ERR_OR_NULL(hw->pm->pd_data[core].dev)) {
+		ret = -ENODEV;
 		goto out;
+	}
 
 	hw->pm->pd_data[core].ref_count++;
 	if (hw->pm->pd_data[core].ref_count > 1)
 		goto out;
 
-	if (hw->pm->power_state(hw, core))
+	if (!hw->has_dbus_ctrl && hw->pm->power_state(hw, core))
 		goto out;
 
-	hw->pm->power_on(hw, core);
+	ret = hw->pm->power_on(hw, core);
+	if (ret)
+		hw->pm->pd_data[core].ref_count--;
 
 out:
 	mutex_unlock(&hw->pm_mutex);
+	return ret;
 }
 
-static void vdec_poweroff(struct aml_vdec_hw *hw, enum vdec_type_e core)
+static int vdec_poweroff(struct aml_vdec_hw *hw, enum vdec_type_e core)
 {
+	int ret = 0;
+
 	if (core >= VDEC_MAX)
-		return;
+		return -EINVAL;
 
 	mutex_lock(&hw->pm_mutex);
 	if (hw->pm->pd_data[core].ref_count == 0)
@@ -423,24 +473,21 @@ static void vdec_poweroff(struct aml_vdec_hw *hw, enum vdec_type_e core)
 	if (hw->pm->pd_data[core].ref_count > 0)
 		goto out;
 
-	hw->pm->power_off(hw, core);
+	ret = hw->pm->power_off(hw, core);
 
 out:
 	mutex_unlock(&hw->pm_mutex);
+	return ret;
 }
 
 int vdec_enable(struct aml_vdec_hw *hw)
 {
-	vdec_poweron(hw, VDEC_1);
-
-	return 0;
+	return vdec_poweron(hw, VDEC_1);
 }
 
 int vdec_disable(struct aml_vdec_hw *hw)
 {
-	vdec_poweroff(hw, VDEC_1);
-
-	return 0;
+	return vdec_poweroff(hw, VDEC_1);
 }
 
 static const struct power_manager_s pm[] = {
@@ -515,8 +562,9 @@ int dev_request_hw_resources(void *priv)
 	pdev = dev->plat_dev;
 	hw = dev->dec_hw;
 	hw->dev = &pdev->dev;
+	hw->has_dbus_ctrl = dev->pvdec_data->has_dbus_ctrl;
 
-	hw->dec_irq = platform_get_irq(pdev, VDEC_IRQ_1);
+	hw->dec_irq = platform_get_irq(pdev, hw->has_dbus_ctrl ? 0 : VDEC_IRQ_1);
 	if (hw->dec_irq < 0) {
 		dev_err(&pdev->dev, "get irq failed\n");
 		return hw->dec_irq;
@@ -530,7 +578,7 @@ int dev_request_hw_resources(void *priv)
 		return -1;
 	}
 
-	for (i = 0; i < MAX_REG_BUS; i++) {
+	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : MAX_REG_BUS); i++) {
 		if (of_address_to_resource(pdev->dev.of_node, i, &res)) {
 			dev_err(&pdev->dev, "of_address_to_resource %d failed\n", i);
 			return -EINVAL;
