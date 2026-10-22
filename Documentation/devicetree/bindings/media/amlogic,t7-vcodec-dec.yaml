@@ -14,8 +14,8 @@ description: |
   DMC request register. This describes the VDEC engine only, not HEVC or
   HCODEC. The DOS mapping overlaps HCODEC, so both engines need a shared
   register owner before concurrent operation can be supported. The current
-  driver deliberately rejects T7 until secure firmware loading and DMA
-  shutdown are implemented; the node must remain disabled meanwhile.
+  driver requires an explicit experimental opt-in. Normal board device
+  trees keep this node disabled.
 
 properties:
   compatible:
