@@ -39,6 +39,7 @@ struct khadas_mcu_fan_ctx {
 	bool quiet;
 	bool sensor_fault;
 	bool quiet_started;
+	bool quiet_sampled;
 	int temperature;
 	struct mutex curve_lock;
 	unsigned int trigger_low;
@@ -115,6 +116,7 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 					struct khadas_mcu_fan_ctx, quiet_work);
 	int hottest = INT_MIN;
 	bool fault = false;
+	bool read_fault = false;
 	bool was_fault = ctx->sensor_fault;
 	unsigned int target;
 	int i, ret;
@@ -125,8 +127,14 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 		int temperature;
 
 		zone = thermal_zone_get_zone_by_name(khadas_vim4_fan_sensors[i]);
-		if (IS_ERR(zone) || thermal_zone_get_temp(zone, &temperature)) {
+		if (IS_ERR(zone)) {
 			fault = true;
+			read_fault |= PTR_ERR(zone) != -ENODEV;
+			continue;
+		}
+		if (thermal_zone_get_temp(zone, &temperature)) {
+			fault = true;
+			read_fault = true;
 			continue;
 		}
 		hottest = max(hottest, temperature);
@@ -145,9 +153,16 @@ static void khadas_vim4_fan_work(struct work_struct *work)
 	else if (!fault)
 		ctx->quiet_started = true;
 	mutex_unlock(&ctx->curve_lock);
-	if (fault)
-		dev_warn_ratelimited(ctx->dev,
-			"Fan temperature unavailable; requesting %u%% output\n", target);
+	if (fault) {
+		/* Only an unregistered zone on the first sample is expected. */
+		if (!ctx->quiet_sampled && !read_fault)
+			dev_info(ctx->dev,
+				 "Waiting for fan thermal zones; requesting %u%% output\n", target);
+		else
+			dev_warn_ratelimited(ctx->dev,
+				"Fan temperature unavailable; requesting %u%% output\n", target);
+	}
+	ctx->quiet_sampled = true;
 
 	/* Thermal zones may register after the first boot-time sample. */
 	schedule_delayed_work(&ctx->quiet_work,

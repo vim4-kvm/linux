@@ -26,11 +26,14 @@ prefix = r'''
 #define WRITE_ONCE(a, b) ((a) = (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define IS_ERR(p) ((p) == NULL)
+#define PTR_ERR(p) (-ENODEV)
 #define container_of(p, t, m) ((t *)((char *)(p) - offsetof(t, m)))
 #define to_delayed_work(p) container_of(p, struct delayed_work, work)
 #define msecs_to_jiffies(ms) (ms)
 #define dev_err_ratelimited(...) ((void)0)
-#define dev_warn_ratelimited(...) ((void)0)
+static int warnings, infos;
+#define dev_warn_ratelimited(...) ((void)warnings++)
+#define dev_info(...) ((void)infos++)
 struct mutex { int unused; };
 static void mutex_lock(struct mutex *lock) { (void)lock; }
 static void mutex_unlock(struct mutex *lock) { (void)lock; }
@@ -147,8 +150,10 @@ int main(void)
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 15 && ctx.sensor_fault && !ctx.quiet_started);
     assert(delay == 1000);
+    assert(infos == 1 && warnings == 0);
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 15 && !ctx.quiet_started && delay == 1000);
+    assert(infos == 1 && warnings == 1);
     missing = -1; reads = 0;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 15 && !ctx.sensor_fault && ctx.quiet_started);
@@ -157,9 +162,13 @@ int main(void)
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 20 && ctx.temperature == 90000);
     unreadable = 5;
+    /* A read failure must warn even on the first sample. */
+    ctx.quiet_sampled = false;
+    int old_warnings = warnings;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
     assert(ctx.level == 15 && ctx.sensor_fault);
     assert(delay == 1000);
+    assert(warnings == old_warnings + 1 && infos == 1);
     /* A missing early sensor must not hide another zone's valid hot sample. */
     unreadable = -1; missing = 0;
     khadas_vim4_fan_work(&ctx.quiet_work.work);
