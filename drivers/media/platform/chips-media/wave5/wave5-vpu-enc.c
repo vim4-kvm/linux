@@ -646,6 +646,13 @@ static int wave5_vpu_enc_s_selection(struct file *file, void *fh, struct v4l2_se
 	s->r.width = min(s->r.width, inst->dst_fmt.width);
 	s->r.height = min(s->r.height, inst->dst_fmt.height);
 
+	/* Selection feeds the firmware picture size, bypassing TRY_FMT. */
+	if (s->r.width < W5_MIN_ENC_PIC_WIDTH ||
+	    s->r.height < W5_MIN_ENC_PIC_HEIGHT ||
+	    !IS_ALIGNED(s->r.width, inst->std == W_HEVC_ENC ? 8 : 2) ||
+	    !IS_ALIGNED(s->r.height, inst->std == W_HEVC_ENC ? 8 : 2))
+		return -EINVAL;
+
 	inst->conf_win = s->r;
 
 	return 0;
@@ -1889,7 +1896,24 @@ cleanup_inst:
 
 static int wave5_vpu_enc_release(struct file *filp)
 {
-	return wave5_vpu_release_device(filp, wave5_vpu_enc_close, "encoder");
+	struct vpu_instance *inst = file_to_vpu_inst(filp);
+	struct vpu_device *dev = inst->dev;
+	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
+	int ret;
+
+	/*
+	 * Cancel while the instance can still receive its completion IRQ. The
+	 * common release helper removes it from IRQ dispatch before freeing the
+	 * context. STREAMOFF cancels even when the queue was not streaming;
+	 * keeping both queues stopped also prevents another job being queued.
+	 */
+	mutex_lock(&dev->dev_lock);
+	v4l2_m2m_streamoff(filp, m2m_ctx, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+	v4l2_m2m_streamoff(filp, m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+	ret = wave5_vpu_release_device(filp, wave5_vpu_enc_close, "encoder");
+	mutex_unlock(&dev->dev_lock);
+
+	return ret;
 }
 
 static const struct v4l2_file_operations wave5_vpu_enc_fops = {
