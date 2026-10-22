@@ -10,6 +10,8 @@ types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
                source.index('static int t7_hdmirx_validate_edid')]
 functions = source[source.index('static u32 t7_hdmirx_audio_word'):
                    source.index('static const struct snd_soc_dai_ops t7_hdmirx_audio_ops')]
+worker = source[source.index('static const char * const t7_hdmirx_audio_control_names'):
+                source.index('static int t7_hdmirx_audio_control_info')]
 prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -17,6 +19,8 @@ prefix = r'''
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stddef.h>
+#include <limits.h>
 struct mutex { bool held; };
 struct delayed_work { int unused; };
 typedef uint8_t u8;
@@ -32,8 +36,15 @@ typedef uint64_t u64;
 struct clk_bulk_data { const char *id; void *clk; };
 struct debugfs_blob_wrapper { void *data; unsigned long size; };
 struct device { void *data; };
+struct snd_soc_card { void *snd_card; };
+struct snd_soc_component { struct snd_soc_card *card; };
 struct snd_soc_dai { struct device *dev; };
-struct snd_pcm_substream { int unused; };
+struct snd_pcm_substream { void *runtime; };
+#define SNDRV_PCM_HW_PARAM_RATE 0
+static unsigned int constraint_rate;
+static int snd_pcm_hw_constraint_minmax(void *runtime, int param, unsigned int min, unsigned int max) {
+    assert(min == max); constraint_rate = min; return 0;
+}
 struct snd_pcm_hw_params { unsigned int rate, channels; int format; };
 #define params_rate(p) ((p)->rate)
 #define params_channels(p) ((p)->channels)
@@ -72,6 +83,31 @@ static void udelay(unsigned int us) { assert(us == 1); }
 static void acr(unsigned int offset, unsigned int value) {
     core[offset] = value >> 16; core[offset+1] = value >> 8; core[offset+2] = value;
 }
+static void aif(unsigned int rate_code, unsigned int channels) {
+    u8 *p = core + T7_RX_COR_AUDIO_AIF;
+    memset(p, 0, 14); p[0]=0x84; p[1]=1; p[2]=10;
+    p[4]=0x10 | (channels-1); p[5]=rate_code << 2;
+    for (unsigned int i=0;i<14;i++) if(i!=3) p[3]-=p[i];
+}
+struct work_struct { int unused; };
+struct snd_ctl_elem_id { int iface; char name[44]; };
+#define SNDRV_CTL_ELEM_IFACE_MIXER 2
+#define SNDRV_CTL_EVENT_MASK_VALUE 1
+#define container_of(ptr,type,member) ((type *)((char *)(ptr)-offsetof(type,member)))
+#define to_delayed_work(work) ((struct delayed_work *)(work))
+#define msecs_to_jiffies(ms) (ms)
+#define strscpy(dst,src,size) snprintf(dst,size,"%s",src)
+static unsigned int notifications, xruns;
+static struct t7_hdmirx *watched;
+static void snd_ctl_notify(void *card, unsigned int mask, struct snd_ctl_elem_id *id) {
+    assert(mask==1 && id->name[0]); notifications++;
+}
+static void snd_pcm_stop_xrun(struct snd_pcm_substream *stream) {
+    assert(stream && watched && !watched->audio_lock.held); xruns++;
+}
+static void schedule_delayed_work(struct delayed_work *work, unsigned int delay) {
+    assert(delay==100);
+}
 '''
 checks = r'''
 int main(void) {
@@ -79,6 +115,7 @@ int main(void) {
                             .core_active=true, .uhd60=true };
     struct device device = { .data=&rx };
     struct snd_soc_dai dai = { .dev=&device };
+    struct snd_pcm_substream stream = {0};
     struct snd_pcm_hw_params params = { .rate=48000, .channels=2, .format=2 };
     unsigned int before;
     u32 saved[] = {0x1234, 0x5678, 0x9876};
@@ -92,6 +129,29 @@ int main(void) {
     assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-ENOLINK);
     assert(!writes && !enables);
     acr(T7_RX_COR_N,6144); acr(T7_RX_COR_CTS,594000);
+    aif(3,2);
+    assert(!t7_hdmirx_read_audio(&rx,&rx.audio_format));
+    assert(rx.audio_format.rate==48000 && rx.audio_format.pcm);
+    assert(!t7_hdmirx_audio_startup(&stream,&dai) && constraint_rate==48000);
+    assert(t7_hdmirx_audio_prepare(&stream,&dai)==-ENOLINK);
+    const unsigned int rates[]={32000,44100,48000,88200,96000,176400,192000};
+    const unsigned int ns[]={4096,6272,6144,12544,12288,25088,24576};
+    for (unsigned int i=0;i<ARRAY_SIZE(rates);i++) {
+        struct t7_hdmirx_audio_format format={0};
+        acr(T7_RX_COR_N,ns[i]); acr(T7_RX_COR_CTS,i==1||i==3||i==5?660000:594000);
+        aif(i+1,2);
+        assert(!t7_hdmirx_read_audio(&rx,&format));
+        assert(format.rate==rates[i] && format.pcm);
+    }
+    acr(T7_RX_COR_N,6144); acr(T7_RX_COR_CTS,594000); aif(3,8);
+    struct t7_hdmirx_audio_format unsupported={0};
+    assert(!t7_hdmirx_read_audio(&rx,&unsupported));
+    assert(unsupported.channels==8 && !unsupported.pcm);
+    aif(2,2); /* internally valid packet with a contradictory ACR rate */
+    assert(t7_hdmirx_read_audio(&rx,&unsupported)==-EAGAIN);
+    aif(3,2); core[T7_RX_COR_AUDIO_AIF+3]++;
+    assert(t7_hdmirx_read_audio(&rx,&unsupported)==-EAGAIN);
+    aif(3,2);
     assert(t7_hdmirx_audio_word(&rx,T7_RX_COR_CTS)==594000);
     for (unsigned int rate=32000; rate<=48000; rate+=1000) {
         if (rate==32000 || rate==48000) continue;
@@ -125,7 +185,10 @@ int main(void) {
         assert(core[t7_hdmirx_audio_core_settings[i][0]]==0x80+i);
     before=writes; t7_hdmirx_audio_stop(&rx); assert(before==writes);
     pll_locked=true;
-    assert(!t7_hdmirx_audio_hw_params(NULL,&params,&dai));
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai));
+    rx.audio_invalid=true;
+    assert(t7_hdmirx_audio_prepare(&stream,&dai)==-ENOLINK);
     assert(clocks && rx.audio_active && (readl(fifo)&BIT(31)));
     assert((core[0x1429] & (BIT(6)|BIT(0)))==BIT(0));
     assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-EBUSY);
@@ -136,13 +199,44 @@ int main(void) {
         assert(core[t7_hdmirx_audio_core_settings[i][0]]==0x80+i);
     before=writes; t7_hdmirx_audio_stop(&rx); assert(before==writes);
     assert(disables+1==enables); /* the failed bulk enable owns no clock reference */
-    puts("audio source validation, busy FIFO, PLL failure and repeated cleanup passed");
+    struct snd_soc_card card={0};
+    struct snd_soc_component component={.card=&card};
+    rx.audio_component=&component; watched=&rx;
+    struct t7_hdmirx_link link={.ready=true}; rx.link=&link;
+    memset(&rx.audio_format,0,sizeof(rx.audio_format));
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(!rx.audio_format.rate && !notifications);
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(rx.audio_format.rate==48000 && notifications==4 && rx.audio_generation==1);
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    acr(T7_RX_COR_N,6272); acr(T7_RX_COR_CTS,660000); aif(2,2);
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(!rx.audio_format.rate && xruns==1 && !(readl(fifo)&BIT(31)));
+    assert(t7_hdmirx_audio_prepare(&stream,&dai)==-ENOLINK);
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(rx.audio_format.rate==44100 && rx.audio_generation==3 && notifications==12);
+    assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
+    params.rate=44100;
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    link.ready=false;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(!rx.audio_format.rate && rx.audio_invalid);
+    assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
+    link.ready=true;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(!rx.audio_format.rate);
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(rx.audio_format.rate==44100 && rx.audio_generation==5);
+    before=notifications;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(before==notifications); /* no repeated events on a stable source */
+    puts("seven ACR/AIF rates, malformed/unsupported packets, native constraints, stale PCM, PLL unwind passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     code = Path(directory) / 'audio.c'
     binary = Path(directory) / 'audio'
-    code.write_text(prefix + defines + '\n' + types + stubs + functions + checks)
+    code.write_text(prefix + defines + '\n' + types + stubs + functions + worker + checks)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-fsanitize=address,undefined',
                     str(code), '-o', str(binary)], check=True)
