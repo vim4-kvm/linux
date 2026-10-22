@@ -1263,8 +1263,8 @@ static int t7_hdmirx_read_audio(struct t7_hdmirx *rx,
 		return -ENOLINK;
 	n = t7_hdmirx_audio_word(rx, T7_RX_COR_N);
 	cts = t7_hdmirx_audio_word(rx, T7_RX_COR_CTS);
-	packet = readb(rx->cor + T7_RX_COR_AUDIO_PACKET);
-	channel_status = readb(rx->cor + T7_RX_COR_AUDIO_CHSTATUS);
+	packet = readb(rx->cor + T7_RX_COR_AUDIO_PACKET) & (BIT(6) | GENMASK(4, 3));
+	channel_status = readb(rx->cor + T7_RX_COR_AUDIO_CHSTATUS) & BIT(1);
 	for (i = 0; i < ARRAY_SIZE(aif); i++)
 		aif[i] = readb(rx->cor + T7_RX_COR_AUDIO_AIF + i);
 	for (i = 0; i < ARRAY_SIZE(second); i++)
@@ -1272,8 +1272,8 @@ static int t7_hdmirx_read_audio(struct t7_hdmirx *rx,
 	next_n = t7_hdmirx_audio_word(rx, T7_RX_COR_N);
 	next_cts = t7_hdmirx_audio_word(rx, T7_RX_COR_CTS);
 	if (memcmp(aif, second, sizeof(aif)) ||
-	    packet != readb(rx->cor + T7_RX_COR_AUDIO_PACKET) ||
-	    channel_status != readb(rx->cor + T7_RX_COR_AUDIO_CHSTATUS))
+	    packet != (readb(rx->cor + T7_RX_COR_AUDIO_PACKET) & (BIT(6) | GENMASK(4, 3))) ||
+	    channel_status != (readb(rx->cor + T7_RX_COR_AUDIO_CHSTATUS) & BIT(1)))
 		return -EAGAIN;
 	/* T7 exposes the received AIF header/checksum and ten payload bytes. */
 	if (aif[0] != 0x84 || aif[1] != 1 || aif[2] != 10)
