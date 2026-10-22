@@ -1459,6 +1459,16 @@ static int t7_hdmirx_audio_startup(struct snd_pcm_substream *substream,
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dai->dev);
 	unsigned int rate;
+	int ret;
+
+	/* Keep T7 HDMI capture rings on whole periods. Native 9602/1920-frame
+	 * recordings corrupt samples at each ring wrap, unlike 9600/1920.
+	 * ALSA rate conversion can negotiate the former without this rule.
+	 */
+	ret = snd_pcm_hw_constraint_integer(substream->runtime,
+					    SNDRV_PCM_HW_PARAM_PERIODS);
+	if (ret)
+		return ret;
 
 	mutex_lock(&rx->audio_lock);
 	rate = rx->audio_format.pcm ? rx->audio_format.rate : 0;

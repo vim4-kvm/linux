@@ -41,6 +41,12 @@ struct snd_soc_component { struct snd_soc_card *card; };
 struct snd_soc_dai { struct device *dev; };
 struct snd_pcm_substream { void *runtime; };
 #define SNDRV_PCM_HW_PARAM_RATE 0
+#define SNDRV_PCM_HW_PARAM_PERIODS 1
+static bool fail_period_constraint;
+static int snd_pcm_hw_constraint_integer(void *runtime, int param) {
+    assert(param == SNDRV_PCM_HW_PARAM_PERIODS);
+    return fail_period_constraint ? -EINVAL : 0;
+}
 static unsigned int constraint_rate;
 static int snd_pcm_hw_constraint_minmax(void *runtime, int param, unsigned int min, unsigned int max) {
     assert(min == max); constraint_rate = min; return 0;
@@ -132,6 +138,9 @@ int main(void) {
     aif(3,2);
     assert(!t7_hdmirx_read_audio(&rx,&rx.audio_format));
     assert(rx.audio_format.rate==48000 && rx.audio_format.pcm);
+    fail_period_constraint=true;
+    assert(t7_hdmirx_audio_startup(&stream,&dai)==-EINVAL && !writes && !enables);
+    fail_period_constraint=false;
     assert(!t7_hdmirx_audio_startup(&stream,&dai) && constraint_rate==48000);
     assert(t7_hdmirx_audio_prepare(&stream,&dai)==-ENOLINK);
     const unsigned int rates[]={32000,44100,48000,88200,96000,176400,192000};
