@@ -2511,7 +2511,7 @@ static int is_event_rings_empty(struct crg_gadget_dev *crg_udc)
 
 	for (i = 0; i < CRG_RING_NUM; i++) {
 		if (!is_event_ring_x_empty(crg_udc, i)) {
-			CRG_ERROR("%s evt ring not empty\n", __func__);
+			pr_debug("%s evt ring not empty\n", __func__);
 			return 0;
 		}
 	}
@@ -3117,7 +3117,7 @@ static void crg_gadget_async_callbacks(struct usb_gadget *gadget, bool enable)
 	struct crg_gadget_dev *crg_udc = &crg_udc_dev;
 	unsigned long flags;
 
-	CRG_ERROR("%s get state %d\n", __func__, enable);
+	pr_debug("%s get state %d\n", __func__, enable);
 	spin_lock_irqsave(&crg_udc->udc_lock, flags);
 	crg_udc->async_cb_flag = enable;
 	spin_unlock_irqrestore(&crg_udc->udc_lock, flags);
@@ -3978,7 +3978,7 @@ static int crg_handle_xfer_event(struct crg_gadget_dev *crg_udc,
 		 * Event handler didn't know whether the stopped trb should
 		 * be discarded or continued. So we do nothing here
 		 */
-		CRG_ERROR("STOP, comp_code = 0x%x\n", comp_code);
+		pr_debug("STOP, comp_code = 0x%x\n", comp_code);
 		break;
 	default:
 		CRG_DEBUG("CRG UNKNOWN comp_code = 0x%x\n", comp_code);
