@@ -20,8 +20,10 @@ expands subsampled input, and VDIN truncates to 8 bits. AVI range and 601/709
 colorimetry select a matrix into limited BT.709 NV12; YCbCr709 limited bypasses
 the matrix. A DVI source uses the hardware HDMI/DVI detector and ignores cached
 AVI bytes. Unsupported extended colorimetry (including HLG) fails qualification
-rather than exposing unmapped HDR as SDR. The existing PQ/2020 420/10 path below
-is retained. Format/depth/range, timing and refresh changes invalidate an active
+rather than exposing unmapped HDR as SDR. With fresh DRM metadata and
+`hdr_capture=1`, dynamic YCbCr 444/422/420 PQ/BT.2020 limited input uses HDR2
+after RX transport normalization. The fixed-profile 420/10 path below is
+retained. Format/depth/range, timing and refresh changes invalidate an active
 lease before any RX mapping or PHY write. Raw RGB24 capture still rejects YUV.
 
 `hdr_probe=1` additionally allows the 92.8125 MHz reference of a 371.25 MHz
@@ -77,6 +79,11 @@ buffers have been released. Capture must acquire a receiver lease for that
 exact geometry before arming DMA. The private snapshot/ring allocation retains
 its maximum capacity; vb2 allocations use the selected geometry and encoder
 alignment. Snapshot sizing and capture share a lock across layout changes.
+NV12 rows use 32-byte alignment for Wave5 imports, while visible width remains
+unchanged. UV starts after the active luma rows; allocation capacity includes
+the encoder's 16-row height padding. Consumers must use bytesperline metadata.
+Recovery tolerates isolated torn measurements but bounds consecutive retries;
+after clocks and PCS recover, it pulses T7's deep-colour FIFO reset.
 `test_source_events.py` covers event transitions; `test_ioctl_locks.py` also
 checks busy mode changes, NV12 alignment, capacity bounds and both mode sizes.
 
