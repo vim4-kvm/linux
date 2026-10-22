@@ -7930,6 +7930,7 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 	    brcmf_feat_is_enabled(ifp, BRCMF_FEAT_OKC))
 		wiphy_ext_feature_set(wiphy,
 				      NL80211_EXT_FEATURE_FAST_ROAM_OFFLOAD);
+	brcmf_fwvid_setup_wiphy(ifp->drvr, wiphy);
 	wiphy->mgmt_stypes = brcmf_txrx_stypes;
 	wiphy->max_remain_on_channel_duration = 5000;
 	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_PNO)) {

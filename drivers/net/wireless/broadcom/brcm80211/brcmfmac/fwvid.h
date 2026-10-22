@@ -17,6 +17,7 @@ struct brcmf_fwvid_ops {
 	int (*alloc_fweh_info)(struct brcmf_pub *drvr);
 	int (*activate_events)(struct brcmf_if *ifp);
 	void (*get_cfg80211_ops)(struct brcmf_pub *drvr);
+	void (*setup_wiphy)(struct brcmf_pub *drvr, struct wiphy *wiphy);
 	void (*register_event_handlers)(struct brcmf_pub *drvr);
 	int (*configure_sae_pwe)(struct brcmf_if *ifp, u32 sae_pwe);
 };
@@ -94,6 +95,12 @@ static inline void brcmf_fwvid_register_event_handlers(struct brcmf_pub *drvr)
 		return;
 
 	drvr->vops->register_event_handlers(drvr);
+}
+
+static inline void brcmf_fwvid_setup_wiphy(struct brcmf_pub *drvr, struct wiphy *wiphy)
+{
+	if (drvr->vops && drvr->vops->setup_wiphy)
+		drvr->vops->setup_wiphy(drvr, wiphy);
 }
 
 #endif /* FWVID_H_ */

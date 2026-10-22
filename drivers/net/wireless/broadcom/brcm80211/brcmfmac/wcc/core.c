@@ -204,10 +204,51 @@ static s32 brcmf_wcc_auth_rx(struct brcmf_if *ifp,
 
 static void brcmf_wcc_get_cfg80211_ops(struct brcmf_pub *drvr)
 {
-	if (!brcmf_wcc_extsae(drvr))
+	/* Called before firmware capability discovery. The callbacks themselves
+	 * check extsae before accepting authentication operations.
+	 */
+	if (drvr->bus_if->chip != BRCM_CC_43752_CHIP_ID)
 		return;
 	drvr->ops->external_auth = brcmf_wcc_external_auth;
 	drvr->ops->mgmt_tx = brcmf_wcc_mgmt_tx;
+}
+
+/* SAE is the final entry so the other interface types can retain the shared
+ * WPA AKMs without advertising the station-only external authentication path.
+ */
+static const u32 brcmf_wcc_akms[] = {
+	WLAN_AKM_SUITE_8021X,
+	WLAN_AKM_SUITE_PSK,
+	WLAN_AKM_SUITE_FT_8021X,
+	WLAN_AKM_SUITE_FT_PSK,
+	WLAN_AKM_SUITE_8021X_SHA256,
+	WLAN_AKM_SUITE_PSK_SHA256,
+	WLAN_AKM_SUITE_WFA_DPP,
+	WLAN_AKM_SUITE_SAE,
+};
+
+static const struct wiphy_iftype_akm_suites brcmf_wcc_iftype_akms[] = {
+	{
+		.iftypes_mask = BIT(NL80211_IFTYPE_STATION),
+		.akm_suites = brcmf_wcc_akms,
+		.n_akm_suites = ARRAY_SIZE(brcmf_wcc_akms),
+	}, {
+		.iftypes_mask = BIT(NL80211_IFTYPE_AP) | BIT(NL80211_IFTYPE_ADHOC) |
+				BIT(NL80211_IFTYPE_P2P_GO) | BIT(NL80211_IFTYPE_P2P_CLIENT),
+		.akm_suites = brcmf_wcc_akms,
+		.n_akm_suites = ARRAY_SIZE(brcmf_wcc_akms) - 1,
+	},
+};
+
+static void brcmf_wcc_setup_wiphy(struct brcmf_pub *drvr, struct wiphy *wiphy)
+{
+	if (!brcmf_wcc_extsae(drvr))
+		return;
+	/* Older supplicants do not infer SAE AKM support from the SAE feature
+	 * flag for a fullmac device using the CONNECT command.
+	 */
+	wiphy->iftype_akm_suites = brcmf_wcc_iftype_akms;
+	wiphy->num_iftype_akm_suites = ARRAY_SIZE(brcmf_wcc_iftype_akms);
 }
 
 static void brcmf_wcc_register_events(struct brcmf_pub *drvr)
@@ -243,5 +284,6 @@ const struct brcmf_fwvid_ops brcmf_wcc_ops = {
 	.set_sae_password = brcmf_wcc_set_sae_pwd,
 	.alloc_fweh_info = brcmf_wcc_alloc_fweh_info,
 	.get_cfg80211_ops = brcmf_wcc_get_cfg80211_ops,
+	.setup_wiphy = brcmf_wcc_setup_wiphy,
 	.register_event_handlers = brcmf_wcc_register_events,
 };
