@@ -1572,7 +1572,7 @@ static int t7_hdmirx_audio_control_info(struct snd_kcontrol *control,
 static int t7_hdmirx_audio_control_get(struct snd_kcontrol *control,
 				     struct snd_ctl_elem_value *value)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(control);
+	struct snd_soc_component *component = snd_kcontrol_chip(control);
 	struct t7_hdmirx *rx = dev_get_drvdata(component->dev);
 	unsigned int result;
 
@@ -2048,7 +2048,7 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 		seq_printf(s, "capture_users: %u\n", READ_ONCE(rx->link->users));
 	}
 	if (rx->core_active) {
-		u8 avi[17], unrec[31];
+		u8 avi[17], unrec[31], aif[14];
 		u32 ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
 			    (readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16);
 
@@ -2081,7 +2081,16 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 		seq_printf(s, "audio_cts: %u\n", t7_hdmirx_audio_word(rx, T7_RX_COR_CTS));
 		seq_printf(s, "audio_info: %#x\n", readb(rx->cor + T7_RX_COR_AUDIO_INFO));
 		seq_printf(s, "audio_packet: %#x\n", readb(rx->cor + T7_RX_COR_AUDIO_PACKET));
+		for (i = 0; i < ARRAY_SIZE(aif); i++)
+			aif[i] = readb(rx->cor + T7_RX_COR_AUDIO_AIF + i);
+		seq_printf(s, "audio_aif: %*phN\n", (int)sizeof(aif), aif);
+		mutex_lock(&rx->audio_lock);
+		seq_printf(s, "audio_rate: %u\n", rx->audio_format.rate);
+		seq_printf(s, "audio_channels: %u\n", rx->audio_format.channels);
+		seq_printf(s, "audio_pcm: %u\n", rx->audio_format.pcm);
+		seq_printf(s, "audio_generation: %u\n", rx->audio_generation);
 		seq_printf(s, "audio_active: %u\n", rx->audio_active);
+		mutex_unlock(&rx->audio_lock);
 	}
 	if (rx->phy_active) {
 		u32 cable = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
