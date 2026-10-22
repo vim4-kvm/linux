@@ -62,12 +62,13 @@ static void brcmf_wcc_feat_attach(struct brcmf_if *ifp)
 
 	if (ifp->drvr->bus_if->chip != BRCM_CC_43752_CHIP_ID)
 		return;
-	/* This firmware accepts P2P setup but never reports IF_ADD on VIM4.
-	 * Avoid the failed P2P-device setup; STA and AP do not require P2P.
-	 * Limit the workaround to this firmware so future images can requalify it.
+	/* Discovery is a BSS on the primary interface in this firmware, not
+	 * a separate firmware interface. Query p2p_dev instead of waiting for
+	 * IF_ADD/IF_DEL; group interfaces still use their normal IF events.
 	 */
 	if (!strcmp(ifp->drvr->fwver, "01-16e134aa"))
-		ifp->drvr->feat_flags &= ~BIT(BRCMF_FEAT_P2P);
+		ifp->drvr->chip_quirks |= BIT(BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT) |
+					 BIT(BRCMF_FEAT_QUIRK_NDOE_PRIMARY);
 	err = brcmf_fil_iovar_data_get(ifp, "cap", caps, sizeof(caps) - 1);
 	if (!err && strstr(caps, "extsae ") &&
 	    !(ifp->drvr->settings->feature_disable & BIT(BRCMF_FEAT_SAE_EXT)))

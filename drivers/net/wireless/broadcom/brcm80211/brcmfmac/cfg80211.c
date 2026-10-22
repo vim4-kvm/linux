@@ -1059,8 +1059,8 @@ bool brcmf_is_apmode_operating(struct wiphy *wiphy)
 	return ret;
 }
 
-static void brcmf_scan_params_v2_to_v1(struct brcmf_scan_params_v2_le *params_v2_le,
-				       struct brcmf_scan_params_le *params_le)
+void brcmf_scan_params_v2_to_v1(struct brcmf_scan_params_v2_le *params_v2_le,
+				struct brcmf_scan_params_le *params_le)
 {
 	size_t params_size;
 	u32 ch;

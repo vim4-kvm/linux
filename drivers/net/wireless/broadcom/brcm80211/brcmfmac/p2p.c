@@ -13,6 +13,7 @@
 #include <brcmu_utils.h>
 #include <defs.h>
 #include "core.h"
+#include "common.h"
 #include "debug.h"
 #include "fwil.h"
 #include "fwil_types.h"
@@ -455,18 +456,31 @@ static void brcmf_p2p_print_actframe(bool tx, void *frame, u32 frame_len)
 static int brcmf_p2p_set_firmware(struct brcmf_if *ifp, u8 *p2p_mac)
 {
 	struct brcmf_pub *drvr = ifp->drvr;
-	s32 ret = 0;
+	u32 apsta;
+	int ret, up_err;
 
-	brcmf_fil_cmd_int_set(ifp, BRCMF_C_DOWN, 1);
-	brcmf_fil_iovar_int_set(ifp, "apsta", 1);
-	brcmf_fil_cmd_int_set(ifp, BRCMF_C_UP, 1);
+	ret = brcmf_fil_iovar_int_get(ifp, "apsta", &apsta);
+	if (ret)
+		return ret;
+	/* Recreating the discovery device must not drop an existing STA link. */
+	if (!apsta) {
+		ret = brcmf_fil_cmd_int_set(ifp, BRCMF_C_DOWN, 1);
+		if (ret)
+			return ret;
+		ret = brcmf_fil_iovar_int_set(ifp, "apsta", 1);
+		up_err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_UP, 1);
+		if (ret || up_err)
+			return ret ?: up_err;
+	}
 
 	/* In case of COB type, firmware has default mac address
 	 * After Initializing firmware, we have to set current mac address to
 	 * firmware for P2P device address. This must be done with discovery
 	 * disabled.
 	 */
-	brcmf_fil_iovar_int_set(ifp, "p2p_disc", 0);
+	ret = brcmf_fil_iovar_int_set(ifp, "p2p_disc", 0);
+	if (ret)
+		return ret;
 
 	ret = brcmf_fil_iovar_data_set(ifp, "p2p_da_override", p2p_mac,
 				       ETH_ALEN);
@@ -596,6 +610,7 @@ static s32 brcmf_p2p_deinit_discovery(struct brcmf_p2p_info *p2p)
 	/* Disable P2P discovery in the firmware */
 	vif = p2p->bss_idx[P2PAPI_BSSCFG_PRIMARY].vif;
 	(void)brcmf_fil_iovar_int_set(vif->ifp, "p2p_disc", 0);
+	clear_bit(BRCMF_P2P_STATUS_ENABLED, &p2p->status);
 
 	return 0;
 }
@@ -673,14 +688,14 @@ static s32 brcmf_p2p_escan(struct brcmf_p2p_info *p2p, u32 num_chans,
 	struct brcmf_pub *drvr = p2p->cfg->pub;
 	s32 ret = 0;
 	s32 memsize = offsetof(struct brcmf_p2p_scan_le,
-			       eparams.params_le.channel_list);
+			       eparams.params_v2_le.channel_list);
 	s32 nprobes;
 	s32 active;
 	u32 i;
 	u8 *memblk;
 	struct brcmf_cfg80211_vif *vif;
 	struct brcmf_p2p_scan_le *p2p_params;
-	struct brcmf_scan_params_le *sparams;
+	struct brcmf_scan_params_v2_le *sparams;
 
 	memsize += num_chans * sizeof(__le16);
 	memblk = kzalloc(memsize, GFP_KERNEL);
@@ -694,7 +709,9 @@ static s32 brcmf_p2p_escan(struct brcmf_p2p_info *p2p, u32 num_chans,
 		goto exit;
 	}
 	p2p_params = (struct brcmf_p2p_scan_le *)memblk;
-	sparams = &p2p_params->eparams.params_le;
+	sparams = &p2p_params->eparams.params_v2_le;
+	sparams->version = cpu_to_le16(BRCMF_SCAN_PARAMS_VERSION_V2);
+	sparams->length = cpu_to_le16(BRCMF_SCAN_PARAMS_V2_FIXED_SIZE);
 
 	switch (search_state) {
 	case WL_P2P_DISC_ST_SEARCH:
@@ -722,7 +739,9 @@ static s32 brcmf_p2p_escan(struct brcmf_p2p_info *p2p, u32 num_chans,
 		goto exit;
 	}
 
-	brcmf_p2p_set_discover_state(vif->ifp, search_state, 0, 0);
+	ret = brcmf_p2p_set_discover_state(vif->ifp, search_state, 0, 0);
+	if (ret)
+		goto exit;
 
 	/*
 	 * set p2p scan parameters.
@@ -731,7 +750,7 @@ static s32 brcmf_p2p_escan(struct brcmf_p2p_info *p2p, u32 num_chans,
 
 	/* determine the scan engine parameters */
 	sparams->bss_type = DOT11_BSSTYPE_ANY;
-	sparams->scan_type = BRCMF_SCANTYPE_ACTIVE;
+	sparams->scan_type = cpu_to_le32(BRCMF_SCANTYPE_ACTIVE);
 
 	eth_broadcast_addr(sparams->bssid);
 	sparams->home_time = cpu_to_le32(P2PAPI_SCAN_HOME_TIME_MS);
@@ -773,9 +792,27 @@ static s32 brcmf_p2p_escan(struct brcmf_p2p_info *p2p, u32 num_chans,
 		sparams->channel_list[i] = cpu_to_le16(chanspecs[i]);
 
 	/* set the escan specific parameters */
-	p2p_params->eparams.version = cpu_to_le32(BRCMF_ESCAN_REQ_VERSION);
+	p2p_params->eparams.version = cpu_to_le32(BRCMF_ESCAN_REQ_VERSION_V2);
 	p2p_params->eparams.action =  cpu_to_le16(WL_ESCAN_ACTION_START);
 	p2p_params->eparams.sync_id = cpu_to_le16(0x1234);
+	if (!brcmf_feat_is_enabled(vif->ifp, BRCMF_FEAT_SCAN_V2)) {
+		struct brcmf_p2p_scan_le *params_v1;
+
+		memsize -= BRCMF_SCAN_PARAMS_V2_FIXED_SIZE;
+		memsize += BRCMF_SCAN_PARAMS_FIXED_SIZE;
+		params_v1 = kzalloc(memsize, GFP_KERNEL);
+		if (!params_v1) {
+			ret = -ENOMEM;
+			goto exit;
+		}
+		params_v1->type = p2p_params->type;
+		params_v1->eparams.version = cpu_to_le32(BRCMF_ESCAN_REQ_VERSION);
+		params_v1->eparams.action = p2p_params->eparams.action;
+		params_v1->eparams.sync_id = p2p_params->eparams.sync_id;
+		brcmf_scan_params_v2_to_v1(sparams, &params_v1->eparams.params_le);
+		kfree(memblk);
+		memblk = (u8 *)params_v1;
+	}
 	/* perform p2p scan on primary device */
 	ret = brcmf_fil_bsscfg_data_set(vif->ifp, "p2p_scan", memblk, memsize);
 	if (!ret)
@@ -2200,7 +2237,37 @@ static struct wireless_dev *brcmf_p2p_create_p2pdev(struct brcmf_p2p_info *p2p,
 	}
 
 	brcmf_p2p_generate_bss_mac(p2p, addr);
-	brcmf_p2p_set_firmware(pri_ifp, p2p->dev_addr);
+	err = brcmf_p2p_set_firmware(pri_ifp, p2p->dev_addr);
+	if (err)
+		goto fail;
+
+	if (brcmf_feat_is_quirk_enabled(pri_ifp,
+					BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT)) {
+		err = brcmf_fil_iovar_int_set(pri_ifp, "p2p_disc", 1);
+		if (err)
+			goto fail;
+		err = brcmf_fil_iovar_int_get(pri_ifp, "p2p_dev", &bsscfgidx);
+		if (err)
+			goto fail_disable;
+		/* A discovery BSS has its own index but uses the primary
+		 * control interface. Never replace an existing BSS or its
+		 * data-path mapping with a non-netdev discovery interface.
+		 */
+		if (!bsscfgidx || bsscfgidx >= BRCMF_MAX_IFS ||
+		    drvr->iflist[bsscfgidx] || drvr->settings->p2p_enable) {
+			err = -EINVAL;
+			goto fail_disable;
+		}
+		p2p_ifp = brcmf_add_if(drvr, bsscfgidx, pri_ifp->ifidx, true,
+				       "p2p-dev", p2p->dev_addr);
+		if (IS_ERR(p2p_ifp)) {
+			err = PTR_ERR(p2p_ifp);
+			goto fail_disable;
+		}
+		p2p_ifp->vif = p2p_vif;
+		p2p_vif->ifp = p2p_ifp;
+		goto ready;
+	}
 
 	brcmf_cfg80211_arm_vif_event(p2p->cfg, p2p_vif);
 	brcmf_fweh_p2pdev_setup(pri_ifp, true);
@@ -2227,9 +2294,6 @@ static struct wireless_dev *brcmf_p2p_create_p2pdev(struct brcmf_p2p_info *p2p,
 
 	/* discovery interface created */
 	p2p_ifp = p2p_vif->ifp;
-	p2p->bss_idx[P2PAPI_BSSCFG_DEVICE].vif = p2p_vif;
-	memcpy(p2p_ifp->mac_addr, p2p->dev_addr, ETH_ALEN);
-	memcpy(&p2p_vif->wdev.address, p2p->dev_addr, sizeof(p2p->dev_addr));
 
 	/* verify bsscfg index for P2P discovery */
 	err = brcmf_fil_iovar_int_get(pri_ifp, "p2p_dev", &bsscfgidx);
@@ -2240,12 +2304,18 @@ static struct wireless_dev *brcmf_p2p_create_p2pdev(struct brcmf_p2p_info *p2p,
 
 	WARN_ON(p2p_ifp->bsscfgidx != bsscfgidx);
 
+ready:
+	p2p->bss_idx[P2PAPI_BSSCFG_DEVICE].vif = p2p_vif;
+	memcpy(p2p_ifp->mac_addr, p2p->dev_addr, ETH_ALEN);
+	memcpy(p2p_vif->wdev.address, p2p->dev_addr, ETH_ALEN);
 	INIT_WORK(&p2p->afx_hdl.afx_work, brcmf_p2p_afx_handler);
 	init_completion(&p2p->afx_hdl.act_frm_scan);
 	init_completion(&p2p->wait_next_af);
 
 	return &p2p_vif->wdev;
 
+fail_disable:
+	brcmf_fil_iovar_int_set(pri_ifp, "p2p_disc", 0);
 fail:
 	brcmf_free_vif(p2p_vif);
 	return ERR_PTR(err);
@@ -2434,8 +2504,10 @@ int brcmf_p2p_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev)
 		brcmf_vif_clear_mgmt_ies(vif);
 		err = brcmf_p2p_release_p2p_if(vif);
 	}
-	if (!err) {
-		/* wait for firmware event */
+	if (!err && !(iftype == NL80211_IFTYPE_P2P_DEVICE &&
+		      brcmf_feat_is_quirk_enabled(vif->ifp,
+						  BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT))) {
+		/* Discovery-only BSS firmware has no interface deletion event. */
 		err = brcmf_cfg80211_wait_vif_event(cfg, BRCMF_E_IF_DEL,
 						    BRCMF_VIF_EVENT_TIMEOUT);
 		if (!err)
