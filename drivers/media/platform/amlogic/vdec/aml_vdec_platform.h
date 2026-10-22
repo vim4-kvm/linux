@@ -34,6 +34,8 @@ struct aml_codec_ops {
  * @destroy_hw_resource: Operation function to release the hardware resource.
  * @power_type: Type of power that the current chip need. See aml_power_type_e.
  * @fw_path: Path of the firmware.bin.
+ * @has_dbus_ctrl: Use DOS DBUS isolation instead of a DMC request bit.
+ * @unavailable_reason: Reject probe before acquiring hardware when non-NULL.
  */
 struct aml_dev_platform_data {
 	const struct aml_codec_ops *codec_ops;
@@ -43,8 +45,11 @@ struct aml_dev_platform_data {
 	void (*destroy_hw_resource)(void *priv);
 	int power_type;
 	const char *fw_path[MAX_DEC_FORMAT];
+	bool has_dbus_ctrl;
+	const char *unavailable_reason;
 };
 
 extern const struct aml_dev_platform_data aml_vdec_s4_pdata;
+extern const struct aml_dev_platform_data aml_vdec_t7_pdata;
 
 #endif

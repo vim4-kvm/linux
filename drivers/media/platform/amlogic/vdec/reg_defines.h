@@ -22,6 +22,7 @@
 #define MPC_E                        REG_ALIGN(0x0308)
 #define MPC_W                        REG_ALIGN(0x0309)
 #define CPSR                         REG_ALIGN(0x0321)
+#define VDEC_ASSIST_DBUS_DISABLE     REG_ALIGN(0x0046)
 #define IMEM_DMA_CTRL                REG_ALIGN(0x0340)
 #define IMEM_DMA_ADR                 REG_ALIGN(0x0341)
 #define IMEM_DMA_COUNT               REG_ALIGN(0x0342)
