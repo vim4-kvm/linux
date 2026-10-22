@@ -8,6 +8,7 @@
 #include "amlogic-t7.dtsi"
 #include <dt-bindings/gpio/amlogic,t7-periphs-pinctrl.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
 
 / {
 	model = "Khadas VIM4";
@@ -20,6 +21,32 @@
 		mmc2 = &sd_emmc_a;
 		rtc0 = &rtc;
 		rtc1 = &vrtc;
+	};
+
+	adc-keys {
+		compatible = "adc-keys";
+		io-channels = <&saradc 2>;
+		io-channel-names = "buttons";
+		keyup-threshold-microvolt = <1800000>;
+		poll-interval = <20>;
+
+		button-function {
+			label = "Function";
+			linux,code = <KEY_ENTER>;
+			/* Vendor nominal ADC value: 90 / 1023 * 1.8 V. */
+			press-threshold-microvolt = <158000>;
+		};
+	};
+
+	polled-keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <20>;
+
+		button-power {
+			label = "Power";
+			linux,code = <KEY_POWER>;
+			gpios = <&gpio GPIOD_4 GPIO_ACTIVE_LOW>;
+		};
 	};
 
 	memory@0 {
@@ -698,6 +725,31 @@
 
 &pwm_ao_ab {
 	status = "okay";
+};
+
+&ir {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&ir_pins>;
+	linux,rc-map-name = "rc-khadas";
+};
+
+&saradc {
+	status = "okay";
+	vref-supply = <&vddao_1v8>;
+};
+
+/* GPIOB_3..7 are shared with the active 8-bit eMMC root device. */
+&spifc {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spifc_pins>;
+	status = "disabled";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <16000000>;
+	};
 };
 
 /* SDIO */

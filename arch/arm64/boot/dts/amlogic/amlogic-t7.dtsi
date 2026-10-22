@@ -580,6 +580,35 @@
 				clocks = <&xtal>;
 			};
 
+			saradc: adc@26000 {
+				compatible = "amlogic,meson-g12a-saradc",
+					     "amlogic,meson-saradc";
+				reg = <0x0 0x26000 0x0 0x48>;
+				interrupts = <GIC_SPI 181 IRQ_TYPE_EDGE_RISING>;
+				#io-channel-cells = <1>;
+				clocks = <&xtal>, <&clkc_periphs CLKID_SYS_SAR_ADC>,
+					 <&clkc_periphs CLKID_SARADC>,
+					 <&clkc_periphs CLKID_SARADC_SEL>;
+				clock-names = "clkin", "core", "adc_clk", "adc_sel";
+				status = "disabled";
+			};
+
+			spifc: spi@56000 {
+				compatible = "amlogic,meson-gxbb-spifc";
+				reg = <0x0 0x56000 0x0 0x80>;
+				clocks = <&clkc_periphs CLKID_SYS_SPIFC>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				status = "disabled";
+			};
+
+			ir: ir-receiver@84040 {
+				compatible = "amlogic,meson-gxbb-ir";
+				reg = <0x0 0x84040 0x0 0xa4>;
+				interrupts = <GIC_SPI 22 IRQ_TYPE_EDGE_RISING>;
+				status = "disabled";
+			};
+
 			periphs_pinctrl: pinctrl@4000 {
 				compatible = "amlogic,t7-periphs-pinctrl";
 				#address-cells = <2>;
@@ -2015,6 +2044,22 @@
 };
 
 &periphs_pinctrl {
+	ir_pins: ir-pins {
+		mux {
+			groups = "remote_in";
+			function = "remote_in";
+			bias-disable;
+		};
+	};
+
+	spifc_pins: spifc-pins {
+		mux {
+			groups = "nor_hold", "nor_d", "nor_q", "nor_c",
+				 "nor_wp", "nor_cs";
+			function = "nor";
+		};
+	};
+
 	hdmitx_hpd_pins: hdmitx-hpd {
 		mux {
 			groups = "hdmitx_hpd_in";
