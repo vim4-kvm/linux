@@ -11,9 +11,13 @@ types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
 functions = source[source.index('static u32 t7_hdmirx_meter_hz'):
                    source.index('static void t7_hdmirx_core_stop')]
 for signature in ('static int t7_hdmirx_validate_edid(',
-                  'static int t7_hdmirx_validate_phy_edid('):
+                  'static int t7_hdmirx_validate_phy_edid(',
+                  'static bool t7_hdmirx_cable_supported(',
+                  'static bool t7_hdmirx_sdr_cable(',
+                  'static void t7_hdmirx_select_phy('):
     start = source.index(signature)
     functions += source[start:source.index('\n}\n', start) + 3]
+functions = 'static bool t7_hdmirx_sdr_cable(u32 cable);\n' + functions
 prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -70,7 +74,7 @@ static u32 readl(void *address)
         if (jitter) return BIT(31) | (meter_reads % 2 ? 50500 : 50800);
     }
     if (address == phy + T7_RX_PHY_APLL0 && lock_pll &&
-        raw_read(address) == 0x14090428)
+        (raw_read(address) & 0xff000000) == 0x14000000)
         return raw_read(address) | T7_RX_PHY_PLL_LOCK;
     return raw_read(address);
 }
@@ -196,6 +200,29 @@ int main(void)
     t7_hdmirx_phy_prepare(&receiver);
     assert(!t7_hdmirx_phy_pll(&receiver));
     assert((raw_read(phy + T7_RX_PHY_APLL4) & (7U << 24)) == (1U << 24));
+    /* All requested pixel clocks, plus both sides of every PHY/PLL boundary.
+     * Prove the programmed dividers recover 5x the character clock, accounting
+     * for T7 low-rate oversampling and HDMI 2.0's 1:40 cable clock.
+     */
+    static const u32 clocks[] = {25175000,28322000,40000000,65000000,
+        74250000,108000000,85500000,88750000,97750000,119000000,
+        154000000,241500000,297000000,594000000,
+        34999999,35000000,44999999,45000000,74999999,75000000,
+        76999999,77000000,154999999,155000000,339999999,340000000,
+        524999999,525000000,599999996};
+    for (i=0; i<ARRAY_SIZE(clocks); i++) {
+        u32 clock=clocks[i], cable=clock/(clock>=340000000?4:1);
+        reset(); receiver.dynamic_modes=true;
+        assert(t7_hdmirx_cable_supported(&receiver,cable,clock>=340000000));
+        t7_hdmirx_select_phy(&receiver,cable,clock>=340000000);
+        lock_pll=true; t7_hdmirx_phy_prepare(&receiver);
+        assert(!t7_hdmirx_phy_pll(&receiver));
+        u32 c0=raw_read(phy+T7_RX_PHY_APLL0), c4=raw_read(phy+T7_RX_PHY_APLL4);
+        u32 m=c0&255, n=(c0>>10)&31, od=(c4>>24)&7;
+        u32 oversample=receiver.phy_band<=1?4:1;
+        u64 recovered=(u64)cable*m/n/(1U<<od)/oversample;
+        assert(recovered==5ULL*cable*(clock>=340000000?4:1));
+    }
     puts("PHY clock/SCDC qualification, trim, bounded PLL timeout and cleanup passed");
 }
 '''
