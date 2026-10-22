@@ -44,7 +44,11 @@ typedef uint32_t __le32;
 #define BRCMF_SCAN_PARAMS_COUNT_MASK 0xffff
 #define BRCMF_SCAN_PARAMS_NSSID_SHIFT 16
 #define BRCMF_FEAT_SCAN_V2 0
-#define BRCMF_FEAT_QUIRK_NDOE_PRIMARY 0
+#define BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY 0
+#define BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT 1
+#define BRCMF_FEAT_SAE_EXT 2
+#define BRCM_CC_43752_CHIP_ID 43752
+#define BIT(n) (1UL << (n))
 #define BRCMF_VIF_STATUS_CONNECTED 0
 #define BRCMF_SCAN_STATUS_BUSY 0
 #define BRCMF_P2P_STATUS_ENABLED 0
@@ -58,7 +62,11 @@ static void *kzalloc(size_t n, int flags) {
     return allocations++ == fail_alloc ? NULL : calloc(1, n);
 }
 struct brcmf_if;
-struct brcmf_pub { void *wiphy; struct brcmf_if *iflist[16]; };
+struct brcmf_bus { unsigned int chip; };
+struct brcmf_mp_device { int fcmode; unsigned long feature_disable; };
+struct brcmf_pub { void *wiphy; struct brcmf_if *iflist[16];
+    struct brcmf_bus *bus_if; struct brcmf_mp_device *settings;
+    const char *fwver; unsigned long chip_quirks, feat_flags; };
 struct brcmf_if { struct brcmf_pub *drvr; int ifidx; bool v2, primary_nd; };
 struct brcmf_cfg80211_vif { struct brcmf_if *ifp; };
 struct brcmf_cfg80211_info { struct brcmf_pub *pub; unsigned long scan_status; };
@@ -87,6 +95,15 @@ static int brcmf_fil_iovar_int_set(struct brcmf_if *ifp, const char *name, u32 v
 static int brcmf_fil_iovar_data_set(struct brcmf_if *ifp, const char *name,
                                    const void *data, size_t n) {
     (void)data; return record(ifp, name, n);
+}
+static int caps_error;
+static const char *firmware_caps = "p2p proptxstatus extsae ";
+static int brcmf_fil_iovar_data_get(struct brcmf_if *ifp, const char *name,
+                                   void *data, size_t n) {
+    (void)ifp; assert(!strcmp(name, "cap"));
+    assert(strlen(firmware_caps) < n);
+    if (!caps_error) memcpy(data, firmware_caps, strlen(firmware_caps));
+    return caps_error;
 }
 static unsigned char request[1024];
 static size_t request_len;
@@ -134,6 +151,7 @@ for line in p2p.splitlines():
         constants.append(line)
 constants += ['#define DOT11_BSSTYPE_ANY 2', '#define WL_ESCAN_ACTION_START 1']
 layouts = '\n'.join([
+    block('fwsignal.h', 'enum brcmf_fws_fcmode {', '\n};'),
     block('fwil_types.h', 'struct brcmf_ssid_le {', '\n};'),
     block('fwil_types.h', 'struct brcmf_scan_params_le {', '\n};'),
     block('fwil_types.h', 'struct brcmf_scan_params_v2_le {', '\n};'),
@@ -142,6 +160,7 @@ layouts = '\n'.join([
     block('p2p.c', 'enum brcmf_p2p_disc_state {', '\n};'),
 ])
 functions = '\n'.join([
+    block('wcc/core.c', 'static void brcmf_wcc_feat_attach('),
     block('cfg80211.c', 'void brcmf_scan_params_v2_to_v1('),
     block('p2p.c', 'static int brcmf_p2p_set_firmware('),
     block('p2p.c', 'static s32 brcmf_p2p_escan('),
@@ -221,11 +240,11 @@ int main(void) {
     assert(brcmf_p2p_escan(&p2p,1,&channel,WL_P2P_DISC_ST_SCAN,
                            P2PAPI_BSSCFG_DEVICE) == -EBUSY);
     assert(!cfg.scan_status);
-    /* Group policy controls ND on the primary; ARP keeps its group index. */
+    /* Radio-wide offload controls use primary, without losing group data. */
     group.primary_nd=true; op_count=0;
     brcmf_configure_arp_nd_offload(&group,false);
     assert(op_count == 3);
-    assert(ops[0].ifidx == 1 && ops[1].ifidx == 1);
+    assert(ops[0].ifidx == 0 && ops[1].ifidx == 0);
     assert(!strcmp(ops[2].name,"ndoe") && ops[2].ifidx == 0);
     group.primary_nd=false; op_count=0;
     brcmf_configure_arp_nd_offload(&group,false);
@@ -233,7 +252,35 @@ int main(void) {
     ap_running=true; op_count=0;
     brcmf_configure_arp_nd_offload(&group,true);
     assert(!op_count);
-    puts("P2P scan ABI, linked STA setup, errors and ND interface routing passed");
+    /* Automatic flow control is scoped to the qualified radio/firmware.
+     * Explicit module parameter values remain authoritative.
+     */
+    struct brcmf_bus bus = {.chip=BRCM_CC_43752_CHIP_ID};
+    struct brcmf_mp_device settings = {.fcmode=BRCMF_FWS_FCMODE_AUTO};
+    pub.bus_if=&bus; pub.settings=&settings; pub.fwver="01-16e134aa";
+    brcmf_wcc_feat_attach(&primary);
+    assert(settings.fcmode == BRCMF_FWS_FCMODE_EXPLICIT_CREDIT);
+    assert(pub.chip_quirks & BIT(BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT));
+    assert(pub.chip_quirks & BIT(BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY));
+    assert(pub.feat_flags & BIT(BRCMF_FEAT_SAE_EXT));
+    for (int mode=0; mode<=2; mode++) {
+        settings.fcmode=mode;
+        brcmf_wcc_feat_attach(&primary);
+        assert(settings.fcmode == mode);
+    }
+    for (int failure=0; failure<4; failure++) {
+        settings.fcmode=BRCMF_FWS_FCMODE_AUTO;
+        bus.chip=failure == 0 ? 1234 : BRCM_CC_43752_CHIP_ID;
+        pub.fwver=failure == 1 ? "unknown" : "01-16e134aa";
+        caps_error=failure == 2 ? -EIO : 0;
+        firmware_caps=failure == 3 ? "p2p extsae " : "p2p proptxstatus extsae ";
+        brcmf_wcc_feat_attach(&primary);
+        assert(settings.fcmode == BRCMF_FWS_FCMODE_AUTO);
+    }
+    settings.feature_disable=BIT(BRCMF_FEAT_SAE_EXT); pub.feat_flags=0;
+    brcmf_wcc_feat_attach(&primary);
+    assert(!(pub.feat_flags & BIT(BRCMF_FEAT_SAE_EXT)));
+    puts("P2P scan ABI, lifecycle, offload routing and TX credit policy passed");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='brcmf-p2p-') as tmp:

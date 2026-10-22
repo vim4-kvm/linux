@@ -95,7 +95,6 @@ struct brcmf_if *brcmf_get_ifp(struct brcmf_pub *drvr, int ifidx)
 
 void brcmf_configure_arp_nd_offload(struct brcmf_if *ifp, bool enable)
 {
-	struct brcmf_if *nd_ifp = ifp;
 	s32 err;
 	u32 mode;
 
@@ -103,6 +102,15 @@ void brcmf_configure_arp_nd_offload(struct brcmf_if *ifp, bool enable)
 		brcmf_dbg(TRACE, "Skip ARP/ND offload enable when soft AP is running\n");
 		return;
 	}
+
+	/* ARP/ND enable and mode are radio-wide controls in this firmware.
+	 * Address tables may be per-BSS; their notifiers keep those indices.
+	 * Sending the enable controls on a group interface can trap firmware.
+	 */
+	if (brcmf_feat_is_quirk_enabled(ifp, BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY))
+		ifp = ifp->drvr->iflist[0];
+	if (!ifp)
+		return;
 
 	if (enable)
 		mode = BRCMF_ARP_OL_AGENT | BRCMF_ARP_OL_PEER_AUTO_REPLY;
@@ -126,15 +134,7 @@ void brcmf_configure_arp_nd_offload(struct brcmf_if *ifp, bool enable)
 		}
 	}
 
-	/* This firmware's ND enable belongs to the primary control interface,
-	 * even when a P2P group changes the radio's offload policy. Sending it
-	 * on a group interface traps the firmware before AP startup.
-	 */
-	if (brcmf_feat_is_quirk_enabled(ifp, BRCMF_FEAT_QUIRK_NDOE_PRIMARY))
-		nd_ifp = ifp->drvr->iflist[0];
-	if (!nd_ifp)
-		return;
-	err = brcmf_fil_iovar_int_set(nd_ifp, "ndoe", enable);
+	err = brcmf_fil_iovar_int_set(ifp, "ndoe", enable);
 	if (err) {
 		brcmf_dbg(TRACE, "failed to configure (%d) ND offload err = %d\n",
 			  enable, err);

@@ -20,6 +20,7 @@
 #include "of.h"
 #include "firmware.h"
 #include "chip.h"
+#include "fwsignal.h"
 
 MODULE_AUTHOR("Broadcom Corporation");
 MODULE_DESCRIPTION("Broadcom 802.11 wireless LAN fullmac driver.");
@@ -55,9 +56,9 @@ module_param_string(alternative_fw_path, brcmf_firmware_path,
 		    BRCMF_FW_ALTPATH_LEN, 0400);
 MODULE_PARM_DESC(alternative_fw_path, "Alternative firmware path");
 
-static int brcmf_fcmode;
+static int brcmf_fcmode = BRCMF_FWS_FCMODE_AUTO;
 module_param_named(fcmode, brcmf_fcmode, int, 0);
-MODULE_PARM_DESC(fcmode, "Mode of firmware signalled flow control");
+MODULE_PARM_DESC(fcmode, "Firmware flow control: -1=auto, 0=off, 1=implied, 2=explicit");
 
 static int brcmf_roamoff;
 module_param_named(roamoff, brcmf_roamoff, int, 0400);

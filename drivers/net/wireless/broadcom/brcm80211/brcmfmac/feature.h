@@ -69,13 +69,13 @@
  * AUTO_AUTH: workaround needed for automatic authentication type.
  * NEED_MPC: driver needs to disable MPC during scanning operation.
  * P2P_DEV_NO_IF_EVT: discovery BSS shares the primary firmware interface.
- * NDOE_PRIMARY: IPv6 ND offload enable is a primary-interface control.
+ * ARP_ND_PRIMARY: ARP/ND mode and enable use the primary control interface.
  */
 #define BRCMF_QUIRK_LIST \
 	BRCMF_QUIRK_DEF(AUTO_AUTH) \
 	BRCMF_QUIRK_DEF(NEED_MPC) \
 	BRCMF_QUIRK_DEF(P2P_DEV_NO_IF_EVT) \
-	BRCMF_QUIRK_DEF(NDOE_PRIMARY)
+	BRCMF_QUIRK_DEF(ARP_ND_PRIMARY)
 
 #define BRCMF_FEAT_DEF(_f) \
 	BRCMF_FEAT_ ## _f,
