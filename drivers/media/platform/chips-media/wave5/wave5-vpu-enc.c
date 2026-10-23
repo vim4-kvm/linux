@@ -231,6 +231,15 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 	pic_param.source_frame = &frame_buf;
 	pic_param.code_option.implicit_header_encode = 1;
 	pic_param.code_option.encode_aud = inst->encode_aud;
+	if (!inst->codec_info->enc_info.open_param.rc_enable) {
+		const struct enc_wave_param *param =
+			&inst->codec_info->enc_info.open_param.wave_param;
+
+		pic_param.force_qp = true;
+		pic_param.qp_i = param->intra_qp;
+		pic_param.qp_p = param->fixed_qp_p;
+		pic_param.qp_b = param->fixed_qp_b;
+	}
 	if (src_buf)
 		pic_param.force_keyframe = atomic_xchg(&inst->force_keyframe, 0);
 	ret = wave5_vpu_enc_start_one_frame(inst, &pic_param, fail_res);
@@ -811,6 +820,28 @@ static const struct v4l2_ioctl_ops wave5_vpu_enc_ioctl_ops = {
 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
 };
 
+static int wave5_set_qp_limits(struct enc_wave_param *param, struct v4l2_ctrl *ctrl)
+{
+	struct v4l2_ctrl **limits = ctrl->cluster;
+	u32 minimum[3], maximum[3];
+	unsigned int i;
+
+	/* The codec-wide bounds also constrain each picture-type interval. */
+	for (i = 0; i < 3; i++) {
+		minimum[i] = max(limits[0]->val, limits[2 + 2 * i]->val);
+		maximum[i] = min(limits[1]->val, limits[3 + 2 * i]->val);
+		if (minimum[i] > maximum[i])
+			return -EINVAL;
+	}
+	param->min_qp_i = minimum[0];
+	param->max_qp_i = maximum[0];
+	param->min_qp_p = minimum[1];
+	param->max_qp_p = maximum[1];
+	param->min_qp_b = minimum[2];
+	param->max_qp_b = maximum[2];
+	return 0;
+}
+
 static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct vpu_instance *inst = wave5_ctrl_to_vpu_inst(ctrl);
@@ -846,13 +877,19 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDEO_VBV_SIZE:
 		inst->vbv_buf_size = ctrl->val;
 		break;
+	case V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE:
+		inst->h264_cpb_size = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEADER_MODE:
+		if (ctrl->val != V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME)
+			return -EINVAL;
+		break;
 	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
 		switch (ctrl->val) {
 		case V4L2_MPEG_VIDEO_BITRATE_MODE_VBR:
-			inst->rc_mode = 0;
-			break;
 		case V4L2_MPEG_VIDEO_BITRATE_MODE_CBR:
-			inst->rc_mode = 1;
+		case V4L2_MPEG_VIDEO_BITRATE_MODE_CQ:
+			inst->rc_mode = ctrl->val;
 			break;
 		default:
 			return -EINVAL;
@@ -950,17 +987,24 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		}
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP:
-		param->min_qp_i = ctrl->val;
-		param->min_qp_p = ctrl->val;
-		param->min_qp_b = ctrl->val;
-		break;
-	case V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP:
-		param->max_qp_i = ctrl->val;
-		param->max_qp_p = ctrl->val;
-		param->max_qp_b = ctrl->val;
-		break;
+	case V4L2_CID_MPEG_VIDEO_H264_MIN_QP:
+		return wave5_set_qp_limits(param, ctrl);
 	case V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP:
 		param->intra_qp = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP:
+	case V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP:
+		param->fixed_qp_p = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_QP:
+	case V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP:
+		param->fixed_qp_b = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEVC_TIER:
+		param->tier = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEVC_INTRA_PU_SPLIT:
+		param->intra_nx_n_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE:
 		switch (ctrl->val) {
@@ -1020,7 +1064,7 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		param->strong_intra_smooth_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_MAX_NUM_MERGE_MV_MINUS1:
-		param->max_num_merge = ctrl->val;
+		param->max_num_merge = ctrl->val + 1;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_TMV_PREDICTION:
 		param->tmvp_enable = ctrl->val;
@@ -1115,16 +1159,6 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		default:
 			return -EINVAL;
 		}
-		break;
-	case V4L2_CID_MPEG_VIDEO_H264_MIN_QP:
-		param->min_qp_i = ctrl->val;
-		param->min_qp_p = ctrl->val;
-		param->min_qp_b = ctrl->val;
-		break;
-	case V4L2_CID_MPEG_VIDEO_H264_MAX_QP:
-		param->max_qp_i = ctrl->val;
-		param->max_qp_p = ctrl->val;
-		param->max_qp_b = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP:
 		param->intra_qp = ctrl->val;
@@ -1294,6 +1328,27 @@ static void wave5_set_enc_picture_size(struct enc_open_param *open_param,
 		inst->conf_win.top - inst->conf_win.height;
 }
 
+static int wave5_set_vbv_size(struct enc_open_param *open_param,
+			      struct vpu_instance *inst)
+{
+	u32 size = inst->std == W_AVC_ENC ? inst->h264_cpb_size : inst->vbv_buf_size;
+	u64 duration;
+
+	/* The userspace unit is KiB; firmware expects milliseconds at target bps. */
+	if (!size) {
+		open_param->vbv_buffer_size =
+			inst->rc_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_VBR ? 3000 : 1000;
+		return 0;
+	}
+	if (!inst->bit_rate)
+		return -EINVAL;
+	duration = DIV_ROUND_UP_ULL((u64)size * 8192000, inst->bit_rate);
+	if (duration < MIN_VBV_BUFFER_SIZE || duration > MAX_VBV_BUFFER_SIZE)
+		return -ERANGE;
+	open_param->vbv_buffer_size = duration;
+	return 0;
+}
+
 static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 				   struct vpu_instance *inst)
 {
@@ -1301,6 +1356,7 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 		inst->hevc_param : inst->enc_param;
 	const struct enc_wave_param *common = &inst->enc_param;
 	const struct v4l2_format_info *info;
+	int ret;
 
 	info = v4l2_format_info(inst->src_fmt.pixelformat);
 	if (!info)
@@ -1331,7 +1387,7 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.hvs_qp_scale = 2;
 	open_param->wave_param.hvs_max_delta_qp = 10;
 	open_param->wave_param.skip_intra_trans = 1;
-	open_param->wave_param.intra_nx_n_enable = 1;
+	open_param->wave_param.intra_nx_n_enable = input.intra_nx_n_enable;
 	open_param->wave_param.nr_intra_weight_y = 7;
 	open_param->wave_param.nr_intra_weight_cb = 7;
 	open_param->wave_param.nr_intra_weight_cr = 7;
@@ -1344,8 +1400,9 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->line_buf_int_en = true;
 	wave5_set_enc_picture_size(open_param, inst);
 	open_param->frame_rate_info = inst->frame_rate;
-	open_param->rc_enable = inst->rc_enable;
-	if (inst->rc_enable) {
+	open_param->rc_enable = inst->rc_enable &&
+		inst->rc_mode != V4L2_MPEG_VIDEO_BITRATE_MODE_CQ;
+	if (open_param->rc_enable) {
 		open_param->wave_param.initial_rc_qp = -1;
 		open_param->wave_param.rc_weight_param = 16;
 		open_param->wave_param.rc_weight_buf = 128;
@@ -1354,14 +1411,19 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.cu_level_rc_enable = common->cu_level_rc_enable;
 	open_param->wave_param.hvs_qp_enable = common->hvs_qp_enable;
 	open_param->bit_rate = inst->bit_rate;
-	open_param->vbv_buffer_size = inst->vbv_buf_size;
-	if (inst->rc_mode == 0)
-		open_param->vbv_buffer_size = 3000;
+	if (open_param->rc_enable) {
+		ret = wave5_set_vbv_size(open_param, inst);
+		if (ret)
+			return ret;
+	}
 	open_param->wave_param.profile = input.profile;
 	open_param->wave_param.en_still_picture = input.en_still_picture;
 	open_param->wave_param.level = input.level;
+	open_param->wave_param.tier = input.tier;
 	open_param->wave_param.internal_bit_depth = input.internal_bit_depth;
 	open_param->wave_param.intra_qp = input.intra_qp;
+	open_param->wave_param.fixed_qp_p = input.fixed_qp_p;
+	open_param->wave_param.fixed_qp_b = input.fixed_qp_b;
 	open_param->wave_param.min_qp_i = input.min_qp_i;
 	open_param->wave_param.max_qp_i = input.max_qp_i;
 	open_param->wave_param.min_qp_p = input.min_qp_p;
@@ -1369,6 +1431,7 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.min_qp_b = input.min_qp_b;
 	open_param->wave_param.max_qp_b = input.max_qp_b;
 	open_param->wave_param.disable_deblk = input.disable_deblk;
+	open_param->wave_param.sao_enable = input.sao_enable;
 	open_param->wave_param.lf_cross_slice_boundary_enable =
 		input.lf_cross_slice_boundary_enable;
 	open_param->wave_param.tc_offset_div2 = input.tc_offset_div2;
@@ -1396,7 +1459,9 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.chroma_cb_qp_offset = input.chroma_cb_qp_offset;
 	open_param->wave_param.chroma_cr_qp_offset = input.chroma_cr_qp_offset;
 	open_param->wave_param.independ_slice_mode = common->independ_slice_mode;
-	open_param->wave_param.independ_slice_mode_arg = common->independ_slice_mode_arg;
+	/* V4L2 counts 16x16 macroblocks; HEVC firmware counts 64x64 CTUs. */
+	open_param->wave_param.independ_slice_mode_arg =
+		DIV_ROUND_UP(common->independ_slice_mode_arg, 16);
 	open_param->wave_param.avc_slice_mode = common->avc_slice_mode;
 	open_param->wave_param.avc_slice_arg = common->avc_slice_arg;
 	wave5_set_intra_refresh(&open_param->wave_param, inst->conf_win.height,
@@ -1753,6 +1818,25 @@ static const struct v4l2_m2m_ops wave5_vpu_enc_t7_m2m_ops = {
 	.job_abort = wave5_vpu_job_abort,
 };
 
+static void wave5_create_qp_limits(struct vpu_instance *inst, bool hevc)
+{
+	struct v4l2_ctrl_handler *hdl = &inst->v4l2_ctrl_hdl;
+	struct v4l2_ctrl **limits = hevc ? inst->hevc_qp_limits : inst->avc_qp_limits;
+	u32 first = hevc ? V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_MIN_QP :
+		V4L2_CID_MPEG_VIDEO_H264_I_FRAME_MIN_QP;
+	unsigned int i;
+
+	limits[0] = v4l2_ctrl_find(hdl, hevc ? V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP :
+				 V4L2_CID_MPEG_VIDEO_H264_MIN_QP);
+	limits[1] = v4l2_ctrl_find(hdl, hevc ? V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP :
+				 V4L2_CID_MPEG_VIDEO_H264_MAX_QP);
+	for (i = 0; i < 6; i++)
+		limits[i + 2] = v4l2_ctrl_new_std(hdl, &wave5_vpu_enc_ctrl_ops,
+						  first + i, 0, 51, 1, i % 2 ? 51 : 0);
+	if (!hdl->error)
+		v4l2_ctrl_cluster(8, limits);
+}
+
 static int wave5_vpu_open_enc(struct file *filp)
 {
 	struct video_device *vdev = video_devdata(filp);
@@ -1793,24 +1877,36 @@ static int wave5_vpu_open_enc(struct file *filp)
 	}
 	v4l2_m2m_set_src_buffered(inst->v4l2_fh.m2m_ctx, true);
 
-	v4l2_ctrl_handler_init(v4l2_ctrl_hdl, 50);
+	v4l2_ctrl_handler_init(v4l2_ctrl_hdl, 80);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
 			       V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10, 0,
 			       V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
-			       V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1, 0,
+			       V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2, 0,
 			       V4L2_MPEG_VIDEO_HEVC_LEVEL_1);
+	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			       V4L2_CID_MPEG_VIDEO_HEVC_TIER,
+			       V4L2_MPEG_VIDEO_HEVC_TIER_HIGH, 0,
+			       V4L2_MPEG_VIDEO_HEVC_TIER_MAIN);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_HEVC_INTRA_PU_SPLIT, 0, 1, 1, 1);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
-			  0, 63, 1, 8);
+			  0, 51, 1, 8);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,
-			  0, 63, 1, 51);
+			  0, 51, 1, 51);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP,
-			  0, 63, 1, 30);
+			  0, 51, 1, 30);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP,
+			  0, 51, 1, 30);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_QP,
+			  0, 51, 1, 30);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE,
 			       V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY, 0,
@@ -1842,7 +1938,7 @@ static int wave5_vpu_open_enc(struct file *filp)
 			  0, 1, 1, 1);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_HEVC_MAX_NUM_MERGE_MV_MINUS1,
-			  1, 2, 1, 2);
+			  0, 1, 1, 1);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_HEVC_TMV_PREDICTION,
 			  0, 1, 1, 1);
@@ -1861,13 +1957,19 @@ static int wave5_vpu_open_enc(struct file *filp)
 			       V4L2_MPEG_VIDEO_H264_LEVEL_1_0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_H264_MIN_QP,
-			  0, 63, 1, 8);
+			  0, 51, 1, 8);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
-			  0, 63, 1, 51);
+			  0, 51, 1, 51);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
-			  0, 63, 1, 30);
+			  0, 51, 1, 30);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP,
+			  0, 51, 1, 30);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP,
+			  0, 51, 1, 30);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE,
 			       V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY, 0,
@@ -1911,10 +2013,18 @@ static int wave5_vpu_open_enc(struct file *filp)
 			  0, 270, 90, 0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_VBV_SIZE,
-			  10, 3000, 1, 1000);
+			  0, 262144, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE,
+			  0, 262144, 1, 0);
+	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			       V4L2_CID_MPEG_VIDEO_HEADER_MODE,
+			       V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME,
+			       BIT(V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE),
+			       V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
-			       V4L2_MPEG_VIDEO_BITRATE_MODE_CBR, 0,
+			       V4L2_MPEG_VIDEO_BITRATE_MODE_CQ, 0,
 			       V4L2_MPEG_VIDEO_BITRATE_MODE_CBR);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_BITRATE,
@@ -1951,6 +2061,8 @@ static int wave5_vpu_open_enc(struct file *filp)
 			  V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR,
 			  0, 1, 1, 0);
 
+	wave5_create_qp_limits(inst, false);
+	wave5_create_qp_limits(inst, true);
 	if (v4l2_ctrl_hdl->error) {
 		ret = -ENODEV;
 		goto cleanup_inst;

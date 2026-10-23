@@ -8,7 +8,7 @@ import tempfile
 hardware = Path(__file__).with_name('wave5-hw.c').read_text()
 encoder = Path(__file__).with_name('wave5-vpu-enc.c').read_text()
 picture = encoder[encoder.index('static void wave5_set_enc_picture_size('):
-                  encoder.index('static int wave5_set_enc_openparam(')]
+                       encoder.index('static int wave5_set_vbv_size(')]
 crop = hardware[hardware.index('static void wave5_set_enc_crop_info('):
                 hardware.index('static u32 wave5_enc_sps_profile(')]
 prefix = r'''

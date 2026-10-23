@@ -490,6 +490,8 @@ struct enc_wave_param {
 	u32 gop_preset_idx: 4; /* 0 - 9 */
 	u32 decoding_refresh_type: 2; /* 0=non-IRAP, 1=CRA, 2=IDR */
 	u32 intra_qp; /* quantization parameter of intra picture */
+	u32 fixed_qp_p;
+	u32 fixed_qp_b;
 	u32 intra_period; /* period of intra picture in GOP size */
 	u32 conf_win_top; /* top offset of conformance window */
 	u32 conf_win_bot; /* bottom offset of conformance window */
@@ -624,6 +626,10 @@ struct enc_param {
 	u64 pts; /* presentation timestamp (PTS) of the input source */
 	bool src_end_flag;
 	bool force_keyframe;
+	bool force_qp;
+	u32 qp_i;
+	u32 qp_p;
+	u32 qp_b;
 };
 
 struct enc_output_info {
@@ -864,6 +870,7 @@ struct vpu_instance {
 	unsigned int mirror_direction;
 	unsigned int frame_rate;
 	unsigned int vbv_buf_size;
+	unsigned int h264_cpb_size;
 	unsigned int intra_refresh_period;
 	unsigned int rc_mode;
 	unsigned int rc_enable;
@@ -872,6 +879,8 @@ struct vpu_instance {
 	atomic_t force_keyframe;
 	struct enc_wave_param enc_param;
 	struct enc_wave_param hevc_param;
+	struct v4l2_ctrl *avc_qp_limits[8];
+	struct v4l2_ctrl *hevc_qp_limits[8];
 };
 
 void wave5_vdi_write_register(struct vpu_device *vpu_dev, u32 addr, u32 data);

@@ -2315,7 +2315,9 @@ int wave5_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *f
 
 	/* Forced picture code 3 selects IDR; it differs from the result type 5. */
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_PIC_PARAM,
-		      option->force_keyframe ? BIT(20) | (3 << 21) : 0);
+		      (option->force_keyframe ? BIT(20) | (3 << 21) : 0) |
+		      (option->force_qp ? BIT(1) | (option->qp_i << 2) |
+		       (option->qp_p << 8) | (option->qp_b << 14) : 0));
 
 	if (option->src_end_flag)
 		/* no more source images. */
