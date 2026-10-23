@@ -4,6 +4,7 @@
 // Author: Jerome Brunet <jbrunet@baylibre.com>
 
 #include <linux/clk.h>
+#include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
 #include <linux/regmap.h>
@@ -24,6 +25,36 @@ struct axg_tdm_formatter {
 	struct reset_control *reset;
 	bool enabled;
 	struct regmap *map;
+};
+
+/* T7 keeps its extra gain controls in a separate, non-contiguous bank. */
+struct axg_tdm_registers {
+	void __iomem *core;
+	void __iomem *ext;
+};
+
+static void __iomem *axg_tdm_register(struct axg_tdm_registers *regs,
+				      unsigned int reg)
+{
+	return reg < 0x40 ? regs->core + reg : regs->ext + reg - 0x40;
+}
+
+static int axg_tdm_reg_read(void *context, unsigned int reg, unsigned int *val)
+{
+	*val = readl(axg_tdm_register(context, reg));
+	return 0;
+}
+
+static int axg_tdm_reg_write(void *context, unsigned int reg, unsigned int val)
+{
+	writel(val, axg_tdm_register(context, reg));
+	return 0;
+}
+
+static const struct regmap_bus axg_tdm_regmap_bus = {
+	.reg_read = axg_tdm_reg_read,
+	.reg_write = axg_tdm_reg_write,
+	.fast_io = true,
 };
 
 int axg_tdm_formatter_set_channel_masks(struct regmap *map,
@@ -104,6 +135,13 @@ static int axg_tdm_formatter_enable(struct axg_tdm_formatter *formatter)
 	ret = reset_control_reset(formatter->reset);
 	if (ret)
 		return ret;
+
+	if (formatter->drv->quirks->extended) {
+		regcache_mark_dirty(formatter->map);
+		ret = regcache_sync(formatter->map);
+		if (ret)
+			return ret;
+	}
 
 	/*
 	 * If sclk is inverted, it means the bit should latched on the
@@ -202,6 +240,9 @@ static int axg_tdm_formatter_power_up(struct axg_tdm_formatter *formatter,
 	if (ret)
 		return ret;
 
+	if (formatter->drv->quirks->extended)
+		regcache_cache_only(formatter->map, false);
+
 	/* Reparent the bit clock to the TDM interface */
 	ret = clk_set_parent(formatter->sclk_sel, ts->iface->sclk);
 	if (ret)
@@ -220,6 +261,8 @@ static int axg_tdm_formatter_power_up(struct axg_tdm_formatter *formatter,
 	return 0;
 
 disable_pclk:
+	if (formatter->drv->quirks->extended)
+		regcache_cache_only(formatter->map, true);
 	clk_disable_unprepare(formatter->pclk);
 	return ret;
 }
@@ -227,6 +270,8 @@ disable_pclk:
 static void axg_tdm_formatter_power_down(struct axg_tdm_formatter *formatter)
 {
 	axg_tdm_formatter_dettach(formatter);
+	if (formatter->drv->quirks->extended)
+		regcache_cache_only(formatter->map, true);
 	clk_disable_unprepare(formatter->pclk);
 	formatter->stream = NULL;
 }
@@ -280,12 +325,28 @@ int axg_tdm_formatter_probe(struct platform_device *pdev)
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 
-	formatter->map = devm_regmap_init_mmio(dev, regs, drv->regmap_cfg);
+	if (drv->quirks->extended) {
+		struct axg_tdm_registers *banks;
+
+		banks = devm_kzalloc(dev, sizeof(*banks), GFP_KERNEL);
+		if (!banks)
+			return -ENOMEM;
+		banks->core = regs;
+		banks->ext = devm_platform_ioremap_resource_byname(pdev, "ext");
+		if (IS_ERR(banks->ext))
+			return PTR_ERR(banks->ext);
+		formatter->map = devm_regmap_init(dev, &axg_tdm_regmap_bus, banks,
+						  drv->regmap_cfg);
+	} else {
+		formatter->map = devm_regmap_init_mmio(dev, regs, drv->regmap_cfg);
+	}
 	if (IS_ERR(formatter->map)) {
 		dev_err(dev, "failed to init regmap: %ld\n",
 			PTR_ERR(formatter->map));
 		return PTR_ERR(formatter->map);
 	}
+	if (drv->quirks->extended)
+		regcache_cache_only(formatter->map, true);
 
 	/* Peripharal clock */
 	formatter->pclk = devm_clk_get(dev, "pclk");

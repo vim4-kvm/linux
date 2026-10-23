@@ -44,6 +44,8 @@
 #define TDMOUT_MUTE2			0x34
 #define TDMOUT_MUTE3			0x38
 #define TDMOUT_MASK_VAL			0x3c
+#define T7_TDMOUT_GAIN_EN			0x70
+#define T7_TDMOUT_GAIN_CTRL		0x74
 
 static const struct regmap_config axg_tdmout_regmap_cfg = {
 	.reg_bits	= 32,
@@ -311,6 +313,72 @@ static const struct axg_tdm_formatter_driver sm1_tdmout_drv = {
 	},
 };
 
+static bool t7_tdmout_volatile_reg(struct device *dev, unsigned int reg)
+{
+	switch (reg) {
+	case TDMOUT_CTRL1:
+	case TDMOUT_GAIN0:
+	case TDMOUT_GAIN1:
+	case T7_TDMOUT_GAIN_EN:
+	case T7_TDMOUT_GAIN_CTRL:
+		return false;
+	default:
+		return true;
+	}
+}
+
+static const struct reg_default t7_tdmout_defaults[] = {
+	{ TDMOUT_CTRL1, 0 },
+	{ TDMOUT_GAIN0, 0xffffffff },
+	{ TDMOUT_GAIN1, 0xffffffff },
+	{ T7_TDMOUT_GAIN_EN, 0 },
+	{ T7_TDMOUT_GAIN_CTRL, 0x000a0002 },
+};
+
+static const struct regmap_config t7_tdmout_regmap_cfg = {
+	.reg_bits = 32,
+	.val_bits = 32,
+	.reg_stride = 4,
+	.max_register = T7_TDMOUT_GAIN_CTRL,
+	.cache_type = REGCACHE_FLAT,
+	.volatile_reg = t7_tdmout_volatile_reg,
+	.reg_defaults = t7_tdmout_defaults,
+	.num_reg_defaults = ARRAY_SIZE(t7_tdmout_defaults),
+};
+
+static const struct snd_kcontrol_new t7_tdmout_controls[] = {
+	SOC_DOUBLE("Lane 0 Playback Volume", TDMOUT_GAIN0, 0, 8, 255, 0),
+	SOC_DOUBLE("Lane 1 Playback Volume", TDMOUT_GAIN0, 16, 24, 255, 0),
+	SOC_DOUBLE("Lane 2 Playback Volume", TDMOUT_GAIN1, 0, 8, 255, 0),
+	SOC_DOUBLE("Lane 3 Playback Volume", TDMOUT_GAIN1, 16, 24, 255, 0),
+	SOC_DOUBLE("Lane 0 Gain Switch", T7_TDMOUT_GAIN_EN, 0, 1, 1, 0),
+	SOC_DOUBLE("Lane 1 Gain Switch", T7_TDMOUT_GAIN_EN, 2, 3, 1, 0),
+	SOC_DOUBLE("Lane 2 Gain Switch", T7_TDMOUT_GAIN_EN, 4, 5, 1, 0),
+	SOC_DOUBLE("Lane 3 Gain Switch", T7_TDMOUT_GAIN_EN, 6, 7, 1, 0),
+	SOC_SINGLE("Gain Ramp Switch", T7_TDMOUT_GAIN_CTRL, 31, 1, 0),
+	SOC_SINGLE("Gain Ramp Step", T7_TDMOUT_GAIN_CTRL, 16, 255, 0),
+	SOC_SINGLE("Gain Ramp Period", T7_TDMOUT_GAIN_CTRL, 0, 65535, 0),
+};
+
+static const struct snd_soc_component_driver t7_tdmout_component_drv = {
+	.controls = t7_tdmout_controls,
+	.num_controls = ARRAY_SIZE(t7_tdmout_controls),
+	.dapm_widgets = sm1_tdmout_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(sm1_tdmout_dapm_widgets),
+	.dapm_routes = sm1_tdmout_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(sm1_tdmout_dapm_routes),
+};
+
+static const struct axg_tdm_formatter_driver t7_tdmout_drv = {
+	.component_drv = &t7_tdmout_component_drv,
+	.regmap_cfg = &t7_tdmout_regmap_cfg,
+	.ops = &axg_tdmout_ops,
+	.quirks = &(const struct axg_tdm_formatter_hw) {
+		.skew_offset = 2,
+		.extended = true,
+	},
+};
+
 static const struct of_device_id axg_tdmout_of_match[] = {
 	{
 		.compatible = "amlogic,axg-tdmout",
@@ -321,6 +389,9 @@ static const struct of_device_id axg_tdmout_of_match[] = {
 	}, {
 		.compatible = "amlogic,sm1-tdmout",
 		.data = &sm1_tdmout_drv,
+	}, {
+		.compatible = "amlogic,t7-tdmout",
+		.data = &t7_tdmout_drv,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, axg_tdmout_of_match);
