@@ -10,6 +10,7 @@ import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--vendor', type=Path, required=True)
+parser.add_argument('--dtb', type=Path, help='Check RDMA writes against compiled MMIO ownership')
 args = parser.parse_args()
 directory = Path(__file__).resolve().parent
 vendor_dir = args.vendor / 'drivers/drm/vpu-hw'
@@ -44,6 +45,7 @@ prefix = r'''
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <errno.h>
 #include <string.h>
 typedef uint8_t u8;
@@ -89,10 +91,12 @@ struct rdma_reg_ops {
     void (*rdma_write_reg_bits)(u32, u32, unsigned int, unsigned int);
 };
 static u32 hw[0x6000], coefficients[2][33];
+static bool touched[0x6000];
 static unsigned int phase, axis;
 static void write_reg(u32 reg, u32 value)
 {
     assert(reg < ARRAY_SIZE(hw));
+    touched[reg] = true;
     hw[reg] = value;
     if ((reg & 0xff3f) == 0x5a0c) {axis = !!(value & BIT(8)); phase = 0;}
     if ((reg & 0xff3f) == 0x5a0d) {
@@ -169,6 +173,8 @@ int main(void)
     bytes=meson_t7_osd_layers_build(table,MESON_T7_RDMA_PAIRS,layers,1920,1080,0,0);
     for (int i=0;i<bytes/4;i+=2) write_reg(table[i],table[i+1]);
     assert(!(hw[0x1a10]&1) && !(hw[0x1a30]&1) && !(hw[0x3d80]&1));
+    for (unsigned int reg=0;reg<ARRAY_SIZE(touched);reg++)
+        if (touched[reg]) printf("%x\n",reg);
 }
 '''
 vendor_code = vendor[vendor.index('static unsigned int __osd_filter_coefs_bicubic_sharp'):
@@ -183,5 +189,31 @@ with tempfile.TemporaryDirectory() as work:
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', str(path / 'layers.c'),
                     '-o', str(path / 'layers')], check=True)
-    subprocess.run([str(path / 'layers')], check=True)
+    writes = {int(reg, 16) for reg in subprocess.check_output(
+        [str(path / 'layers')], text=True).split()}
+if args.dtb:
+    cells = [int(cell, 16) for cell in subprocess.check_output(
+        ['fdtget', '-t', 'x', str(args.dtb), '/display@ff006840', 'reg'],
+        text=True).split()]
+    assert cells and len(cells) % 4 == 0
+    claims = [((cells[i] << 32) | cells[i + 1], (cells[i + 2] << 32) | cells[i + 3])
+              for i in range(0, len(cells), 4)]
+    vdin = (directory.parents[2] /
+            'media/platform/amlogic/t7-hdmirx/t7-vdin-test.c').read_text()
+    regions = initializer(vdin, 'regions[]')
+    capture = [(int(start, 16), int(size, 16)) for start, size in
+               re.findall(r'\{\s*(0x[0-9a-f]+),\s*(0x[0-9a-f]+)\s*}', regions)]
+    assert capture
+
+    def claimed(address, size):
+        return any(start <= address and address + size <= start + length
+                   for start, length in claims)
+
+    for reg in writes:
+        assert claimed(0xff000000 + reg * 4, 4), f'Unclaimed RDMA register {reg:#x}'
+        assert reg not in (0x27a2, 0x27a3), 'Shared VDIN arbiter must not be changed'
+    for start, size in claims:
+        for capture_start, capture_size in capture:
+            assert max(start, capture_start) >= min(start + size, capture_start + capture_size)
+    print(f'Compiled M3 DT: all {len(writes)} OSD RDMA registers claimed; capture disjoint')
 print('OSD transactions: 27 vendor scaler/coefficients cases, MIF banks, zpos, blank and bounds passed')
