@@ -1014,6 +1014,22 @@ static bool t7_hdmirx_same_measurement(const struct t7_hdmirx_measurement *a,
 	return !memcmp(&left, &right, sizeof(left)) && delta <= a->ticks / 2000;
 }
 
+static int t7_hdmirx_measure_live(struct t7_hdmirx *rx, bool yuv420,
+				struct t7_hdmirx_measurement *measured)
+{
+	int ret = t7_hdmirx_measure(rx, yuv420, measured);
+
+	/* A coherent FDET can briefly saturate or report zero height. Every
+	 * measurement in a live timing query must classify this as retry, or
+	 * its middle read can publish a false SOURCE_CHANGE despite passing
+	 * the surrounding status checks. Persistent retries remain bounded by
+	 * the link worker; no invalid measurement is published.
+	 */
+	if (ret == -ERANGE && rx->link && READ_ONCE(rx->link->users))
+		return -EAGAIN;
+	return ret;
+}
+
 static int t7_hdmirx_video_error(const char **reason, const char *value, int error)
 {
 	if (reason)
@@ -1060,15 +1076,7 @@ static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reas
 	    (hdr != rx->lease_hdr || yuv != rx->lease_yuv || yuv420 != rx->lease_420))
 		return t7_hdmirx_video_error(reason, "lease-encoding", -ENOLINK);
 	if (rx->dynamic_modes) {
-		ret = t7_hdmirx_measure(rx, yuv420, &measured);
-		/* An aligned FDET can briefly saturate at 0xffffff or report zero
-		 * height even when both reads agree. Discard that frame under a
-		 * live lease. The link worker bounds EAGAIN to one second before
-		 * clearing ready; genuine loss and valid mode changes still stop
-		 * capture immediately, and no malformed frame is published.
-		 */
-		if (ret == -ERANGE && rx->link && READ_ONCE(rx->link->users))
-			ret = -EAGAIN;
+		ret = t7_hdmirx_measure_live(rx, yuv420, &measured);
 		if (!ret && rx->link && rx->link->users &&
 		    !t7_hdmirx_same_measurement(&measured, &rx->lease_mode))
 			return t7_hdmirx_video_error(reason, "lease-timing", -ENOLINK);
@@ -1170,7 +1178,7 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 		if (ret)
 			return ret;
 		scale = color.space == 3 ? 2 : 1;
-		ret = t7_hdmirx_measure(rx, scale == 2, &m);
+		ret = t7_hdmirx_measure_live(rx, scale == 2, &m);
 		if (ret)
 			return ret;
 		mode = (struct v4l2_dv_timings) { .type = V4L2_DV_BT_656_1120 };

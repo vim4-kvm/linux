@@ -215,6 +215,19 @@ int main(void) {
     assert(t7_hdmirx_check_video_now(&dev)==-ENOLINK);
     link.ready=true; measured_mode(&modes[0]);
     assert(!t7_hdmirx_check_video_now(&dev));
+    /* The ioctl takes a fresh measurement between its status checks.
+     * Saturation at that middle read must not become a false source loss.
+     */
+    for (unsigned int read=3;read<=5;read+=2) {
+        measured_mode(&modes[0]); period_reads=0; change_read=read;
+        changed_period=0xffffff; timing=untouched;
+        interval=(struct v4l2_fract){123,456};
+        assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-EAGAIN);
+        assert(!memcmp(&timing,&untouched,sizeof(timing)));
+        assert(interval.numerator==123 && interval.denominator==456);
+    }
+    change_read=0; measured_mode(&modes[0]);
+    assert(!t7_hdmirx_query_timings(&dev,&timing,&interval));
     measured_mode(&modes[1]);
     assert(t7_hdmirx_check_video_now(&dev)==-ENOLINK);
     link.users=0; measured_mode(&modes[0]); period(0xffffff);

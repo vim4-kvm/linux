@@ -166,7 +166,7 @@ struct t7_vdin {
 	u32 ring_pauses;
 	u64 copied_bytes;
 	/* Last failed worker remains visible across close and the next STREAMON. */
-	u32 stream_stops, last_stop_sequence;
+	u32 stream_stops, last_stop_sequence, source_changes;
 	u64 invalid_frames;
 	int last_stop_error;
 	const char *last_stop_reason;
@@ -999,6 +999,7 @@ static void t7_vdin_source_work(struct work_struct *work)
 				timings.bt.height != vdin->source_height ||
 				delta > vdin->source_period / 2000)))) {
 			event.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION;
+			vdin->source_changes++;
 			v4l2_event_queue(&vdin->video, &event);
 		}
 		vdin->source_seen = true;
@@ -1362,6 +1363,7 @@ static int t7_vdin_status(struct seq_file *s, void *unused)
 	seq_printf(s, "stream_pauses: %u\n", vdin->ring_pauses);
 	seq_printf(s, "stream_error: %d\n", vdin->ring_error);
 	seq_printf(s, "stream_stops: %u\n", READ_ONCE(vdin->stream_stops));
+	seq_printf(s, "source_changes: %u\n", READ_ONCE(vdin->source_changes));
 	seq_printf(s, "invalid_frames: %llu\n", READ_ONCE(vdin->invalid_frames));
 	seq_printf(s, "last_stop_error: %d\n", READ_ONCE(vdin->last_stop_error));
 	seq_printf(s, "last_stop_reason: %s\n", vdin->last_stop_reason ?: "none");

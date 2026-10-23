@@ -26,7 +26,7 @@ struct t7_vdin {
     struct delayed_work source_work; struct mutex video_lock;
     struct device *receiver; struct video_device video;
     bool source_seen,source_locked; unsigned int source_width,source_height;
-    unsigned int source_period;
+    unsigned int source_period,source_changes;
 };
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
 #define to_delayed_work(p) container_of(p,struct delayed_work,work)
@@ -75,7 +75,7 @@ int main(void) {
     frame_period=33333; t7_vdin_source_work(&receiver.source_work.work); assert(events==5);
     frame_period=41667; t7_vdin_source_work(&receiver.source_work.work); assert(events==6);
     frame_period=16667; t7_vdin_source_work(&receiver.source_work.work); assert(events==7);
-    assert(!receiver.video_lock.held);
+    assert(!receiver.video_lock.held && receiver.source_changes==events);
     t7_vdin_source_stop(&receiver); assert(canceled==1);
     puts("Source monitor: real mode/loss/recovery events, stable input and torn-counter retry passed");
 }
