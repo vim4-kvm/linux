@@ -350,7 +350,9 @@ with tempfile.TemporaryDirectory(prefix='wave5-lookahead-') as directory:
         'static void wave5_vpu_enc_finish_encode(', 'static int wave5_vpu_enc_job_ready(',
         'static int wave5_stop_encoder(', 'static void streamoff_output(',
         'static void streamoff_capture(', 'static void wave5_vpu_enc_stop_streaming('))
-    code.write_text(scheduler + functions + behavior)
+    code.write_text(scheduler +
+                   'static int wave5_apply_enc_changes(struct vpu_instance *inst) '
+                   '{ (void)inst; return 0; }\n' + functions + behavior)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-Wno-unused-function',
                     '-fsanitize=address,undefined', str(code), '-o', str(binary)], check=True)

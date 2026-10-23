@@ -872,6 +872,40 @@ int wave5_vpu_enc_register_frame_buffer(struct vpu_instance *inst, unsigned int 
 	return ret;
 }
 
+int wave5_vpu_enc_change_param(struct vpu_instance *inst,
+			       const struct enc_open_param *param, u32 mask)
+{
+	struct enc_output_info result = {};
+	u32 command_mask = mask & ~ENC_CHANGE_PICTURE;
+	int ret;
+
+	/* Called between M2M jobs, with no picture result outstanding. A change
+	 * has its own completion and report; neither consumes a video buffer.
+	 */
+	if (command_mask) {
+		ret = mutex_lock_interruptible(&inst->dev->hw_lock);
+		if (ret)
+			return ret;
+		reinit_completion(&inst->irq_done);
+		ret = wave5_vpu_enc_change(inst, param, command_mask);
+		mutex_unlock(&inst->dev->hw_lock);
+		if (ret)
+			return ret;
+		ret = wave5_vpu_wait_interrupt(inst, VPU_ENC_TIMEOUT);
+		if (ret)
+			return ret;
+		ret = wave5_vpu_enc_get_output_info(inst, &result);
+		if (ret)
+			return ret;
+		if (result.recon_frame_index != RECON_IDX_FLAG_CHANGE_PARAM) {
+			wave5_vpu_isolate(inst->dev, "unexpected parameter change report", 0);
+			return -EIO;
+		}
+	}
+	inst->codec_info->enc_info.open_param = *param;
+	return 0;
+}
+
 static int wave5_check_enc_param(struct vpu_instance *inst, struct enc_param *param)
 {
 	struct enc_info *p_enc_info = &inst->codec_info->enc_info;

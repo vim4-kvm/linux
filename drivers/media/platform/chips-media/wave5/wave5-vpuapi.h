@@ -472,6 +472,18 @@ struct custom_gop_pic_param {
 	s32 temporal_id; /* temporal ID of nth picture in the custom GOP */
 };
 
+/* WAVE5 SET_PARAM change groups; these are firmware bits, not a userspace ABI. */
+#define ENC_CHANGE_PPS			BIT(0)
+#define ENC_CHANGE_INTRA			BIT(1)
+#define ENC_CHANGE_BITRATE		BIT(8)
+#define ENC_CHANGE_RC			BIT(9)
+#define ENC_CHANGE_QP			BIT(10)
+#define ENC_CHANGE_INTER_QP		BIT(12)
+#define ENC_CHANGE_SLICE			BIT(16)
+#define ENC_CHANGE_RDO			BIT(18)
+/* Picture controls need no SET_PARAM command. */
+#define ENC_CHANGE_PICTURE		BIT(31)
+
 struct enc_wave_param {
 	/*
 	 * profile indicator (HEVC only)
@@ -879,6 +891,7 @@ struct vpu_instance {
 	unsigned int rc_enable;
 	unsigned int bit_rate;
 	unsigned int encode_aud;
+	u32 enc_change_mask;
 	atomic_t force_keyframe;
 	struct enc_wave_param enc_param;
 	struct enc_wave_param hevc_param;
@@ -928,6 +941,8 @@ int wave5_vpu_enc_register_frame_buffer(struct vpu_instance *inst, unsigned int 
 					enum tiled_map_type map_type);
 int wave5_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *param,
 				  u32 *fail_res);
+int wave5_vpu_enc_change_param(struct vpu_instance *inst,
+			       const struct enc_open_param *param, u32 mask);
 int wave5_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_info *info);
 int wave5_vpu_enc_give_command(struct vpu_instance *inst, enum codec_command cmd, void *parameter);
 

@@ -2014,6 +2014,66 @@ int wave5_vpu_enc_init_seq(struct vpu_instance *inst)
 	return send_firmware_command(inst, W5_ENC_SET_PARAM, true, NULL, NULL);
 }
 
+int wave5_vpu_enc_change(struct vpu_instance *inst, const struct enc_open_param *param,
+			 u32 mask)
+{
+	const struct enc_wave_param *p = &param->wave_param;
+	u32 value;
+
+	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_SET_PARAM_OPTION, OPT_CHANGE_PARAM);
+	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_SET_PARAM_ENABLE, mask);
+	if (mask & ENC_CHANGE_PPS) {
+		value = (p->const_intra_pred_flag << 1) |
+			(p->lf_cross_slice_boundary_enable << 2) |
+			(p->disable_deblk << 5) |
+			((p->beta_offset_div2 & 0xf) << 6) |
+			((p->tc_offset_div2 & 0xf) << 10) |
+			((p->chroma_cb_qp_offset & 0x1f) << 14) |
+			((p->chroma_cr_qp_offset & 0x1f) << 19) |
+			(p->transform8x8_enable << 29) |
+			(p->entropy_coding_mode << 30);
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_PPS_PARAM, value);
+	}
+	if (mask & ENC_CHANGE_INTRA) {
+		if (inst->std == W_AVC_ENC)
+			value = p->intra_qp |
+				(p->intra_period << ENC_AVC_INTRA_PERIOD_SHIFT) |
+				(p->avc_idr_period << ENC_AVC_IDR_PERIOD_SHIFT) |
+				(p->forced_idr_header_enable << ENC_AVC_FORCED_IDR_HEADER_SHIFT);
+		else
+			value = (p->intra_qp << ENC_HEVC_INTRA_QP_SHIFT) |
+				(p->forced_idr_header_enable << ENC_HEVC_FORCED_IDR_HEADER_SHIFT) |
+				(p->intra_period << ENC_HEVC_INTRA_PERIOD_SHIFT);
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_INTRA_PARAM, value);
+	}
+	if (mask & ENC_CHANGE_BITRATE)
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_TARGET_RATE, param->bit_rate);
+	if (mask & ENC_CHANGE_RC)
+		/* Changing RC does not toggle the sequence's CU/MB or frame RC mode. */
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_PARAM,
+			      (p->hvs_qp_enable << 2) | (p->hvs_qp_scale << 4) |
+			      (param->vbv_buffer_size << 20));
+	if (mask & ENC_CHANGE_QP)
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_MIN_MAX_QP,
+			      p->min_qp_i | (p->max_qp_i << 6) | (p->hvs_max_delta_qp << 12));
+	if (mask & ENC_CHANGE_INTER_QP)
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_INTER_MIN_MAX_QP,
+			      p->min_qp_p | (p->max_qp_p << 6) |
+			      (p->min_qp_b << 12) | (p->max_qp_b << 18));
+	if (mask & ENC_CHANGE_SLICE) {
+		value = inst->std == W_AVC_ENC ?
+			p->avc_slice_mode | (p->avc_slice_arg << 16) :
+			p->independ_slice_mode | (p->independ_slice_mode_arg << 16);
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_INDEPENDENT_SLICE, value);
+	}
+	if (mask & ENC_CHANGE_RDO)
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RDO_PARAM,
+			      (p->rdo_skip << 2) | (p->lambda_scaling_enable << 3) |
+			      (p->intra_nx_n_enable << 8) | (p->max_num_merge << 18));
+
+	return send_firmware_command(inst, W5_ENC_SET_PARAM, true, NULL, NULL);
+}
+
 int wave5_vpu_enc_get_seq_info(struct vpu_instance *inst, struct enc_initial_info *info)
 {
 	int ret;

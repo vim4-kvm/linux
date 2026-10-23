@@ -75,6 +75,119 @@ with tempfile.TemporaryDirectory(prefix='wave5-profile-') as directory:
                     str(source), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""Execute SET_PARAM packing and completion ownership with scripted firmware."""
+from pathlib import Path
+import subprocess
+import tempfile
+
+root = Path(__file__).parent
+api = (root / 'wave5-vpuapi.h').read_text()
+param = api[api.index('struct enc_wave_param {'):]
+param = param[:param.index('\n};') + 3]
+defines = '\n'.join(line for line in api.splitlines()
+                    if line.startswith(('#define ENC_CHANGE_', '#define ENC_AVC_',
+                                        '#define ENC_HEVC_')))
+hardware = (root / 'wave5-hw.c').read_text()
+defines += '\n' + '\n'.join(line for line in hardware.splitlines()
+                             if line.startswith(('#define ENC_AVC_', '#define ENC_HEVC_')))
+change = hardware[hardware.index('int wave5_vpu_enc_change('):
+                  hardware.index('int wave5_vpu_enc_get_seq_info(')]
+source = (root / 'wave5-vpuapi.c').read_text()
+wrapper = source[source.index('int wave5_vpu_enc_change_param('):
+                 source.index('static int wave5_check_enc_param(')]
+mock = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include "wave5-regdefine.h"
+typedef uint32_t u32;
+typedef int32_t s32;
+#define BIT(n) (1U<<(n))
+#define W_AVC_ENC 1
+#define W_HEVC_ENC 2
+#define OPT_CHANGE_PARAM 0x10
+#define VPU_ENC_TIMEOUT 5000
+#define RECON_IDX_FLAG_CHANGE_PARAM (-4)
+'''
+framework = r'''
+struct enc_open_param { struct enc_wave_param wave_param; u32 bit_rate, vbv_buffer_size; };
+struct vpu_device { int hw_lock; };
+struct codec { struct { struct enc_open_param open_param; } enc_info; };
+struct vpu_instance { struct vpu_device *dev; struct codec *codec_info; unsigned std; int irq_done; };
+struct enc_output_info { int recon_frame_index; };
+static u32 regs[0x1000/4], writes[0x1000/4];
+static int ack, completion, report_error, report_index, queries, waits, isolated;
+static int mutex_lock_interruptible(int *lock) { assert(!*lock); *lock=1; return 0; }
+static void mutex_unlock(int *lock) { assert(*lock); *lock=0; }
+static void reinit_completion(int *done) { *done=0; }
+static void vpu_write_reg(struct vpu_device *dev, unsigned reg, u32 value)
+{ assert(dev->hw_lock && reg<sizeof(regs)); regs[reg/4]=value; writes[reg/4]++; }
+static int send_firmware_command(struct vpu_instance *inst, int cmd, bool wait, void *a, void *b)
+{ (void)a; (void)b; assert(inst->dev->hw_lock && cmd==W5_ENC_SET_PARAM && wait); return ack; }
+static int wave5_vpu_wait_interrupt(struct vpu_instance *inst, unsigned timeout)
+{ assert(!inst->dev->hw_lock && timeout==5000); waits++; return completion; }
+static int wave5_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_info *out)
+{ assert(!inst->dev->hw_lock); queries++; out->recon_frame_index=report_index; return report_error; }
+static void wave5_vpu_isolate(struct vpu_device *dev, const char *reason, int command)
+{ (void)dev; (void)reason; (void)command; isolated++; }
+'''
+checks = r'''
+int main(void)
+{
+    struct vpu_device dev={0}; struct codec codec={0};
+    struct vpu_instance inst={.dev=&dev,.codec_info=&codec,.std=W_AVC_ENC};
+    struct enc_open_param p={.bit_rate=4000000,.vbv_buffer_size=1000};
+    p.wave_param=(struct enc_wave_param){.intra_qp=27,.intra_period=30,.avc_idr_period=60,
+        .min_qp_i=8,.max_qp_i=40,.min_qp_p=9,.max_qp_p=41,.min_qp_b=10,.max_qp_b=42,
+        .beta_offset_div2=-2,.tc_offset_div2=-3,.chroma_cb_qp_offset=-4,
+        .chroma_cr_qp_offset=5,.transform8x8_enable=1,.entropy_coding_mode=1};
+    report_index=-4;
+    assert(!wave5_vpu_enc_change_param(&inst,&p,ENC_CHANGE_BITRATE|ENC_CHANGE_RC));
+    assert(codec.enc_info.open_param.bit_rate==4000000 && queries==1 && waits==1);
+    assert(regs[W5_CMD_ENC_SEQ_RC_TARGET_RATE/4]==4000000);
+    assert(regs[W5_CMD_ENC_SEQ_RC_PARAM/4]==(1000U<<20));
+    assert(!writes[W5_CMD_ENC_SEQ_SPS_PARAM/4] && !writes[W5_CMD_ENC_SEQ_SRC_SIZE/4]);
+    assert(!wave5_vpu_enc_change_param(&inst,&p,ENC_CHANGE_PPS|ENC_CHANGE_INTRA|
+                                      ENC_CHANGE_QP|ENC_CHANGE_INTER_QP));
+    assert((regs[W5_CMD_ENC_SEQ_PPS_PARAM/4]>>6&15)==14);
+    assert((regs[W5_CMD_ENC_SEQ_PPS_PARAM/4]>>10&15)==13);
+    assert(regs[W5_CMD_ENC_SEQ_INTRA_PARAM/4]==(27U|30U<<6|60U<<17));
+    assert(regs[W5_CMD_ENC_SEQ_RC_INTER_MIN_MAX_QP/4]==(9U|41U<<6|10U<<12|42U<<18));
+    inst.std=W_HEVC_ENC;
+    assert(!wave5_vpu_enc_change_param(&inst,&p,ENC_CHANGE_INTRA));
+    assert(regs[W5_CMD_ENC_SEQ_INTRA_PARAM/4]==(27U<<3|30U<<16));
+    int old_queries=queries, old_waits=waits;
+    p.bit_rate=2000000;
+    assert(!wave5_vpu_enc_change_param(&inst,&p,ENC_CHANGE_PICTURE));
+    assert(queries==old_queries && waits==old_waits);
+    p.bit_rate=1000000; ack=-EINVAL;
+    assert(wave5_vpu_enc_change_param(&inst,&p,ENC_CHANGE_BITRATE)==-EINVAL);
+    assert(codec.enc_info.open_param.bit_rate==2000000 && queries==old_queries);
+    ack=0; completion=-ETIMEDOUT;
+    assert(wave5_vpu_enc_change_param(&inst,&p,ENC_CHANGE_BITRATE)==-ETIMEDOUT);
+    assert(codec.enc_info.open_param.bit_rate==2000000 && queries==old_queries);
+    completion=0; report_error=-EIO;
+    assert(wave5_vpu_enc_change_param(&inst,&p,ENC_CHANGE_BITRATE)==-EIO);
+    assert(codec.enc_info.open_param.bit_rate==2000000);
+    report_error=0; report_index=0;
+    assert(wave5_vpu_enc_change_param(&inst,&p,ENC_CHANGE_BITRATE)==-EIO && isolated==1);
+    assert(codec.enc_info.open_param.bit_rate==2000000 && !dev.hw_lock);
+    puts("Wave5 dynamic packing, completion ownership and rejection/timeout rollback passed");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='wave5-changes-') as directory:
+    code = Path(directory) / 'changes.c'
+    binary = Path(directory) / 'changes'
+    code.write_text(mock + defines + '\n' + param + framework + change + wrapper + checks)
+    subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                    '-I', str(root), str(code), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+
 # Check the actual picture-command packing, including simultaneous IDR and QP.
 write = hardware[hardware.index('\tvpu_write_reg(inst->dev, W5_CMD_ENC_PIC_PIC_PARAM,'):]
 write = write[:write.index(';') + 1]
@@ -128,7 +241,8 @@ param = param[:param.index('\n};') + 3]
 setter = controls[controls.index('static int wave5_set_qp_limits('):
                   controls.index('static const struct v4l2_ctrl_ops')]
 protocol = '\n'.join(line for line in api.splitlines()
-                     if line.startswith(('#define HEVC_PROFILE_', '#define H264_PROFILE_')))
+                     if line.startswith(('#define HEVC_PROFILE_', '#define H264_PROFILE_',
+                                         '#define ENC_CHANGE_')))
 framework = r'''
 #include <assert.h>
 #include <errno.h>
@@ -149,6 +263,7 @@ typedef uint64_t u64;
 #define MAX_VBV_BUFFER_SIZE 3000
 #define BIT(n) (1ULL<<(n))
 #define VPU_INST_STATE_NONE 0
+#define VPU_INST_STATE_PIC_RUN 3
 #define dev_dbg(...) ((void)0)
 #ifndef V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE
 #define V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE 0x00990b00
@@ -167,7 +282,7 @@ struct vpu_instance {
     struct enc_wave_param enc_param, hevc_param;
     unsigned state, encode_aud, mirror_direction, rot_angle, vbv_buf_size;
     unsigned rc_mode, bit_rate, intra_refresh_period, rc_enable, force_keyframe;
-    unsigned h264_cpb_size, std, b_frames, quality;
+    unsigned h264_cpb_size, std, b_frames, quality, enc_change_mask;
     struct v4l2_ctrl_handler v4l2_ctrl_hdl;
     struct v4l2_ctrl *avc_qp_limits[8], *hevc_qp_limits[8];
     struct vpu_device *dev;
@@ -303,6 +418,27 @@ int main(void)
     assert(!set(&a,V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,0)); assert(a.force_keyframe);
     assert(!set(&b,V4L2_CID_MPEG_VIDEO_BITRATE,2000000));
     assert(a.bit_rate==0 && b.bit_rate==2000000);
+    a.state=VPU_INST_STATE_PIC_RUN; a.std=W_AVC_ENC; a.h264_cpb_size=0;
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_BITRATE,4000000));
+    assert(a.bit_rate==4000000 && a.enc_change_mask==(ENC_CHANGE_BITRATE|ENC_CHANGE_RC));
+    a.enc_change_mask=0;
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE,2000)==-ERANGE);
+    assert(!a.h264_cpb_size && !a.enc_change_mask);
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE,400));
+    assert(a.enc_change_mask==ENC_CHANGE_RC);
+    a.enc_change_mask=0;
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP,25));
+    assert(!a.enc_change_mask && a.hevc_param.fixed_qp_p==25);
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP,25));
+    assert(a.enc_change_mask==ENC_CHANGE_PICTURE);
+    a.enc_change_mask=0;
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_H264_MIN_QP,10));
+    assert(a.enc_change_mask==(ENC_CHANGE_QP|ENC_CHANGE_INTER_QP));
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_GOP_SIZE,30));
+    assert(a.enc_change_mask&ENC_CHANGE_INTRA);
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,0)==-EBUSY);
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_H264_PROFILE,V4L2_MPEG_VIDEO_H264_PROFILE_MAIN)==-EBUSY);
+    assert(!b.enc_change_mask && b.bit_rate==2000000);
     puts("Wave5 codec control isolation, busy setters, flip reversal and two instances passed");
 }
 '''

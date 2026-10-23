@@ -113,6 +113,8 @@ int wave5_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *
 				       unsigned int count);
 
 int wave5_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *fail_res);
+int wave5_vpu_enc_change(struct vpu_instance *inst, const struct enc_open_param *param,
+			 u32 mask);
 
 int wave5_vpu_enc_get_result(struct vpu_instance *inst, struct enc_output_info *result);
 

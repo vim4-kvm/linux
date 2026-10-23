@@ -170,6 +170,8 @@ static struct vb2_v4l2_buffer *wave5_find_src(struct v4l2_m2m_ctx *ctx, bool sub
 	return next;
 }
 
+static int wave5_apply_enc_changes(struct vpu_instance *inst);
+
 static dma_addr_t wave5_vpu_enc_source_addr(struct vb2_buffer *vb, unsigned int plane)
 {
 	return vb2_dma_contig_plane_dma_addr(vb, plane) + vb->planes[plane].data_offset;
@@ -188,6 +190,9 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 	u32 luma_size = 0;
 	u32 chroma_size = 0;
 
+	ret = wave5_apply_enc_changes(inst);
+	if (ret)
+		return ret;
 	memset(&pic_param, 0, sizeof(struct enc_param));
 	memset(&frame_buf, 0, sizeof(struct frame_buffer));
 
@@ -868,10 +873,59 @@ static int wave5_set_qp_limits(struct enc_wave_param *param, struct v4l2_ctrl *c
 	return 0;
 }
 
+static u32 wave5_enc_change_mask(u32 id)
+{
+	switch (id) {
+	case V4L2_CID_MPEG_VIDEO_BITRATE:
+		return ENC_CHANGE_BITRATE | ENC_CHANGE_RC;
+	case V4L2_CID_MPEG_VIDEO_VBV_SIZE:
+	case V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE:
+		return ENC_CHANGE_RC;
+	case V4L2_CID_MPEG_VIDEO_H264_MIN_QP:
+	case V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP:
+		return ENC_CHANGE_QP | ENC_CHANGE_INTER_QP;
+	case V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP:
+	case V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP:
+	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
+	case V4L2_CID_MPEG_VIDEO_H264_I_PERIOD:
+	case V4L2_CID_MPEG_VIDEO_HEVC_REFRESH_PERIOD:
+	case V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR:
+	case V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY:
+		return ENC_CHANGE_INTRA;
+	case V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE:
+	case V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_ALPHA:
+	case V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_BETA:
+	case V4L2_CID_MPEG_VIDEO_H264_CHROMA_QP_INDEX_OFFSET:
+	case V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE:
+	case V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM:
+	case V4L2_CID_MPEG_VIDEO_H264_CONSTRAINED_INTRA_PREDICTION:
+	case V4L2_CID_MPEG_VIDEO_HEVC_CONST_INTRA_PRED:
+	case V4L2_CID_MPEG_VIDEO_HEVC_LF_BETA_OFFSET_DIV2:
+	case V4L2_CID_MPEG_VIDEO_HEVC_LF_TC_OFFSET_DIV2:
+		return ENC_CHANGE_PPS;
+	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE:
+	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB:
+		return ENC_CHANGE_SLICE;
+	case V4L2_CID_MPEG_VIDEO_HEVC_INTRA_PU_SPLIT:
+	case V4L2_CID_MPEG_VIDEO_HEVC_MAX_NUM_MERGE_MV_MINUS1:
+		return ENC_CHANGE_RDO;
+	case V4L2_CID_MPEG_VIDEO_AU_DELIMITER:
+	case V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP:
+	case V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP:
+	case V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP:
+	case V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_QP:
+		return ENC_CHANGE_PICTURE;
+	default:
+		return 0;
+	}
+}
+
 static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct vpu_instance *inst = wave5_ctrl_to_vpu_inst(ctrl);
 	struct enc_wave_param *param = &inst->enc_param;
+	u32 mask = wave5_enc_change_mask(ctrl->id);
+	int ret;
 
 	if ((ctrl->id >= V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP &&
 	     ctrl->id <= V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L6_BR) ||
@@ -879,11 +933,34 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	     ctrl->id <= V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_MAX_QP))
 		param = &inst->hevc_param;
 
-	/* Sequence controls cannot be applied to an already created instance. */
+	/* Layout, RC mode and SPS-only controls still require STREAMOFF. */
 	if (inst->state != VPU_INST_STATE_NONE &&
 	    ctrl->id != V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME &&
-	    ctrl->id != V4L2_CID_MIN_BUFFERS_FOR_OUTPUT)
+	    ctrl->id != V4L2_CID_MIN_BUFFERS_FOR_OUTPUT &&
+	    (inst->state != VPU_INST_STATE_PIC_RUN || !mask))
 		return -EBUSY;
+	if ((param == &inst->hevc_param && inst->std != W_HEVC_ENC) ||
+	    (ctrl->id >= V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP &&
+	     ctrl->id <= V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L6_BR &&
+	     inst->std != W_AVC_ENC) ||
+	    (ctrl->id == V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE && inst->std != W_AVC_ENC) ||
+	    (ctrl->id == V4L2_CID_MPEG_VIDEO_VBV_SIZE && inst->std != W_HEVC_ENC))
+		mask = 0;
+	if (inst->state == VPU_INST_STATE_PIC_RUN && (mask & ENC_CHANGE_RC)) {
+		u32 rate = inst->bit_rate;
+		u32 size = inst->std == W_AVC_ENC ? inst->h264_cpb_size : inst->vbv_buf_size;
+		u64 duration;
+
+		if (ctrl->id == V4L2_CID_MPEG_VIDEO_BITRATE)
+			rate = ctrl->val;
+		else
+			size = ctrl->val;
+		if (!rate)
+			return -ERANGE;
+		duration = size ? DIV_ROUND_UP_ULL((u64)size * 8192000, rate) : 1000;
+		if (duration < MIN_VBV_BUFFER_SIZE || duration > MAX_VBV_BUFFER_SIZE)
+			return -ERANGE;
+	}
 
 	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
 
@@ -1017,7 +1094,10 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP:
 	case V4L2_CID_MPEG_VIDEO_H264_MIN_QP:
-		return wave5_set_qp_limits(param, ctrl);
+		ret = wave5_set_qp_limits(param, ctrl);
+		if (ret)
+			return ret;
+		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP:
 		param->intra_qp = ctrl->val;
 		break;
@@ -1241,6 +1321,8 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		return -EINVAL;
 	}
 
+	if (inst->state == VPU_INST_STATE_PIC_RUN)
+		inst->enc_change_mask |= mask;
 	return 0;
 }
 
@@ -1523,6 +1605,34 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	return 0;
 }
 
+static int wave5_apply_enc_changes(struct vpu_instance *inst)
+{
+	struct enc_open_param param = {};
+	struct v4l2_m2m_ctx *ctx = inst->v4l2_fh.m2m_ctx;
+	int ret = 0;
+
+	/* S_CTRL holds this lock; IRQ/device_run does not hold the ioctl lock. */
+	v4l2_ctrl_lock(inst->avc_qp_limits[0]);
+	if (!inst->enc_change_mask)
+		goto unlock;
+	ret = wave5_set_enc_openparam(&param, inst);
+	if (!ret)
+		ret = wave5_vpu_enc_change_param(inst, &param, inst->enc_change_mask);
+	if (ret) {
+		/* Failed changes are observable on both queues. Keep all submitted
+		 * sources owned until STREAMOFF destroys the firmware instance.
+		 */
+		vb2_queue_error(v4l2_m2m_get_src_vq(ctx));
+		vb2_queue_error(v4l2_m2m_get_dst_vq(ctx));
+		switch_state(inst, VPU_INST_STATE_STOP);
+	} else {
+		inst->enc_change_mask = 0;
+	}
+unlock:
+	v4l2_ctrl_unlock(inst->avc_qp_limits[0]);
+	return ret;
+}
+
 static int initialize_sequence(struct vpu_instance *inst)
 {
 	struct enc_initial_info initial_info;
@@ -1616,6 +1726,7 @@ static int wave5_vpu_enc_start_streaming(struct vb2_queue *q, unsigned int count
 	    (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE || m2m_ctx->out_q_ctx.q.streaming)) {
 		struct enc_open_param open_param;
 
+		inst->enc_change_mask = 0;
 		memset(&open_param, 0, sizeof(struct enc_open_param));
 
 		ret = wave5_set_enc_openparam(&open_param, inst);
