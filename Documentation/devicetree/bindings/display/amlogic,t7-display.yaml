@@ -36,12 +36,17 @@ properties:
       - description: HDMI video divider, fe000204/4
       - description: VPP OSD input and scopes, ff0077c4/18
       - description: OSD blend scopes and sizes, ff00e6c0/44
-      - description: OSD1 scaler bypass, ff016820/4
+      - description: OSD1 scaler bypass ff016820/4, or full M3 scaler ff016800/38
       - description: VPP postblend size, ff007484/4
       - description: VPP output size, ff007694/4
       - description: HDMI mapping and sync polarity, ff009c6c/4
       - description: OSD2 control and MIF, ff0068c0/80
       - description: OSD3 control and MIF, ff00f600/80
+      - description: OSD2 scaler, ff016900/38
+      - description: OSD3 scaler, ff016a00/38
+      - description: OSD routing fields, ff006834/8
+      - description: OSD2 linear MIF address and stride, ff006990/c
+      - description: OSD2 Mali unpack control, ff006af4/4
   reg-names:
     minItems: 12
     items:
@@ -59,6 +64,11 @@ properties:
       - const: hdmi-setting
       - const: osd2
       - const: osd3
+      - const: scaler2
+      - const: scaler3
+      - const: osd-paths
+      - const: osd2-address
+      - const: osd2-unpack
   amlogic,managed-osd-sram:
     type: boolean
     description: |
@@ -117,9 +127,9 @@ allOf:
     then:
       properties:
         reg:
-          minItems: 14
+          minItems: 19
         reg-names:
-          minItems: 14
+          minItems: 19
         power-domains:
           minItems: 10
     else:
