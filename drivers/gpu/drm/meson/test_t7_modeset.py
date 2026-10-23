@@ -222,7 +222,8 @@ static void debug_log(void *dev,const char *format,...) {}
 #define dev_dbg(...) do {} while (0)
 #define dev_err(...) do {} while (0)
 #define MODE_CLOCK_HIGH 100
-struct drm_display_info {bool is_hdmi,has_audio,only420; int max_tmds_clock;
+#define DRM_OUTPUT_COLOR_FORMAT_YCBCR444 1
+struct drm_display_info {bool is_hdmi,has_audio,only420; int max_tmds_clock,color_formats;
     struct {struct {bool supported; struct {bool supported;} scrambling;} scdc;} hdmi;};
 struct drm_connector {struct drm_display_info display_info;};
 struct drm_bridge {void *dev,*encoder;};
@@ -269,7 +270,8 @@ static void meson_hdmitx21_audio_mode(void *tx,int clock,bool on) {audio_on=on;}
 '''
 bridge_program += '\n' + function(source, 'meson_t7_clock_calculate')
 bridge_program += '\n' + function(source, 'meson_t7_mode_valid')
-for name in ('meson_hdmitx21_phy_on', 'meson_hdmitx21_phy_off', 'meson_hdmitx21_config',
+for name in ('meson_hdmitx21_yuv_sink', 'meson_hdmitx21_phy_on',
+             'meson_hdmitx21_phy_off', 'meson_hdmitx21_config',
              'meson_hdmitx21_bridge_mode_valid', 'meson_hdmitx21_bridge_atomic_enable'):
     bridge_program += '\n' + function(bridge_source, name)
 phy_values = re.findall(r'HDMI_PHYPARA_\w+', function(hw_t7, 'set21_phy_by_mode_t7'))
@@ -282,9 +284,15 @@ int main(void) {
     crtc_state.adjusted_mode=(struct drm_display_mode){594000,3840,4016,4104,4400,
         2160,2168,2178,2250,0};
     struct drm_display_info *info=&connector.display_info;
+    info->color_formats=BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR444);
     info->is_hdmi=info->has_audio=info->hdmi.scdc.supported=true;
     info->hdmi.scdc.scrambling.supported=true;info->max_tmds_clock=600000;
     assert(meson_hdmitx21_bridge_mode_valid(&tx.bridge,info,&crtc_state.adjusted_mode)==MODE_OK);
+    info->color_formats=1;
+    assert(meson_hdmitx21_bridge_mode_valid(&tx.bridge,info,&crtc_state.adjusted_mode)==MODE_BAD);
+    info->color_formats=BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR444);info->is_hdmi=false;
+    assert(meson_hdmitx21_bridge_mode_valid(&tx.bridge,info,&crtc_state.adjusted_mode)==MODE_BAD);
+    info->is_hdmi=true;
     info->hdmi.scdc.scrambling.supported=false;
     assert(meson_hdmitx21_bridge_mode_valid(&tx.bridge,info,&crtc_state.adjusted_mode)==MODE_CLOCK_HIGH);
     info->hdmi.scdc.scrambling.supported=true;info->max_tmds_clock=300000;

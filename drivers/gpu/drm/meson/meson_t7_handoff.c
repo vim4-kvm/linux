@@ -15,6 +15,7 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
+#include <drm/drm_connector.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_file.h>
@@ -742,6 +743,13 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	connector = drm_bridge_connector_init(drm, &display->encoder);
 	if (IS_ERR(connector))
 		return PTR_ERR(connector);
+	if (display->native_modeset) {
+		/* AUTO has only one choice while the inherited matrix is retained. */
+		ret = drm_connector_attach_color_format_property(connector,
+					BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR444));
+		if (ret)
+			return ret;
+	}
 	ret = drm_connector_attach_encoder(connector, &display->encoder);
 	if (ret)
 		return ret;

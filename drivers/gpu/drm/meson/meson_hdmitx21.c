@@ -147,8 +147,8 @@
 #define VP_INPUT_MASK		0xb18
 #define VP_INPUT_SYNC_ADJUST	0xb1c
 #define VP_OUTPUT_MAPPING	0xb44
-#define VP_OUTPUT_MASK		0xb45
-#define VP_OUTPUT_MASK2		0xb46
+#define VP_OUTPUT_MAPPING_HI	0xb45
+#define VP_OUTPUT_MASK		0xb46
 #define CSC0_CTRL		0xd20
 #define CSC0_CTRL2		0xd21
 #define CSC1_CTRL		0xda0
@@ -576,9 +576,14 @@ static void meson_hdmitx21_write_avi(struct meson_hdmitx21 *tx,
 
 	if (drm_hdmi_avi_infoframe_from_display_mode(&frame, connector, mode))
 		return;
-	frame.colorspace = HDMI_COLORSPACE_RGB;
-	drm_hdmi_avi_infoframe_quant_range(&frame, connector, mode,
-					   HDMI_QUANTIZATION_RANGE_LIMITED);
+	/* The inherited OSD matrix converts RGB to BT.709 limited, even at 720p.
+	 * Keep this description in step with the CSC bypass in config(). Do not
+	 * advertise Broadcast RGB: no RGB transport/range selection is implemented.
+	 */
+	frame.colorspace = HDMI_COLORSPACE_YUV444;
+	frame.colorimetry = HDMI_COLORIMETRY_ITU_709;
+	frame.quantization_range = HDMI_QUANTIZATION_RANGE_DEFAULT;
+	frame.ycc_quantization_range = HDMI_YCC_QUANTIZATION_RANGE_LIMITED;
 
 	len = hdmi_avi_infoframe_pack(&frame, buf, sizeof(buf));
 	if (len < 0)
@@ -625,7 +630,9 @@ static void meson_hdmitx21_config(struct meson_hdmitx21 *tx,
 	cor_write(tx, TEST_TXCTRL, 0x02);
 	cor_write(tx, CLKRATIO, 0x8a);
 
-	/* The VPP sends RGB on T7: no colour space conversion */
+	/* Vendor OSD1 RGB -> BT.709 limited is retained in VPP. Forward YUV444
+	 * without a second conversion; AVI and the bridge bus format match it.
+	 */
 	cor_write(tx, CSC0_CTRL, 0x00);
 	cor_write(tx, CSC0_CTRL2, 0x08);
 	cor_write(tx, CSC1_CTRL, 0x00);
@@ -633,8 +640,8 @@ static void meson_hdmitx21_config(struct meson_hdmitx21 *tx,
 
 	cor_write(tx, VP_INPUT_MASK, 0x2a);
 	cor_write(tx, VP_OUTPUT_MAPPING, 0x40);
-	cor_write(tx, VP_OUTPUT_MASK, 0x04);
-	cor_write(tx, VP_OUTPUT_MASK2, 0x00);
+	cor_write(tx, VP_OUTPUT_MAPPING_HI, 0x04);
+	cor_write(tx, VP_OUTPUT_MASK, 0x00);
 
 	cor_write(tx, VTEM_CTRL, 0x04);
 	top_write(tx, TOP_HS_INTR_CNTL, 0x10);
@@ -833,6 +840,11 @@ static int meson_hdmitx21_audio_mute_stream(struct drm_bridge *bridge,
 
 /* Bridge */
 
+static bool meson_hdmitx21_yuv_sink(const struct drm_display_info *info)
+{
+	return info->is_hdmi && (info->color_formats & BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR444));
+}
+
 static int meson_hdmitx21_bridge_attach(struct drm_bridge *bridge,
 					struct drm_encoder *encoder,
 					enum drm_bridge_attach_flags flags)
@@ -863,6 +875,12 @@ meson_hdmitx21_bridge_mode_valid(struct drm_bridge *bridge,
 	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
 	enum drm_mode_status status = MODE_OK;
 	const char *reason;
+
+	if (tx->enc2_modeset && !meson_hdmitx21_yuv_sink(info)) {
+		drm_dbg_kms(bridge->dev,
+			    "Reject sink without HDMI YUV444: inherited VPP is BT.709 limited\n");
+		return MODE_BAD;
+	}
 
 	if (IS_ENABLED(CONFIG_DRM_MESON_T7_HANDOFF) && tx->enc2_modeset)
 		status = meson_t7_mode_valid(mode);
@@ -949,8 +967,8 @@ meson_hdmitx21_bridge_get_input_bus_fmts(struct drm_bridge *bridge,
 	if (!fmts)
 		return NULL;
 
-	/* This bridge configures both CSCs for RGB bypass. */
-	fmts[0] = MEDIA_BUS_FMT_RGB888_1X24;
+	/* Framebuffers are RGB; the retained OSD matrix precedes this bus. */
+	fmts[0] = MEDIA_BUS_FMT_YUV8_1X24;
 	*num_input_fmts = 1;
 
 	return fmts;
