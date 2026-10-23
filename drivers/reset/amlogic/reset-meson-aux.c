@@ -38,6 +38,12 @@ static const struct meson_reset_param meson_sm1_audio_param = {
 	.level_offset	= 0x28,
 };
 
+static const struct meson_reset_param meson_t7_audio_param = {
+	.reset_ops	= &meson_reset_toggle_ops,
+	.reset_num	= 43,
+	.level_offset	= 0x28,
+};
+
 static const struct auxiliary_device_id meson_reset_aux_ids[] = {
 	{
 		.name = "a1-audio-clkc.rst-a1",
@@ -51,6 +57,9 @@ static const struct auxiliary_device_id meson_reset_aux_ids[] = {
 	}, {
 		.name = "axg-audio-clkc.rst-sm1",
 		.driver_data = (kernel_ulong_t)&meson_sm1_audio_param,
+	}, {
+		.name = "axg-audio-clkc.rst-t7",
+		.driver_data = (kernel_ulong_t)&meson_t7_audio_param,
 	}, {}
 };
 MODULE_DEVICE_TABLE(auxiliary, meson_reset_aux_ids);
