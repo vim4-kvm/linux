@@ -19,6 +19,7 @@ properties:
       - amlogic,sm1-tdmin
       - amlogic,axg-tdmin
       - amlogic,t7-tdmin
+      - amlogic,t7-tdmin-d
       - amlogic,t7-tdmout
 
   clocks:
