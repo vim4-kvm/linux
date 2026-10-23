@@ -284,5 +284,12 @@
 #define CLKID_HCODEC_1_DIV		275
 #define CLKID_HCODEC_1			276
 #define CLKID_HCODEC			277
+#define CLKID_VDEC_0_SEL			278
+#define CLKID_VDEC_0_DIV			279
+#define CLKID_VDEC_0			280
+#define CLKID_VDEC_1_SEL			281
+#define CLKID_VDEC_1_DIV			282
+#define CLKID_VDEC_1			283
+#define CLKID_VDEC			284
 
 #endif /* __T7_PERIPHERALS_CLKC_H */
