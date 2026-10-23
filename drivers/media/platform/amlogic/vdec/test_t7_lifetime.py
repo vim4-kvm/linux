@@ -49,6 +49,121 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_runtime_resume_requires_opt_in_and_completed_power_test(self):
+        resume = function(HERE / "aml_vdec_drv.c", "aml_vdec_runtime_resume")
+        run_c(COMMON + """
+#define READ_ONCE(value) (value)
+struct device { int unused; };
+struct hw { bool power_test_passed; };
+struct pdata { bool has_dbus_ctrl; };
+struct aml_vdec_dev { struct hw *dec_hw; struct pdata *pvdec_data; };
+static struct hw hw;
+static struct pdata pdata = { .has_dbus_ctrl = true };
+static struct aml_vdec_dev vdec = { .dec_hw = &hw, .pvdec_data = &pdata };
+static bool allow_t7_power;
+static int power_calls;
+static void *dev_get_drvdata(struct device *dev) { return &vdec; }
+static int vdec_enable(struct hw *hw) { power_calls++; return 0; }
+""" + resume + """
+int main(void)
+{
+    struct device dev = {0};
+    assert(aml_vdec_runtime_resume(&dev) == -EPERM && !power_calls);
+    allow_t7_power = true;
+    assert(aml_vdec_runtime_resume(&dev) == -EPERM && !power_calls);
+    hw.power_test_passed = true;
+    assert(!aml_vdec_runtime_resume(&dev) && power_calls == 1);
+    allow_t7_power = false;
+    assert(aml_vdec_runtime_resume(&dev) == -EPERM && power_calls == 1);
+    return 0;
+}
+""")
+
+    def test_power_test_never_touches_dos_before_secure_domains_report_on(self):
+        functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
+            "t7_domain_state", "aml_vdec_t7_power_state", "t7_power_fault",
+            "t7_power_off", "t7_power_on", "aml_vdec_t7_power_test"))
+        run_c(COMMON + """
+#include "reg_defines.h"
+typedef int32_t s32;
+#define EHOSTDOWN 112
+#define DOS_BUS 0
+#define VDEC_1 0
+#define VDEC_MUX 1
+#define PWRC_T7_DOS_VDEC_ID 4
+#define PWRC_T7_NIC3_ID 39
+#define THIS_MODULE NULL
+#define dev_info(...) ((void)0)
+#define dev_err(...) ((void)0)
+#define dev_crit(...) ((void)0)
+#define xchg(ptr, val) ({ bool old = *(ptr); *(ptr) = val; old; })
+struct arm_smccc_res { unsigned long a0; };
+struct clk_bulk_data { void *clk; };
+struct pd { void *dev; };
+struct pm { struct pd pd_data[1]; };
+struct aml_vdec_hw {
+    bool has_dbus_ctrl, powered, faulted, power_test_passed;
+    u32 power_test_reset;
+    void *dev, *map[1];
+    struct clk_bulk_data gates[2];
+    struct pm *pm;
+};
+static int vdec_state, nic3_state, pm_error, off_error;
+static int clocks, refs, mmio, poison, phase;
+static void arm_smccc_smc(unsigned int cmd, unsigned int id, int a, int b,
+                         int c, int d, int e, int f, struct arm_smccc_res *res)
+{
+    assert(cmd == 0x82000095);
+    assert(id == 4 || id == 39);
+    res->a0 = id == 4 ? vdec_state : nic3_state;
+}
+static int clk_set_rate(void *clk, int rate) { return 0; }
+static int clk_bulk_prepare_enable(int n, void *gates)
+{ assert(phase == 0); phase = 1; clocks++; return 0; }
+static void clk_bulk_disable_unprepare(int n, void *gates)
+{ assert(clocks == 1); clocks--; phase = 3; }
+static int pm_runtime_resume_and_get(void *dev)
+{ assert(phase == 1); phase = 2; if (pm_error) return pm_error; refs++; return 0; }
+static int pm_runtime_put_sync_suspend(void *dev)
+{ assert(phase == 3); refs--; if (!off_error) vdec_state = 1; return off_error; }
+static void __module_get(void *module) { poison++; }
+static void get_device(void *dev) {}
+static void meson_t7_dos_poison(void) {}
+static int regmap_read(void *map, int reg, u32 *value)
+{
+    assert(phase == 2 && clocks == 1 && refs == 1);
+    assert(vdec_state == 0 && nic3_state == 0 && reg == DOS_SW_RESET0);
+    mmio++; *value = 0; return 0;
+}
+""" + functions + """
+int main(void)
+{
+    struct pm pm = {0};
+    const int bad[] = {1, -1, -EIO, 2};
+    for (unsigned int i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        for (int parent = 0; parent < 2; parent++) {
+            struct aml_vdec_hw hw = { .has_dbus_ctrl = true, .pm = &pm };
+            clocks = refs = mmio = poison = phase = 0;
+            vdec_state = parent ? 0 : bad[i];
+            nic3_state = parent ? bad[i] : 0;
+            assert(aml_vdec_t7_power_test(&hw) < 0);
+            assert(!mmio && !clocks && !refs && !hw.power_test_passed);
+        }
+    }
+    struct aml_vdec_hw hw = { .has_dbus_ctrl = true, .pm = &pm };
+    phase = mmio = 0; vdec_state = nic3_state = 0;
+    assert(!aml_vdec_t7_power_test(&hw));
+    assert(mmio == 1 && !clocks && !refs && hw.power_test_passed && !hw.powered);
+    phase = mmio = 0; vdec_state = nic3_state = 0; pm_error = -EIO;
+    assert(aml_vdec_t7_power_test(&hw) == -EIO && !mmio && !clocks && !refs);
+    phase = mmio = 0; pm_error = 0; off_error = -EIO;
+    assert(aml_vdec_t7_power_test(&hw) == -EIO && hw.faulted && poison == 1);
+    assert(!hw.power_test_passed && !hw.powered);
+    assert(aml_vdec_t7_power_test(&hw) == -EIO && mmio == 1 && poison == 1);
+    return 0;
+}
+""")
+
     def test_canvas_allocation_failure_preserves_unallocated_sentinels(self):
         source = (HERE / "h264.c").read_text()
         start = source.index("struct h264_decode_buf_spec {")
