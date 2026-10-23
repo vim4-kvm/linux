@@ -306,6 +306,7 @@ typedef uint64_t u64;
 #define PIC_TYPE_P 1
 #define PIC_TYPE_B 2
 #define __ffs(value) __builtin_ctz(value)
+#define ARRAY_SIZE(array) (sizeof(array)/sizeof((array)[0]))
 #define dev_dbg(...) ((void)0)
 #ifndef V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE
 #define V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE 0x00990b00
@@ -497,7 +498,7 @@ int main(void)
     a.ltr_pending=0;
     assert(!set(&a,V4L2_CID_MPEG_VIDEO_FRAME_LTR_INDEX,0));
     assert(a.ltr_pending==1);
-    a.state=VPU_INST_STATE_NONE; a.std=W_HEVC_ENC;
+    a.state=VPU_INST_STATE_NONE; a.std=W_HEVC_ENC; a.ltr_count=0;
     for(unsigned codec=1;codec<=2;codec++) {
         a.std=codec;
         struct enc_wave_param *input=codec==W_HEVC_ENC?&a.hevc_param:&a.enc_param;
@@ -556,6 +557,23 @@ int main(void)
         a.b_frames=1;
         assert(wave5_set_enc_gop(&open,&a)==-EINVAL);
     }
+    a.std=W_HEVC_ENC; a.b_frames=0; a.state=VPU_INST_STATE_PIC_RUN;
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_GOP_SIZE,30)==-EINVAL);
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_GOP_SIZE,32));
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP,30)==-EBUSY);
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY,20)==-EBUSY);
+    unsigned old_min=a.hevc_param.min_qp_p;
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,28)==-ERANGE);
+    assert(a.hevc_param.min_qp_p==old_min && a.hevc_param.hier_qp[0]==24);
+    a.ltr_count=1;
+    assert(wave5_set_enc_gop(&open,&a)==-EINVAL);
+    a.hevc_param.hier_enabled=false; a.hevc_param.en_still_picture=true;
+    assert(wave5_set_enc_gop(&open,&a)==-EINVAL);
+    a.hevc_param.en_still_picture=false; a.b_frames=1;
+    assert(wave5_set_enc_gop(&open,&a)==-EINVAL);
+    a.b_frames=0;
+    assert(!wave5_set_enc_gop(&open,&a));
+    puts("Wave5 28 multi-B/hierarchical GOP graphs, boundaries and LTR combinations passed");
     puts("Wave5 codec control isolation, busy setters, flip reversal and two instances passed");
 }
 '''
@@ -650,5 +668,76 @@ with tempfile.TemporaryDirectory(prefix='wave5-gop-') as directory:
     code.write_text(gop_command + gop_pic[:gop_pic.index('\n};') + 3] +
                     gop_mock + custom + '\nreturn 0;\n}\n' + gop_checks)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I', str(root),
+                    str(code), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+# A rejected deferred change must wake both queues without returning owned DMA.
+apply_change = controls[controls.index('static int wave5_apply_enc_changes(struct vpu_instance *inst)\n{'):
+                        controls.index('static int initialize_sequence(')]
+apply_mock = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdio.h>
+#define VPU_INST_STATE_STOP 4
+struct queue { unsigned errors, owned; };
+struct v4l2_m2m_ctx { struct queue src, dst; };
+struct enc_open_param { unsigned value; };
+struct vpu_instance {
+    struct { struct v4l2_m2m_ctx *m2m_ctx; } v4l2_fh;
+    int *avc_qp_limits[1];
+    unsigned enc_change_mask, state, requested, active;
+};
+static int build_error, command_error;
+static unsigned calls, last_mask;
+static int *locked;
+static void v4l2_ctrl_lock(int *ctrl) { assert(!locked); locked=ctrl; }
+static void v4l2_ctrl_unlock(int *ctrl) { assert(locked==ctrl); locked=NULL; }
+static int wave5_set_enc_openparam(struct enc_open_param *param,struct vpu_instance *inst)
+{ assert(locked==inst->avc_qp_limits[0]); param->value=inst->requested; return build_error; }
+static int wave5_vpu_enc_change_param(struct vpu_instance *inst,
+        const struct enc_open_param *param,unsigned mask)
+{
+    assert(locked==inst->avc_qp_limits[0]); calls++; last_mask=mask;
+    if(!command_error) inst->active=param->value;
+    return command_error;
+}
+static struct queue *v4l2_m2m_get_src_vq(struct v4l2_m2m_ctx *ctx) { return &ctx->src; }
+static struct queue *v4l2_m2m_get_dst_vq(struct v4l2_m2m_ctx *ctx) { return &ctx->dst; }
+static void vb2_queue_error(struct queue *queue) { queue->errors++; }
+static void switch_state(struct vpu_instance *inst,unsigned state) { inst->state=state; }
+'''
+apply_checks = r'''
+int main(void)
+{
+    int control[2];
+    struct v4l2_m2m_ctx queues[2]={{{0,3},{0,2}},{{0,1},{0,1}}};
+    struct vpu_instance inst[2]={
+        {.v4l2_fh.m2m_ctx=&queues[0],.avc_qp_limits={&control[0]},.state=3},
+        {.v4l2_fh.m2m_ctx=&queues[1],.avc_qp_limits={&control[1]},.state=3}};
+    assert(!wave5_apply_enc_changes(&inst[0]) && !calls && !locked);
+    inst[0].requested=4000000; inst[0].enc_change_mask=0x300;
+    inst[0].requested=2000000; inst[0].enc_change_mask|=1;
+    assert(!wave5_apply_enc_changes(&inst[0]) && calls==1 && last_mask==0x301);
+    assert(inst[0].active==2000000 && !inst[0].enc_change_mask && !locked);
+    assert(!wave5_apply_enc_changes(&inst[0]) && calls==1);
+    inst[0].requested=1000000; inst[0].enc_change_mask=0x100;
+    command_error=-EIO;
+    assert(wave5_apply_enc_changes(&inst[0])==-EIO && !locked);
+    assert(inst[0].active==2000000 && inst[0].enc_change_mask==0x100 && inst[0].state==4);
+    assert(queues[0].src.errors==1 && queues[0].dst.errors==1);
+    assert(queues[0].src.owned==3 && queues[0].dst.owned==2);
+    command_error=0; build_error=-ERANGE; inst[1].enc_change_mask=0x100;
+    assert(wave5_apply_enc_changes(&inst[1])==-ERANGE && calls==2 && !locked);
+    assert(queues[1].src.errors==1 && queues[1].dst.errors==1 && inst[1].state==4);
+    assert(queues[1].src.owned==1 && queues[1].dst.owned==1 && !inst[1].active);
+    puts("Wave5 deferred changes: coalescing, queue wakeup, DMA retention and instance isolation passed");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='wave5-apply-') as directory:
+    code = Path(directory) / 'apply.c'
+    binary = Path(directory) / 'apply'
+    code.write_text(apply_mock + apply_change + apply_checks)
+    subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     str(code), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

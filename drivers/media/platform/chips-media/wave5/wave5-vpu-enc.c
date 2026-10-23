@@ -870,6 +870,14 @@ static int wave5_set_qp_limits(struct enc_wave_param *param, struct v4l2_ctrl *c
 		if (minimum[i] > maximum[i])
 			return -ERANGE;
 	}
+	if (param->hier_enabled && param->hier_qp_enable) {
+		for (i = 0; i < param->hier_layers && i < ARRAY_SIZE(param->hier_qp); i++) {
+			unsigned int type = !i || param->hier_p ? 1 : 2;
+
+			if (param->hier_qp[i] < minimum[type] || param->hier_qp[i] > maximum[type])
+				return -ERANGE;
+		}
+	}
 	param->min_qp_i = minimum[0];
 	param->max_qp_i = maximum[0];
 	param->min_qp_p = minimum[1];
@@ -977,6 +985,15 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 
 		if (active->hier_enabled && active->hier_p)
 			gop_size = BIT(active->hier_layers - 1);
+		/* These picture overrides are disabled when firmware uses layer QPs. */
+		if (active->hier_enabled && active->hier_qp_enable &&
+		    (ctrl->id == V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY ||
+		     (param == active &&
+		      (ctrl->id == V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP ||
+		       ctrl->id == V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP ||
+		       ctrl->id == V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP ||
+		       ctrl->id == V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_QP))))
+			return -EBUSY;
 	}
 	if (inst->state == VPU_INST_STATE_PIC_RUN &&
 	    (ctrl->id == V4L2_CID_MPEG_VIDEO_GOP_SIZE ||
@@ -1553,10 +1570,14 @@ static int wave5_set_enc_gop(struct enc_open_param *open, struct vpu_instance *i
 	u32 size = inst->b_frames + 1;
 	unsigned int index = 0, layer, step, poc;
 
+	/* Only the plain inter sequence has a confirmed single-slot LTR contract. */
+	if (inst->ltr_count && (inst->b_frames || input->hier_enabled ||
+				(inst->std == W_HEVC_ENC && input->en_still_picture)))
+		return -EINVAL;
 	if (input->hier_enabled && (!input->hier_layers || input->hier_layers > 4))
 		return -EINVAL;
 	if (input->hier_enabled && input->hier_p) {
-		if (inst->b_frames || inst->ltr_count)
+		if (inst->b_frames)
 			return -EINVAL;
 		size = BIT(input->hier_layers - 1);
 	}
@@ -1652,9 +1673,6 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	default:
 		break;
 	}
-	/* The Wave521 protocol exposes one LTR slot and no reordered-LTR contract. */
-	if (inst->ltr_count && inst->b_frames)
-		return -EINVAL;
 	open_param->wave_param.use_long_term = inst->ltr_count;
 	if (inst->b_frames &&
 	    ((inst->std == W_AVC_ENC && input.profile == H264_PROFILE_BP) ||
