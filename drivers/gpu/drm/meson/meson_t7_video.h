@@ -1,0 +1,32 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef __MESON_T7_VIDEO_H
+#define __MESON_T7_VIDEO_H
+
+#include <linux/types.h>
+
+/* Progressive, even chroma crop; addresses include each DRM plane's offset. */
+struct meson_t7_video_frame {
+	u32 format, width, height;
+	u32 x, y, crop_width, crop_height;
+	u32 pitch[2];
+	u64 address[2], size[2];
+};
+
+struct meson_t7_video_mif {
+	u32 base;
+	u32 address[3], stride0, stride1;
+	u32 luma_x, luma_y, chroma_x, chroma_y;
+	u32 format_width, format_ctrl;
+	u32 gen, gen2, gen3;
+};
+
+/*
+ * Calculate the linear NV12/NV21 MIF image without enabling or touching DMA.
+ * gen has fetch disabled. The caller must own and drain the complete video
+ * pipeline before applying it; these parameters alone are not a video plane.
+ * stride1 describes bits 15:0 only; preserve its unrelated upper bits.
+ */
+int meson_t7_video_mif_prepare(const struct meson_t7_video_frame *frame,
+			       unsigned int index, struct meson_t7_video_mif *mif);
+
+#endif
