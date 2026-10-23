@@ -7,8 +7,8 @@ import tempfile
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
 source = source.replace('#include "t7-vdin-hdr.h"', Path(__file__).with_name('t7-vdin-hdr.h').read_text())
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
-types = source[source.index('enum t7_vdin_slot_state {'):source.index('static u32 t7_vdin_read')]
-functions = source[source.index('static u32 t7_vdin_read'):
+types = source[source.index('enum t7_vdin_slot_state {'):source.index('static void __iomem *t7_vdin_reg')]
+functions = source[source.index('static void __iomem *t7_vdin_reg'):
                    source.index('static int t7_vdin_frame_open')]
 prefix = r'''
 #include <assert.h>
@@ -26,6 +26,8 @@ typedef int irqreturn_t;
 #define VDIN_FRAME_SIZE (1920U*1080U*3U)
 #define VDIN_STRIDE (1920U*3U)
 #define __iomem
+static unsigned int rejected_accesses;
+#define WARN_ON_ONCE(condition) ((condition) ? rejected_accesses++ : 0)
 #define BIT(n) (1U << (n))
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define GENMASK(h, l) ((~0U >> (31 - (h))) & (~0U << (l)))
@@ -64,7 +66,7 @@ static bool t7_hdmirx_stream_is_yuv(struct device *dev) { (void)dev; return hdr_
 static bool t7_hdmirx_stream_needs_yuv444_swap(struct device *dev) { (void)dev; return yuv444_input; }
 static bool t7_hdmirx_stream_is_full_range(struct device *dev) { (void)dev; return !hdr_input && !yuv_input; }
 static bool t7_hdmirx_stream_is_bt601(struct device *dev) { (void)dev; return false; }
-static bool timeout, busy, bad_timing, change_timing;
+static bool timeout, busy, bad_timing, change_timing, split_resources;
 static u32 readl(void *address)
 {
     u32 value;
@@ -75,6 +77,13 @@ static u32 readl(void *address)
 }
 static void writel(u32 value, void *address)
 {
+    if (split_resources) {
+        uint8_t *p = address;
+        assert((p >= registers + 0x1200 * 4 && p < registers + 0x1300 * 4) ||
+               p == registers + VPU_SW_RESET * 4 ||
+               (p >= registers + VPU_WRARB_MODE * 4 && p <= registers + VPU_WRARB_REQEN * 4) ||
+               (p >= registers + VDIN_DOUBLE_CTRL * 4 && p <= registers + VDIN_TOP_MISC * 4));
+    }
     if (address == registers + 0x129f * 4) pq_writes++;
     if (address == registers + 0x12a7 * 4) gain_writes++;
     if (address == registers + 0x12a1 * 4) oetf_writes++;
@@ -160,10 +169,18 @@ static void reset(void)
                                .frame_dma = 0x10000000, .width = 1920, .height = 1080,
                                .input_width = 1920, .input_height = 1080,
                                .stride = VDIN_STRIDE, .frame_size = VDIN_FRAME_SIZE };
+    if (split_resources) {
+        receiver.regs = NULL;
+        receiver.split_regs[0] = registers + 0x1200 * 4;
+        receiver.split_regs[1] = registers + VPU_SW_RESET * 4;
+        receiver.split_regs[2] = registers + VPU_WRARB_MODE * 4;
+        receiver.split_regs[3] = registers + VDIN_DOUBLE_CTRL * 4;
+    }
     pins = requests = timing_checks = receiver_users = 0;
+    pq_writes = gain_writes = oetf_writes = 0;
     timeout = busy = bad_timing = change_timing = false;
 }
-int main(void)
+static void scenarios(void)
 {
     reset();
     writel(0xc0000000, registers + VDIN_LFIFO_CTRL * 4);
@@ -229,6 +246,18 @@ int main(void)
     assert(t7_vdin_capture(&receiver) == -EIO && !requests && pins == 1);
     assert(t7_vdin_stop_dma(&receiver) == -ETIMEDOUT && pins == 1);
     puts("VDIN completion ordering, DMA bounds, timing change and timeout containment passed");
+}
+int main(void)
+{
+    scenarios();
+    split_resources = true;
+    scenarios();
+    /* A future accidental display access must fail closed in split mode. */
+    writel(0x12345678, registers + VDIN_LFIFO_CTRL * 4);
+    unsigned int before = requests;
+    t7_vdin_write(&receiver, 0x1a14, 0xdeadbeef);
+    assert(t7_vdin_read(&receiver, 0x1a14) == 0 && rejected_accesses == 2);
+    assert(!readl(registers + 0x1a14 * 4) && requests == before);
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

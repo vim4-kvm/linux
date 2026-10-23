@@ -1472,6 +1472,8 @@ M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Odd Fixes
 F:	Documentation/devicetree/bindings/display/amlogic,t7-display-handoff.yaml
 F:	Documentation/devicetree/bindings/media/amlogic,t7-vdin-test.yaml
+F:	drivers/gpu/drm/meson/meson_t7_handoff.*
+F:	drivers/gpu/drm/meson/test_t7_handoff.py
 
 AMLOGIC VDEC DRIVER
 M:	Zhentao Guo <zhentao.guo@amlogic.com>
