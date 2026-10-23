@@ -60,7 +60,7 @@ static ssize_t power_test_store(struct device *dev, struct device_attribute *att
 	mutex_lock(&vdec->dev_mutex);
 	if (!READ_ONCE(allow_t7_power))
 		ret = -EPERM;
-	else if (vdec->dec_ctx || !pm_runtime_suspended(dev))
+	else if (vdec->dec_ctx || vdec->dec_hw->probe_step || !pm_runtime_suspended(dev))
 		ret = -EBUSY;
 	else
 		ret = aml_vdec_t7_power_test(vdec->dec_hw);
@@ -91,7 +91,7 @@ static ssize_t mdec_test_store(struct device *dev, struct device_attribute *attr
 	mutex_lock(&vdec->dev_mutex);
 	if (!READ_ONCE(allow_t7_power))
 		ret = -EPERM;
-	else if (vdec->dec_ctx || !pm_runtime_suspended(dev))
+	else if (vdec->dec_ctx || vdec->dec_hw->probe_step || !pm_runtime_suspended(dev))
 		ret = -EBUSY;
 	else
 		ret = aml_vdec_t7_mdec_test(vdec->dec_hw);
@@ -99,6 +99,42 @@ static ssize_t mdec_test_store(struct device *dev, struct device_attribute *attr
 	return ret ?: count;
 }
 static DEVICE_ATTR_RW(mdec_test);
+
+static ssize_t register_step_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
+	struct aml_vdec_hw *hw = vdec->dec_hw;
+	ssize_t count;
+
+	/* Cached status only: reading sysfs cannot touch the DOS aperture. */
+	mutex_lock(&vdec->dev_mutex);
+	count = sysfs_emit(buf, "step=%u value=%#x failed=%u\n",
+			   hw->probe_step, hw->probe_value, hw->probe_failed);
+	mutex_unlock(&vdec->dev_mutex);
+	return count;
+}
+
+static ssize_t register_step_store(struct device *dev, struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
+	unsigned int step;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &step);
+	if (ret)
+		return ret;
+	mutex_lock(&vdec->dev_mutex);
+	if (step && !READ_ONCE(allow_t7_power))
+		ret = -EPERM;
+	else if (vdec->dec_ctx || !pm_runtime_suspended(dev))
+		ret = -EBUSY;
+	else
+		ret = aml_vdec_t7_register_step(vdec->dec_hw, step);
+	mutex_unlock(&vdec->dev_mutex);
+	return ret ?: count;
+}
+static DEVICE_ATTR_RW(register_step);
 
 static ssize_t faulted_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -113,6 +149,7 @@ static struct attribute *aml_vdec_attrs[] = {
 	&dev_attr_power_state.attr,
 	&dev_attr_power_test.attr,
 	&dev_attr_mdec_test.attr,
+	&dev_attr_register_step.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(aml_vdec);

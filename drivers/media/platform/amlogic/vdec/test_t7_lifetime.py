@@ -49,37 +49,122 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_parent_is_owned_before_top_access_and_child_power_and_released_last(self):
+        functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
+            "t7_power_off", "t7_probe_begin", "t7_probe_domain_on"))
+        run_c(COMMON + """
+typedef int32_t s32;
+#define VDEC_1 0
+#define VDEC_MUX 1
+#define PWRC_T7_DOS_VDEC_ID 4
+#define dev_info(...) ((void)0)
+struct arm_smccc_res { unsigned long a0; };
+struct clk_bulk_data { void *clk; };
+struct pd { void *dev; };
+struct pm { struct pd pd_data[1]; };
+struct aml_vdec_hw {
+    void *dev, *nic3_dev;
+    struct pm *pm;
+    struct clk_bulk_data gates[2];
+    bool clocks_held, nic3_held, powered, faulted;
+};
+static int clocks, parent_refs, child_refs, fail_parent, fail_child, fail_off;
+static int state = 1, secure_error;
+static bool en0_programmed;
+static int clk_bulk_prepare_enable(int n, void *gates)
+{ assert(!clocks); clocks++; return 0; }
+static void clk_bulk_disable_unprepare(int n, void *gates)
+{ assert(clocks == 1); clocks--; }
+static int clk_set_rate(void *clk, int rate)
+{ assert(en0_programmed && clocks && parent_refs && !child_refs); return 0; }
+static int pm_runtime_resume_and_get(void *dev)
+{
+    assert(clocks);
+    if (dev == (void *)1) {
+        if (fail_parent) return -EIO;
+        assert(!parent_refs && !child_refs); parent_refs++;
+    } else {
+        if (fail_child) return -EIO;
+        assert(en0_programmed && parent_refs && !child_refs);
+        child_refs++; state = 0;
+    }
+    return 0;
+}
+static int pm_runtime_put_sync_suspend(void *dev)
+{
+    assert(!clocks);
+    if (dev == (void *)1) {
+        assert(parent_refs == 1 && !child_refs); parent_refs--;
+    } else {
+        assert(child_refs == 1 && parent_refs == 1); child_refs--; state = 1;
+    }
+    return fail_off ? -EIO : 0;
+}
+static int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3)
+{ assert(clocks && parent_refs); *vdec = state; *nic3 = 0; return 0; }
+static int t7_domain_state(int id, s32 *value) { *value = state; return 0; }
+static void t7_power_fault(struct aml_vdec_hw *hw) { hw->faulted = true; }
+static void arm_smccc_smc(int cmd, int id, int policy, int a, int b, int c, int d,
+                         int e, struct arm_smccc_res *res)
+{
+    assert((unsigned int)cmd == 0xb200000e && id == 13 && !policy);
+    assert(en0_programmed && parent_refs && child_refs);
+    res->a0 = secure_error;
+}
+""" + functions + """
+int main(void)
+{
+    struct pm pm = { .pd_data = {{ .dev = (void *)2 }} };
+    struct aml_vdec_hw hw = { .nic3_dev = (void *)1, .pm = &pm };
+    assert(!t7_probe_begin(&hw) && hw.clocks_held && hw.nic3_held && !hw.powered);
+    en0_programmed = true;
+    assert(!t7_probe_domain_on(&hw) && hw.powered);
+    assert(!t7_power_off(&hw) && !clocks && !parent_refs && !child_refs);
+    assert(!hw.powered && !hw.nic3_held && !hw.clocks_held);
+    fail_parent = 1;
+    assert(t7_probe_begin(&hw) == -EIO && !hw.nic3_held);
+    assert(!t7_power_off(&hw) && !clocks && !parent_refs && !child_refs);
+    fail_parent = 0; fail_child = 1;
+    assert(!t7_probe_begin(&hw) && t7_probe_domain_on(&hw) == -EIO);
+    assert(!t7_power_off(&hw) && !clocks && !parent_refs && !child_refs);
+    fail_child = 0; secure_error = 1;
+    assert(!t7_probe_begin(&hw) && t7_probe_domain_on(&hw) == -EACCES);
+    assert(!t7_power_off(&hw) && !clocks && !parent_refs && !child_refs);
+    secure_error = 0; fail_off = 1;
+    assert(!t7_probe_begin(&hw) && !t7_probe_domain_on(&hw));
+    assert(t7_power_off(&hw) == -EIO && hw.faulted);
+    assert(!clocks && !parent_refs && !child_refs);
+    return 0;
+}
+""")
+
     def test_mdec_single_read_requires_all_prerequisites_and_verified_power_off(self):
         functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
-            "t7_prepare_mdec", "aml_vdec_t7_mdec_test"))
+            "t7_register_access", "aml_vdec_t7_register_step", "aml_vdec_t7_mdec_test"))
         run_c(COMMON + """
 #include "reg_defines.h"
 #define DOS_BUS 0
 #define dev_info(...) ((void)0)
+#define mb() ((void)0)
+#define THIS_MODULE NULL
 struct aml_vdec_hw {
-    bool has_dbus_ctrl, powered, power_test_passed, mdec_test_passed;
-    u32 mdec_test_value;
+    bool has_dbus_ctrl, powered, power_test_passed, mdec_test_passed, faulted;
+    bool probe_failed, probe_pinned;
+    u32 mdec_test_value, probe_step, probe_value, probe_en0;
     void *dev, *map[1];
 };
-static int fail_at, bad_at, calls, pic_reads, on_error, off_error, off_calls;
-static unsigned long secure_result;
-static bool policy_set;
-struct arm_smccc_res { unsigned long a0; };
-static void arm_smccc_smc(unsigned int cmd, unsigned int id, int secure, int a,
-                         int b, int c, int d, int e, struct arm_smccc_res *res)
-{
-    assert(cmd == 0xb200000e && id == 13 && !secure);
-    assert(!calls);
-    res->a0 = secure_result; policy_set = !secure_result;
-}
+static int fail_at, bad_at, calls, pic_reads, on_error, domain_error, off_error, off_calls;
+static int phase, pins, writes;
+static void __module_get(void *module) { pins++; }
+static void module_put(void *module) { assert(pins == 1); pins--; }
 static const int registers[] = {
-    DOS_SW_RESET0, DOS_MEM_PD_VDEC, DOS_GCLK_EN0, DOS_GCLK_EN0,
-    GCLK_EN, GCLK_EN, MDEC_PIC_DC_CTRL
+    DOS_GCLK_EN0, DOS_GCLK_EN0, DOS_GCLK_EN0, DOS_GCLK_EN0, DOS_SW_RESET0,
+    DOS_MEM_PD_VDEC, GCLK_EN, GCLK_EN, GCLK_EN, MDEC_PIC_DC_CTRL
 };
 static int access_reg(int reg)
 {
-    assert(policy_set);
-    assert(calls < 7 && registers[calls] == reg);
+    assert(phase == (calls < 3 ? 1 : 2));
+    assert(calls < 10 && registers[calls] == reg);
     calls++;
     if (reg == MDEC_PIC_DC_CTRL) pic_reads++;
     return fail_at == calls ? -EIO : 0;
@@ -87,24 +172,24 @@ static int access_reg(int reg)
 static int regmap_read(void *map, int reg, u32 *value)
 {
     int ret = access_reg(reg);
-    *value = (reg == DOS_SW_RESET0 || reg == DOS_MEM_PD_VDEC) ? 0 : 0x3ff;
+    *value = reg == DOS_GCLK_EN0 ? (calls == 1 ? 0x7fff000 : 0x7fff3ff) :
+             reg == GCLK_EN && calls == 9 ? 0x3ff : 0;
     if (calls == bad_at) *value ^= 1;
     return ret;
 }
-static int regmap_update_bits(void *map, int reg, u32 mask, u32 value)
-{
-    assert(reg == DOS_GCLK_EN0 && mask == 0x3ff && value == 0x3ff);
-    return access_reg(reg);
-}
 static int regmap_write(void *map, int reg, u32 value)
 {
-    assert(reg == GCLK_EN && value == 0x3ff);
+    assert((reg == DOS_GCLK_EN0 && value == 0x7fff3ff) ||
+           (reg == GCLK_EN && value == 0x3ff));
+    writes++;
     return access_reg(reg);
 }
-static int t7_power_on(struct aml_vdec_hw *hw)
-{ hw->powered = !on_error; return on_error; }
+static int t7_probe_begin(struct aml_vdec_hw *hw)
+{ assert(!calls); phase = 1; return on_error; }
+static int t7_probe_domain_on(struct aml_vdec_hw *hw)
+{ assert(calls == 3); phase = 2; hw->powered = !domain_error; return domain_error; }
 static int t7_power_off(struct aml_vdec_hw *hw)
-{ hw->powered = false; off_calls++; return off_error; }
+{ hw->powered = false; phase = 0; off_calls++; return off_error; }
 """ + functions + """
 int main(void)
 {
@@ -112,32 +197,46 @@ int main(void)
     assert(aml_vdec_t7_mdec_test(&hw) == -EPERM && !calls && !off_calls);
     hw.power_test_passed = true;
     on_error = -EIO;
-    assert(aml_vdec_t7_mdec_test(&hw) == -EIO && !calls && !off_calls);
+    assert(aml_vdec_t7_mdec_test(&hw) == -EIO && !calls && off_calls == 1 && !pins);
     on_error = 0;
-    secure_result = (unsigned long)-1;
+    hw.probe_failed = false; domain_error = -EACCES; off_calls = 0;
     assert(aml_vdec_t7_mdec_test(&hw) == -EACCES);
-    assert(!calls && !pic_reads && off_calls == 1 && !hw.mdec_test_passed);
-    secure_result = 0;
-    for (int i = 1; i <= 7; i++) {
-        calls = pic_reads = off_calls = 0; fail_at = i;
+    assert(calls == 3 && !pic_reads && off_calls == 1 && !pins && !hw.mdec_test_passed);
+    domain_error = 0;
+    for (int i = 1; i <= 10; i++) {
+        hw.probe_failed = false;
+        calls = pic_reads = off_calls = writes = 0; fail_at = i;
         assert(aml_vdec_t7_mdec_test(&hw) == -EIO);
-        assert(calls == i && pic_reads == (i == 7) && off_calls == 1);
+        assert(calls == i && pic_reads == (i == 10) && off_calls == 1 && !pins);
+        assert(writes == (i >= 8 ? 2 : i >= 2 ? 1 : 0));
         assert(!hw.mdec_test_passed && !hw.powered);
+        assert(aml_vdec_t7_register_step(&hw, 1) == -EIO && calls == i);
     }
     fail_at = 0;
-    const int checks[] = {1, 2, 4, 6};
+    const int checks[] = {3, 4, 5, 6, 9};
     for (unsigned int i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
         calls = pic_reads = off_calls = 0; bad_at = checks[i];
+        hw.probe_failed = false;
         assert(aml_vdec_t7_mdec_test(&hw) < 0);
         assert(!pic_reads && off_calls == 1 && !hw.mdec_test_passed);
     }
     bad_at = calls = pic_reads = off_calls = 0;
+    hw.probe_failed = false;
     off_error = -EIO;
     assert(aml_vdec_t7_mdec_test(&hw) == -EIO && !hw.mdec_test_passed);
     calls = pic_reads = off_calls = off_error = 0;
+    hw.probe_failed = false;
     assert(!aml_vdec_t7_mdec_test(&hw));
-    assert(calls == 7 && pic_reads == 1 && off_calls == 1);
-    assert(hw.mdec_test_passed && !hw.powered && hw.mdec_test_value == 0x3ff);
+    assert(calls == 10 && pic_reads == 1 && off_calls == 1 && !pins);
+    assert(hw.mdec_test_passed && !hw.powered && !hw.probe_step);
+    /* No skipped write after a read failure; no replay or out-of-order step. */
+    calls = off_calls = writes = 0;
+    assert(aml_vdec_t7_register_step(&hw, 8) == -EINVAL && !calls);
+    assert(!aml_vdec_t7_register_step(&hw, 1) && pins == 1 && !hw.mdec_test_passed);
+    assert(!aml_vdec_t7_register_step(&hw, 2) && calls == 1 && !writes);
+    assert(aml_vdec_t7_register_step(&hw, 4) == -EINVAL && calls == 1 && !writes);
+    assert(!aml_vdec_t7_register_step(&hw, 0) && !pins && off_calls == 1);
+    assert(!hw.mdec_test_passed && !hw.probe_step);
     return 0;
 }
 """)
@@ -181,7 +280,9 @@ int main(void)
         run_c(COMMON + """
 #include "reg_defines.h"
 typedef int32_t s32;
+#ifndef EHOSTDOWN
 #define EHOSTDOWN 112
+#endif
 #define DOS_BUS 0
 #define VDEC_1 0
 #define VDEC_MUX 1
@@ -198,8 +299,9 @@ struct pd { void *dev; };
 struct pm { struct pd pd_data[1]; };
 struct aml_vdec_hw {
     bool has_dbus_ctrl, powered, faulted, power_test_passed, mdec_test_passed;
+    bool nic3_held, clocks_held, probe_failed;
     u32 power_test_reset;
-    void *dev, *map[1];
+    void *dev, *map[1], *nic3_dev;
     struct clk_bulk_data gates[2];
     struct pm *pm;
 };

@@ -330,6 +330,12 @@ static int pm_vdec_power_domain_init(struct aml_vdec_hw *hw)
 		dev_dbg(hw->dev, "power domain: name: %s, dev: %p, link: %p\n",
 			pd[i].name, pd[i].dev, pd[i].link);
 	}
+	if (hw->has_dbus_ctrl) {
+		/* No automatic power-on: platform driver owns the transition. */
+		hw->nic3_dev = dev_pm_domain_attach_by_name(hw->dev, "nic3");
+		if (IS_ERR_OR_NULL(hw->nic3_dev))
+			return hw->nic3_dev ? PTR_ERR(hw->nic3_dev) : -ENODEV;
+	}
 
 	return 0;
 }
@@ -339,6 +345,9 @@ static void pm_vdec_power_domain_release(struct aml_vdec_hw *hw)
 	int i;
 	const struct power_manager_s *pm = hw->pm;
 	struct pm_pd_s *pd = pm->pd_data;
+
+	if (!IS_ERR_OR_NULL(hw->nic3_dev))
+		dev_pm_domain_detach(hw->nic3_dev, true);
 
 	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : VDEC_MAX); i++) {
 		if (!IS_ERR_OR_NULL(pd[i].link))
@@ -575,13 +584,22 @@ static void t7_power_fault(struct aml_vdec_hw *hw)
 static int t7_power_off(struct aml_vdec_hw *hw)
 {
 	s32 state;
-	int ret;
+	int ret = 0, parent_ret = 0;
 
 	/* Vendor order: clocks off, then secure domain off; no local PD reset. */
-	clk_bulk_disable_unprepare(2, hw->gates);
-	ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_1].dev);
+	if (hw->clocks_held) {
+		clk_bulk_disable_unprepare(2, hw->gates);
+		hw->clocks_held = false;
+	}
+	if (hw->powered)
+		ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_1].dev);
 	hw->powered = false;
-	if (ret < 0 || t7_domain_state(PWRC_T7_DOS_VDEC_ID, &state) || state != 1) {
+	if (hw->nic3_held) {
+		parent_ret = pm_runtime_put_sync_suspend(hw->nic3_dev);
+		hw->nic3_held = false;
+	}
+	if (ret < 0 || parent_ret < 0 ||
+	    t7_domain_state(PWRC_T7_DOS_VDEC_ID, &state) || state != 1) {
 		t7_power_fault(hw);
 		return -EIO;
 	}
@@ -603,11 +621,14 @@ static int t7_power_on(struct aml_vdec_hw *hw)
 	ret = clk_bulk_prepare_enable(2, hw->gates);
 	if (ret)
 		return ret;
+	hw->clocks_held = true;
 	ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_1].dev);
 	if (ret < 0) {
 		clk_bulk_disable_unprepare(2, hw->gates);
+		hw->clocks_held = false;
 		return ret;
 	}
+	hw->powered = true;
 	/*
 	 * genpd's successful SET call does not verify firmware a0 or GET status.
 	 * Do not touch even DOS_GCLK_EN0 until both VDEC and its NIC3 parent
@@ -621,7 +642,6 @@ static int t7_power_on(struct aml_vdec_hw *hw)
 		t7_power_off(hw);
 		return ret ?: -EHOSTDOWN;
 	}
-	hw->powered = true;
 	return 0;
 }
 
@@ -631,6 +651,8 @@ int aml_vdec_t7_power_test(struct aml_vdec_hw *hw)
 
 	if (!hw->has_dbus_ctrl)
 		return -EOPNOTSUPP;
+	if (hw->probe_failed)
+		return -EIO;
 	hw->power_test_passed = false;
 	hw->mdec_test_passed = false;
 	ret = t7_power_on(hw);
@@ -653,88 +675,168 @@ int aml_vdec_t7_power_test(struct aml_vdec_hw *hw)
 	return 0;
 }
 
-static int t7_prepare_mdec(struct aml_vdec_hw *hw)
+static int t7_probe_begin(struct aml_vdec_hw *hw)
 {
-	struct arm_smccc_res result;
-	u32 reset, mem_pd, gates;
+	s32 vdec = -1, nic3 = -1;
 	int ret;
 
 	/*
-	 * vdec_prepare_run() calls tee_config_device_state(VDEC=13, secure=0)
-	 * before H.264 run() enters amvdec_enable(). This is the normal-memory
-	 * access policy, not firmware loading or a replacement power switch.
-	 * Fail closed if BL32 rejects it; never guess protected register writes.
+	 * Vendor vdec_set_clk() programs DOS_GCLK_EN0 BEFORE secure VDEC on.
+	 * Hold NIC3 and both clocks for that DOS-top access. Its first read is
+	 * an explicit probe; never access internal MDEC registers in this phase.
 	 */
-	arm_smccc_smc(0xb200000e, 13, 0, 0, 0, 0, 0, 0, &result);
-	dev_info(hw->dev, "pre-MDEC: CONFIG_DEVICE_SECURE(13,0) a0=%#lx\n", result.a0);
-	if (result.a0)
-		return -EACCES;
-
-	/*
-	 * T7 vdec-pm-pd skips dos_local_config(): secure power-on owns RAM,
-	 * isolation and power-transition reset. Never substitute the legacy
-	 * AO sequence or the S5/T5M local 0xfffffffc reset for that contract.
-	 * These DOS-top readbacks precede any access inside MDEC/VLD/PSCALE.
-	 */
-	ret = regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &reset);
+	ret = clk_bulk_prepare_enable(2, hw->gates);
 	if (ret)
 		return ret;
-	ret = regmap_read(hw->map[DOS_BUS], DOS_MEM_PD_VDEC, &mem_pd);
-	if (ret)
+	hw->clocks_held = true;
+	ret = pm_runtime_resume_and_get(hw->nic3_dev);
+	if (ret < 0)
 		return ret;
-	dev_info(hw->dev, "pre-MDEC: reset=%#x mem_pd=%#x\n", reset, mem_pd);
-	if (reset || mem_pd)
-		return -EHOSTDOWN;
-
-	/* clkg12.c:vdec_set_clk(VDEC_1), preserving HCODEC's upper bits. */
-	ret = regmap_update_bits(hw->map[DOS_BUS], DOS_GCLK_EN0, 0x3ff, 0x3ff);
-	if (ret)
-		return ret;
-	ret = regmap_read(hw->map[DOS_BUS], DOS_GCLK_EN0, &gates);
-	if (ret)
-		return ret;
-	dev_info(hw->dev, "pre-MDEC: DOS_GCLK_EN0=%#x\n", gates);
-	if ((gates & 0x3ff) != 0x3ff)
-		return -EIO;
-
-	/* amvdec.c:amvdec_pg_enable(), before its first PIC_DC RMW. */
-	dev_info(hw->dev, "pre-MDEC: writing GCLK_EN offset=%#x\n", GCLK_EN);
-	ret = regmap_write(hw->map[DOS_BUS], GCLK_EN, 0x3ff);
-	if (ret)
-		return ret;
-	ret = regmap_read(hw->map[DOS_BUS], GCLK_EN, &gates);
-	if (ret)
-		return ret;
-	dev_info(hw->dev, "pre-MDEC: GCLK_EN=%#x\n", gates);
-	if ((gates & 0x3ff) != 0x3ff)
-		return -EIO;
+	hw->nic3_held = true;
+	ret = aml_vdec_t7_power_state(hw, &vdec, &nic3);
+	dev_info(hw->dev, "pre-EN0: VDEC[4]=%d NIC3[39]=%d rate=%lu\n",
+		 vdec, nic3, clk_get_rate(hw->gates[VDEC_MUX].clk));
+	if (ret || vdec != 1 || nic3)
+		return ret ?: -EHOSTDOWN;
 	return 0;
 }
 
-int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw)
+static int t7_probe_domain_on(struct aml_vdec_hw *hw)
+{
+	struct arm_smccc_res result;
+	s32 vdec = -1, nic3 = -1;
+	int ret;
+
+	/* Vendor vdec_set_clk(): DOS EN0, frequency selection, then domain on. */
+	ret = clk_set_rate(hw->gates[VDEC_MUX].clk, 800000000);
+	if (ret)
+		return ret;
+	ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_1].dev);
+	if (ret < 0)
+		return ret;
+	hw->powered = true;
+	ret = aml_vdec_t7_power_state(hw, &vdec, &nic3);
+	dev_info(hw->dev, "post-EN0 power: VDEC[4]=%d NIC3[39]=%d\n", vdec, nic3);
+	if (ret || vdec || nic3)
+		return ret ?: -EHOSTDOWN;
+	/* DMC normal-memory policy, not an APB permission or register proxy. */
+	arm_smccc_smc(0xb200000e, 13, 0, 0, 0, 0, 0, 0, &result);
+	dev_info(hw->dev, "CONFIG_DEVICE_SECURE(13,0) a0=%#lx\n", result.a0);
+	return result.a0 ? -EACCES : 0;
+}
+
+/* Each register step performs exactly one MMIO operation, never an RMW. */
+static int t7_register_access(struct aml_vdec_hw *hw, unsigned int step)
+{
+	u32 reg, value = 0;
+	bool write = false;
+	int ret;
+
+	switch (step) {
+	case 2:
+	case 3:
+	case 4:
+	case 6:
+		reg = DOS_GCLK_EN0;
+		write = step == 3;
+		value = (hw->probe_en0 & ~0x3ff) | 0x3ff;
+		break;
+	case 7:
+		reg = DOS_SW_RESET0;
+		break;
+	case 8:
+		reg = DOS_MEM_PD_VDEC;
+		break;
+	case 9:
+	case 10:
+	case 11:
+		reg = GCLK_EN;
+		write = step == 10;
+		value = 0x3ff;
+		break;
+	case 12:
+		reg = MDEC_PIC_DC_CTRL;
+		break;
+	default:
+		return -EINVAL;
+	}
+	dev_info(hw->dev, "DOS step %u: %s offset=%#x begin\n",
+		 step, write ? "write" : "read", reg);
+	if (write)
+		ret = regmap_write(hw->map[DOS_BUS], reg, value);
+	else
+		ret = regmap_read(hw->map[DOS_BUS], reg, &value);
+	if (ret)
+		return ret;
+	/* Order the transaction before its completion marker and next step. */
+	mb();
+	dev_info(hw->dev, "DOS step %u: %s offset=%#x value=%#x complete\n",
+		 step, write ? "write" : "read", reg, value);
+	if (!write)
+		hw->probe_value = value;
+	if (step == 2)
+		hw->probe_en0 = value;
+	if ((step == 4 || step == 6 || step == 11) && (value & 0x3ff) != 0x3ff)
+		return -EIO;
+	if ((step == 7 || step == 8) && value)
+		return -EHOSTDOWN;
+	if (step == 12)
+		hw->mdec_test_value = value;
+	return 0;
+}
+
+int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step)
 {
 	int ret, off_ret;
 
 	if (!hw->has_dbus_ctrl)
 		return -EOPNOTSUPP;
-	hw->mdec_test_passed = false;
+	if (hw->faulted || hw->probe_failed)
+		return -EIO;
 	if (!hw->power_test_passed)
 		return -EPERM;
-	ret = t7_power_on(hw);
-	if (ret)
-		return ret;
-	ret = t7_prepare_mdec(hw);
-	if (!ret) {
-		/* Exactly one PIC_DC read; no RMW, firmware, IRQ or DMA. */
-		dev_info(hw->dev, "MDEC single read: offset=%#x\n", MDEC_PIC_DC_CTRL);
-		ret = regmap_read(hw->map[DOS_BUS], MDEC_PIC_DC_CTRL, &hw->mdec_test_value);
-		if (!ret)
-			dev_info(hw->dev, "MDEC_PIC_DC_CTRL=%#x\n", hw->mdec_test_value);
+	/* Zero aborts a live session without another DOS transaction. */
+	if (step && (step > 13 || step != hw->probe_step + 1))
+		return -EINVAL;
+	if (step == 1) {
+		hw->mdec_test_passed = false;
+		__module_get(THIS_MODULE);
+		hw->probe_pinned = true;
+		ret = t7_probe_begin(hw);
+	} else if (step == 5) {
+		ret = t7_probe_domain_on(hw);
+	} else if (!step || step == 13) {
+		ret = 0;
+	} else {
+		ret = t7_register_access(hw, step);
 	}
-	off_ret = t7_power_off(hw);
-	if (ret || off_ret)
+	if (ret || !step || step == 13) {
+		off_ret = t7_power_off(hw);
+		hw->probe_failed = ret || off_ret;
+		hw->mdec_test_passed = step == 13 && !hw->probe_failed;
+		hw->probe_step = 0;
+		if (hw->probe_pinned) {
+			hw->probe_pinned = false;
+			module_put(THIS_MODULE);
+		}
 		return ret ?: off_ret;
-	hw->mdec_test_passed = true;
+	}
+	hw->probe_step = step;
+	return 0;
+}
+
+int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw)
+{
+	unsigned int step;
+	int ret;
+
+	if (!hw->has_dbus_ctrl)
+		return -EOPNOTSUPP;
+	for (step = 1; step <= 13; step++) {
+		ret = aml_vdec_t7_register_step(hw, step);
+		if (ret)
+			return ret;
+	}
 	dev_info(hw->dev, "MDEC test complete: VDEC off; no firmware or DMA started\n");
 	return 0;
 }
@@ -744,22 +846,29 @@ int vdec_enable(struct aml_vdec_hw *hw)
 	int ret;
 
 	if (hw->has_dbus_ctrl) {
-		ret = t7_power_on(hw);
+		unsigned int step;
+
+		ret = t7_probe_begin(hw);
 		if (ret)
-			return ret;
-		ret = t7_prepare_mdec(hw);
-		if (!ret)
-			ret = regmap_update_bits(hw->map[DOS_BUS], MDEC_PIC_DC_CTRL, BIT(31), 0);
-		if (ret) {
-			t7_power_off(hw);
-			return ret;
+			goto power_off;
+		for (step = 2; step <= 11; step++) {
+			ret = step == 5 ? t7_probe_domain_on(hw) : t7_register_access(hw, step);
+			if (ret)
+				goto power_off;
 		}
+		ret = regmap_update_bits(hw->map[DOS_BUS], MDEC_PIC_DC_CTRL, BIT(31), 0);
+		if (ret)
+			goto power_off;
 		regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_MASK, 0);
 		regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_CLR_REG, 1);
 		enable_irq(hw->dec_irq);
 		return 0;
 	}
 	return vdec_poweron(hw, VDEC_1);
+
+power_off:
+	t7_power_off(hw);
+	return ret;
 }
 
 int vdec_disable(struct aml_vdec_hw *hw)
