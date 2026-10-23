@@ -36,7 +36,7 @@ rows = source.split('} regs[] = {')[1].split('};')[0]
 addresses = [int(value, 16) for value in re.findall(r'0x[0-9a-f]+', rows)]
 suffixes = ('CTRL_STAT', 'CTRL_STAT2', 'BLK0_CFG_W0', 'BLK0_CFG_W1', 'BLK0_CFG_W2',
             'BLK0_CFG_W3', 'BLK0_CFG_W4', 'BLK1_CFG_W4', 'BLK2_CFG_W4',
-            'FIFO_CTRL_STAT', 'MALI_UNPACK_CTRL')
+            'FIFO_CTRL_STAT', 'MALI_UNPACK_CTRL', 'DIMM_CTRL')
 assert addresses == [int(definitions[f'VIU_OSD{index}_{suffix}'], 16)
                      for index in range(1, 4) for suffix in suffixes]
 
@@ -157,7 +157,9 @@ int main(void)
     int bytes=meson_t7_osd_layers_build(table,MESON_T7_RDMA_PAIRS,layers,
                                        1920,1080,0xffffffff,0x12345678);
     memset(hw,0,sizeof(hw));
+    hw[0x1adf]=hw[0x1acf]=hw[0x3da0]=0xffffffff;
     for (int i=0;i<bytes/4;i+=2) write_reg(table[i],table[i+1]);
+    assert(!hw[0x1adf] && !hw[0x1acf] && !hw[0x3da0]);
     assert((hw[VIU_OSD_BLEND_CTRL]&0xffff)==0x4123);
     assert((hw[0x1a10]&1) && (hw[0x1a30]&1) && (hw[0x3d80]&1));
     assert(hw[0x1a0d]==(0xffffffff & ~GENMASK(25,24)));

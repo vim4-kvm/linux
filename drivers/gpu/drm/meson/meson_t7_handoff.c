@@ -912,6 +912,9 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 			{ "scaler3", 0xff016a00, 0x38 },
 			{ "osd2-address", 0xff006990, 0xc },
 			{ "osd2-unpack", 0xff006af4, 4 },
+			{ "dimm1", 0xff006b7c, 4 },
+			{ "dimm2", 0xff006b3c, 4 },
+			{ "dimm3", 0xff00f680, 4 },
 		};
 
 		display->paths = meson_t7_handoff_map(pdev, "osd-paths", 0xff006834, 8);

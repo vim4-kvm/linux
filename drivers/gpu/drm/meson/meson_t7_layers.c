@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
 /* T7 OSD MIF, scalers and mixer. All changes share one hardware RDMA latch. */
 #include <linux/bitops.h>
 #include <linux/errno.h>
@@ -97,18 +98,20 @@ static int meson_t7_layer_mif(struct meson_t7_rdma_builder *rdma,
 			      const struct meson_t7_osd_layer *layer, unsigned int index)
 {
 	static const struct {
-		u32 ctrl, ctrl2, w0, w1, w2, w3, w4, address, stride, fifo, unpack;
+		u32 ctrl, ctrl2, w0, w1, w2, w3, w4, address, stride, fifo, unpack, dimm;
 	} regs[] = {
 		{ 0x1a10, 0x1a2d, 0x1a1b, 0x1a1c, 0x1a1d, 0x1a1e, 0x1a13,
-		  0x1a14, 0x1a15, 0x1a2b, 0x1a2f },
+		  0x1a14, 0x1a15, 0x1a2b, 0x1a2f, 0x1adf },
 		{ 0x1a30, 0x1a4d, 0x1a3b, 0x1a3c, 0x1a3d, 0x1a3e, 0x1a64,
-		  0x1a65, 0x1a66, 0x1a4b, 0x1abd },
+		  0x1a65, 0x1a66, 0x1a4b, 0x1abd, 0x1acf },
 		{ 0x3d80, 0x3d81, 0x3d88, 0x3d8c, 0x3d90, 0x3d94, 0x3d98,
-		  0x3d99, 0x3d9a, 0x3d9c, 0x3d9f },
+		  0x3d99, 0x3d9a, 0x3d9c, 0x3d9f, 0x3da0 },
 	};
 	u32 format, alpha = layer->alpha >> 8;
 	bool replace = layer->blend == DRM_MODE_BLEND_PIXEL_NONE;
 
+	/* Vendor initialization disables the constant-color substitute on every OSD. */
+	meson_t7_layer_write(rdma, regs[index].dimm, 0);
 	if (!layer->enabled) {
 		meson_t7_layer_write(rdma, regs[index].ctrl, BIT(2));
 		return 0;

@@ -22,11 +22,14 @@
 	      <0x0 0xff016a00 0x0 0x38>,
 	      <0x0 0xff006834 0x0 0x8>,
 	      <0x0 0xff006990 0x0 0xc>,
-	      <0x0 0xff006af4 0x0 0x4>;
+	      <0x0 0xff006af4 0x0 0x4>,
+	      <0x0 0xff006b7c 0x0 0x4>,
+	      <0x0 0xff006b3c 0x0 0x4>,
+	      <0x0 0xff00f680 0x0 0x4>;
 	reg-names = "osd1", "venc", "rdma", "pll", "vid2", "vid-div",
 		    "vpp", "blend", "scaler", "post-size", "out-size", "hdmi-setting",
 		    "osd2", "osd3", "scaler2", "scaler3", "osd-paths",
-		    "osd2-address", "osd2-unpack";
+		    "osd2-address", "osd2-unpack", "dimm1", "dimm2", "dimm3";
 	power-domains = <&pwrc PWRC_T7_VPU_HDMI_ID>,
 			<&pwrc PWRC_T7_VI_CLK1_ID>, <&pwrc PWRC_T7_VI_CLK2_ID>,
 			<&pwrc PWRC_T7_OSD1_MEM_ID>, <&pwrc PWRC_T7_OSD2_MEM_ID>,
