@@ -1437,6 +1437,7 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/sound/amlogic,t7-aed.yaml
 F:	Documentation/devicetree/bindings/sound/amlogic,t7-asrc.yaml
 F:	Documentation/devicetree/bindings/sound/amlogic,t7-loopback.yaml
+F:	Documentation/devicetree/bindings/sound/amlogic,t7-vad.yaml
 F:	sound/soc/meson/t7-aed*
 F:	sound/soc/meson/t7-asrc*
 F:	sound/soc/meson/t7-loopback*
