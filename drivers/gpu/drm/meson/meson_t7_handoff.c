@@ -15,6 +15,7 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
+#include <drm/drm_blend.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fb_dma_helper.h>
@@ -64,6 +65,7 @@ struct meson_t7_handoff {
 	u32 pending_addr;
 	bool pending_enable;
 	u32 pending_format, pending_stride, pending_ctrl2;
+	u32 pending_ctrl;
 	u32 boot_format, boot_stride, boot_ctrl2;
 	bool linear_formats;
 	struct meson_t7_modeset *modeset;
@@ -86,6 +88,26 @@ bool meson_t7_display_ready(struct drm_crtc *crtc)
 	return !READ_ONCE(to_handoff(crtc->dev)->faulted);
 }
 EXPORT_SYMBOL_GPL(meson_t7_display_ready);
+
+static u32 meson_t7_osd_alpha(u32 ctrl, u16 alpha)
+{
+	u32 value = alpha >> 8;
+
+	/* The OSD alpha multiplier represents unity as 0x100, not 0xff. */
+	if (value == 0xff)
+		value = 0x100;
+	return (ctrl & ~GENMASK(20, 12)) | value << 12;
+}
+
+static u32 meson_t7_osd_reflect(u32 format, unsigned int rotation)
+{
+	format &= ~(BIT(28) | BIT(29));
+	if (rotation & DRM_MODE_REFLECT_X)
+		format |= BIT(28);
+	if (rotation & DRM_MODE_REFLECT_Y)
+		format |= BIT(29);
+	return format;
+}
 
 /* Both interrupt orders are possible: do not complete until both have arrived. */
 static void meson_t7_handoff_rdma_complete(struct meson_t7_handoff *display)
@@ -134,7 +156,7 @@ static void meson_t7_handoff_rdma_arm(struct meson_t7_handoff *display)
 	table[7] = display->pending_addr >> 4;
 	if (display->native_modeset) {
 		table[8] = VIU_OSD1_CTRL_STAT;
-		table[9] = (readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT)) & ~BIT(0)) |
+		table[9] = (display->pending_ctrl & ~BIT(0)) |
 			   (display->pending_enable ? BIT(0) : 0);
 	}
 	display->rdma_done = false;
@@ -209,6 +231,17 @@ static void meson_t7_handoff_scanout(struct meson_t7_handoff *display,
 						  (fb->pitches[0] >> 4);
 		/* X formats ignore memory alpha; restore the exact boot state on detach. */
 		display->pending_ctrl2 = fb ? display->boot_ctrl2 | BIT(14) : display->boot_ctrl2;
+	}
+	if (display->native_modeset) {
+		struct drm_plane_state *plane = display->plane.state;
+
+		display->pending_ctrl = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
+		if (fb && plane) {
+			display->pending_ctrl =
+				meson_t7_osd_alpha(display->pending_ctrl, plane->alpha);
+			display->pending_format =
+				meson_t7_osd_reflect(display->pending_format, plane->rotation);
+		}
 	}
 	display->pending_addr = addr;
 	display->pending_enable = !!fb;
@@ -303,6 +336,23 @@ static const struct drm_plane_funcs meson_t7_handoff_plane_funcs = {
 	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_plane_destroy_state,
 };
+
+static int meson_t7_plane_properties(struct drm_plane *plane)
+{
+	unsigned int rotations = DRM_MODE_ROTATE_0 | DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y;
+	int ret;
+
+	ret = drm_plane_create_alpha_property(plane);
+	if (ret)
+		return ret;
+	ret = drm_plane_create_rotation_property(plane, DRM_MODE_ROTATE_0, rotations);
+	if (ret)
+		return ret;
+	ret = drm_plane_create_blend_mode_property(plane, BIT(DRM_MODE_BLEND_PIXEL_NONE));
+	if (ret)
+		return ret;
+	return drm_plane_create_zpos_immutable_property(plane, 0);
+}
 
 static int meson_t7_handoff_crtc_check(struct drm_crtc *crtc,
 				       struct drm_atomic_commit *state)
@@ -725,6 +775,11 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	drm_plane_helper_add(&display->plane, &meson_t7_handoff_plane_helpers);
+	if (display->native_modeset) {
+		ret = meson_t7_plane_properties(&display->plane);
+		if (ret)
+			return ret;
+	}
 	ret = drm_crtc_init_with_planes(drm, &display->crtc, &display->plane, NULL,
 					&meson_t7_handoff_crtc_funcs, NULL);
 	if (ret)

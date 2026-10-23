@@ -70,7 +70,9 @@ registers = '\n'.join(line for line in register_source.splitlines()
                       if re.match(r'#define\s', line) and not line.endswith('\\'))
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('struct meson_t7_handoff {'):source.index('static struct meson_t7_handoff *')]
-functions = source[source.index('static void meson_t7_handoff_rdma_complete'):
+functions = source[source.index('static u32 meson_t7_osd_alpha'):
+                   source.index('/* Both interrupt orders')]
+functions += source[source.index('static void meson_t7_handoff_rdma_complete'):
                    source.index('static int meson_t7_handoff_plane_check')]
 functions += source[source.index('static int meson_t7_handoff_plane_check'):
                     source.index('static void meson_t7_handoff_plane_update')]
@@ -83,6 +85,7 @@ prefix = r'''
 #include <stdio.h>
 #include <errno.h>
 typedef uint32_t u32;
+typedef uint16_t u16;
 typedef uint64_t dma_addr_t;
 typedef int spinlock_t;
 typedef int wait_queue_head_t;
@@ -119,6 +122,8 @@ struct drm_plane_state {
     struct drm_crtc *crtc;
     struct drm_framebuffer *fb;
     unsigned int src_x, src_y, src_w, src_h;
+    unsigned int rotation;
+    u16 alpha;
     int crtc_x, crtc_y, crtc_w, crtc_h;
 };
 struct drm_atomic_commit {
@@ -128,6 +133,8 @@ struct drm_atomic_commit {
 #define DRM_FORMAT_RGB888 1
 #define DRM_FORMAT_XRGB8888 2
 #define DRM_FORMAT_XBGR8888 3
+#define DRM_MODE_REFLECT_X (1 << 4)
+#define DRM_MODE_REFLECT_Y (1 << 5)
 #define DRM_FORMAT_MOD_LINEAR 0
 #define DRM_PLANE_NO_SCALING 1
 #define U32_MAX UINT32_MAX
@@ -264,6 +271,15 @@ int main(void)
     struct drm_atomic_commit rmfb = { .plane = &removed,
         .old_crtc = &running, .new_crtc = &running };
 
+    assert(meson_t7_osd_alpha(0xa5a00fff, 0) == (0xa5a00fff & ~GENMASK(20,12)));
+    assert((meson_t7_osd_alpha(0, 65535) >> 12) == 256);
+    assert((meson_t7_osd_alpha(0, 32768) >> 12) == 128);
+    assert(meson_t7_osd_reflect(0xffffffff, 0) == (0xffffffff & ~GENMASK(29,28)));
+    assert(meson_t7_osd_reflect(0, DRM_MODE_REFLECT_X) == BIT(28));
+    assert(meson_t7_osd_reflect(0, DRM_MODE_REFLECT_Y) == BIT(29));
+    assert(meson_t7_osd_reflect(0, DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y)
+           == (BIT(28) | BIT(29)));
+
     display.plane.dev = display.crtc.dev = &display.drm;
     display.plane.state = &removed;
     display.crtc.state = &running;
@@ -384,11 +400,15 @@ int main(void)
     struct drm_framebuffer uhd={.references=1,.format=&xrgb,.width=3840,.height=2160,
                                .pitches={15360}};
     display.plane.state->fb=&uhd; display.plane.state->visible=true;
+    display.plane.state->alpha=32768;
+    display.plane.state->rotation=DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y;
     previously_sent=sent; running.event=&event;
     meson_t7_handoff_flush(&display.crtc,&rmfb);
     assert(sent==previously_sent && running.event==&event);
     meson_t7_handoff_enable(&display.crtc,&rmfb);
     assert(sent==previously_sent+1 && !running.event && uhd.references==2 && (osd[0]&1));
+    assert(((osd[0] >> 12) & 0x1ff) == 128);
+    assert((osd[11] & GENMASK(29,28)) == GENMASK(29,28));
     assert(osd[VIU_OSD1_BLK0_CFG_W1 - VIU_OSD1_CTRL_STAT]==3839U<<16);
     assert(osd[VIU_OSD1_BLK0_CFG_W2 - VIU_OSD1_CTRL_STAT]==2159U<<16);
     running.active=false;
