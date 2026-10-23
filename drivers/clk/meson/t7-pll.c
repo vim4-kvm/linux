@@ -633,37 +633,39 @@ static const struct reg_sequence t7_hdmi_init_regs[] = {
 	{ .reg = HDMIPLL_CTRL6, .def = 0x56540000 }
 };
 
-static struct clk_regmap t7_hdmi_pll_dco = {
-	.data = &(struct meson_clk_pll_data){
-		.en = {
-			.reg_off = HDMIPLL_CTRL0,
-			.shift   = 28,
-			.width   = 1,
-		},
-		.m = {
-			.reg_off = HDMIPLL_CTRL0,
-			.shift   = 0,
-			.width   = 9,
-		},
-		.n = {
-			.reg_off = HDMIPLL_CTRL0,
-			.shift   = 10,
-			.width   = 5,
-		},
-		.l = {
-			.reg_off = HDMIPLL_CTRL0,
-			.shift   = 31,
-			.width   = 1,
-		},
-		.rst = {
-			.reg_off = HDMIPLL_CTRL0,
-			.shift   = 29,
-			.width   = 1,
-		},
-		.range = &t7_media_pll_mult_range,
-		.init_regs = t7_hdmi_init_regs,
-		.init_count = ARRAY_SIZE(t7_hdmi_init_regs),
+static struct meson_clk_pll_data t7_hdmi_pll_dco_data = {
+	.en = {
+		.reg_off = HDMIPLL_CTRL0,
+		.shift   = 28,
+		.width   = 1,
 	},
+	.m = {
+		.reg_off = HDMIPLL_CTRL0,
+		.shift   = 0,
+		.width   = 9,
+	},
+	.n = {
+		.reg_off = HDMIPLL_CTRL0,
+		.shift   = 10,
+		.width   = 5,
+	},
+	.l = {
+		.reg_off = HDMIPLL_CTRL0,
+		.shift   = 31,
+		.width   = 1,
+	},
+	.rst = {
+		.reg_off = HDMIPLL_CTRL0,
+		.shift   = 29,
+		.width   = 1,
+	},
+	.range = &t7_media_pll_mult_range,
+	.init_regs = t7_hdmi_init_regs,
+	.init_count = ARRAY_SIZE(t7_hdmi_init_regs),
+};
+
+static struct clk_regmap t7_hdmi_pll_dco = {
+	.data = &t7_hdmi_pll_dco_data,
 	.hw.init = &(struct clk_init_data){
 		.name = "hdmi_pll_dco",
 		.ops = &meson_clk_pll_ops,
@@ -712,6 +714,50 @@ static struct clk_regmap t7_hdmi_pll = {
 		},
 		.num_parents = 1,
 		.flags = CLK_SET_RATE_PARENT,
+	},
+};
+
+/* Firmware-owned HDMI PLL: registration and consumer references must not write. */
+static struct clk_regmap t7_hdmi_pll_dco_ro = {
+	.data = &t7_hdmi_pll_dco_data,
+	.hw.init = &(struct clk_init_data){
+		.name = "hdmi_pll_dco",
+		.ops = &meson_clk_pll_ro_ops,
+		.parent_data = (const struct clk_parent_data []) {
+			{ .fw_name = "in0", }
+		},
+		.num_parents = 1,
+		.flags = CLK_IGNORE_UNUSED,
+	},
+};
+
+static struct clk_regmap t7_hdmi_pll_od_ro = {
+	.data = &(struct clk_regmap_div_data){
+		.offset = HDMIPLL_CTRL0,
+		.shift = 16,
+		.width = 4,
+		.flags = CLK_DIVIDER_POWER_OF_TWO,
+	},
+	.hw.init = &(struct clk_init_data){
+		.name = "hdmi_pll_od",
+		.ops = &clk_regmap_divider_ro_ops,
+		.parent_hws = (const struct clk_hw *[]) { &t7_hdmi_pll_dco_ro.hw },
+		.num_parents = 1,
+	},
+};
+
+static struct clk_regmap t7_hdmi_pll_ro = {
+	.data = &(struct clk_regmap_div_data){
+		.offset = HDMIPLL_CTRL0,
+		.shift = 20,
+		.width = 2,
+		.flags = CLK_DIVIDER_POWER_OF_TWO,
+	},
+	.hw.init = &(struct clk_init_data){
+		.name = "hdmi_pll",
+		.ops = &clk_regmap_divider_ro_ops,
+		.parent_hws = (const struct clk_hw *[]) { &t7_hdmi_pll_od_ro.hw },
+		.num_parents = 1,
 	},
 };
 
@@ -983,6 +1029,12 @@ static struct clk_hw *t7_hdmi_hw_clks[] = {
 	[CLKID_HDMI_PLL]		= &t7_hdmi_pll.hw,
 };
 
+static struct clk_hw *t7_hdmi_ro_hw_clks[] = {
+	[CLKID_HDMI_PLL_DCO]		= &t7_hdmi_pll_dco_ro.hw,
+	[CLKID_HDMI_PLL_OD]		= &t7_hdmi_pll_od_ro.hw,
+	[CLKID_HDMI_PLL]		= &t7_hdmi_pll_ro.hw,
+};
+
 static struct clk_hw *t7_mclk_hw_clks[] = {
 	[CLKID_MCLK_PLL_DCO]		= &t7_mclk_pll_dco.hw,
 	[CLKID_MCLK_PRE]		= &t7_mclk_pre_od.hw,
@@ -1045,6 +1097,13 @@ static const struct meson_clkc_data t7_hdmi_data = {
 	},
 };
 
+static const struct meson_clkc_data t7_hdmi_ro_data = {
+	.hw_clks = {
+		.hws = t7_hdmi_ro_hw_clks,
+		.num = ARRAY_SIZE(t7_hdmi_ro_hw_clks),
+	},
+};
+
 static const struct meson_clkc_data t7_mclk_data = {
 	.hw_clks = {
 		.hws = t7_mclk_hw_clks,
@@ -1059,6 +1118,7 @@ static const struct of_device_id t7_pll_clkc_match_table[] = {
 	{ .compatible = "amlogic,t7-pcie-pll",	.data = &t7_pcie_data, },
 	{ .compatible = "amlogic,t7-mpll",	.data = &t7_mpll_data, },
 	{ .compatible = "amlogic,t7-hdmi-pll",	.data = &t7_hdmi_data, },
+	{ .compatible = "amlogic,t7-hdmi-pll-ro", .data = &t7_hdmi_ro_data, },
 	{ .compatible = "amlogic,t7-mclk-pll",	.data = &t7_mclk_data, },
 	{}
 };
