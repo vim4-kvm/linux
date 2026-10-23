@@ -295,15 +295,15 @@ int main(void)
     assert(!src[0].m2m_buf.vb.done && src[1].m2m_buf.vb.done==VB2_BUF_STATE_ERROR);
     assert(!src[1].consumed && dst[0].done==VB2_BUF_STATE_ERROR);
     inst.fbc_buf_count=3;
-    assert(!wave5_stop_retained_sources(&inst));
+    assert(!wave5_stop_encoder(&inst));
     assert(destroy_calls==1 && !inst.recovery_error && !dev.isolated);
     assert(inst.state==VPU_INST_STATE_NONE && !inst.fbc_buf_count && freed_frames==3);
     assert(codec.enc_info.destroyed && !src[0].consumed);
-    assert(!wave5_stop_retained_sources(&inst) && destroy_calls==1);
+    assert(!wave5_stop_encoder(&inst) && destroy_calls==1);
     inst.state=VPU_INST_STATE_PIC_RUN; src[0].consumed=true; fail_destroy=1;
-    assert(wave5_stop_retained_sources(&inst)==-EIO && dev.isolated);
+    assert(wave5_stop_encoder(&inst)==-EIO && dev.isolated);
     assert(src[0].consumed && !src[0].m2m_buf.vb.done && other.count==1);
-    assert(!wave5_stop_retained_sources(&inst) && destroy_calls==2);
+    assert(!wave5_stop_encoder(&inst) && destroy_calls==2);
     for(unsigned failure=0;failure<2;failure++) {
         inst.recovery_error=0; dev.isolated=false; inst.state=VPU_INST_STATE_PIC_RUN;
         fail_destroy=failure; destroy_calls=0;
@@ -320,7 +320,17 @@ int main(void)
         wave5_vpu_enc_stop_streaming(&queue);
         assert(destroy_calls==1 && !other.count);
     }
-    dev.isolated=false; inst.state=VPU_INST_STATE_PIC_RUN;
+    /* A completed drain leaves no queued sources but still owns a context.
+     * STREAMOFF must close it and allow a new sequence on the same file.
+     */
+    dev.isolated=false; fail_destroy=0; inst.state=VPU_INST_STATE_STOP;
+    destroy_calls=0; other=(struct v4l2_m2m_ctx){0};
+    struct vb2_queue empty={.inst=&inst,.type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
+    wave5_vpu_enc_stop_streaming(&empty);
+    assert(destroy_calls==1 && inst.state==VPU_INST_STATE_NONE);
+    wave5_vpu_enc_stop_streaming(&empty);
+    assert(destroy_calls==1 && inst.state==VPU_INST_STATE_NONE);
+    inst.state=VPU_INST_STATE_PIC_RUN;
     codec.enc_info.open_param.wave_param=(struct enc_wave_param){23,26,29};
     dst[0].done=0; dst[0].payload=1234;
     other=(struct v4l2_m2m_ctx){.is_draining=true,.dst=&dst[0]};
@@ -338,7 +348,7 @@ with tempfile.TemporaryDirectory(prefix='wave5-lookahead-') as directory:
         'static struct vb2_v4l2_buffer *wave5_find_src(',
         'static dma_addr_t wave5_vpu_enc_source_addr(', 'static int start_encode(',
         'static void wave5_vpu_enc_finish_encode(', 'static int wave5_vpu_enc_job_ready(',
-        'static int wave5_stop_retained_sources(', 'static void streamoff_output(',
+        'static int wave5_stop_encoder(', 'static void streamoff_output(',
         'static void streamoff_capture(', 'static void wave5_vpu_enc_stop_streaming('))
     code.write_text(scheduler + functions + behavior)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',

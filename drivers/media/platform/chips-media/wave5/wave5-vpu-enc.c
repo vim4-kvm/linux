@@ -1682,7 +1682,7 @@ return_buffers:
 	return ret;
 }
 
-static int wave5_stop_retained_sources(struct vpu_instance *inst)
+static int wave5_stop_encoder(struct vpu_instance *inst)
 {
 	struct v4l2_m2m_ctx *ctx = inst->v4l2_fh.m2m_ctx;
 	struct v4l2_m2m_buffer *buf;
@@ -1692,10 +1692,10 @@ static int wave5_stop_retained_sources(struct vpu_instance *inst)
 	int ret;
 
 	if (wave5_vpu_isolated(inst->dev) || inst->recovery_error ||
-	    !wave5_find_src(inst->v4l2_fh.m2m_ctx, true))
+	    inst->state == VPU_INST_STATE_NONE)
 		return 0;
-	/* An idle command queue does not release lookahead DMA references.
-	 * Destroy the firmware context before either queue returns its buffers.
+	/* STREAMOFF resets the encoding sequence even after a completed drain.
+	 * Destroy the context before returning any possible lookahead DMA.
 	 */
 	ret = wave5_vpu_enc_close(inst, &fail_res);
 	if (ret) {
@@ -1759,7 +1759,8 @@ static void wave5_vpu_enc_stop_streaming(struct vb2_queue *q)
 	dev_dbg(inst->dev->dev, "%s: type: %u\n", __func__, q->type);
 	pm_runtime_resume_and_get(inst->dev->dev);
 
-	if (!inst->recovery_error && wave5_vpu_both_queues_are_streaming(inst))
+	if (inst->state != VPU_INST_STATE_NONE && !inst->recovery_error &&
+	    wave5_vpu_both_queues_are_streaming(inst))
 		switch_state(inst, VPU_INST_STATE_STOP);
 
 	while (!wave5_vpu_isolated(inst->dev) && !inst->recovery_error) {
@@ -1782,7 +1783,7 @@ static void wave5_vpu_enc_stop_streaming(struct vb2_queue *q)
 			dev_dbg(inst->dev->dev, "Getting encoding results from fw, fail\n");
 	}
 
-	wave5_stop_retained_sources(inst);
+	wave5_stop_encoder(inst);
 	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 		streamoff_output(inst, q);
 	else
