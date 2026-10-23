@@ -153,4 +153,13 @@ config SND_MESON_T7_LOOPBACK
 	  playback reference. Both input synchronizers are configured by DAPM.
 	  Reference sample rate conversion is provided by the separate ASRC B.
 
+config SND_MESON_T7_AED
+	tristate "Amlogic T7 stereo audio effects"
+	select REGMAP_MMIO
+	help
+	  Enable the T7 stereo hardware EQ and full band dynamics processor.
+	  The component taps a playback FIFO and sends the processed first
+	  stereo lane to TDMOUT B. Equalizer coefficients are validated before
+	  loading both coefficient RAM banks while the engine is stopped.
+
 endmenu

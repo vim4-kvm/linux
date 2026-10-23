@@ -415,9 +415,45 @@ static struct snd_soc_dai_driver t7_frddr_dai_drv = {
 	.ops = &t7_frddr_ops,
 };
 
+static const struct snd_soc_dapm_widget t7_frddr_aed_widgets[] = {
+	SND_SOC_DAPM_PGA("AED", FIFO_CTRL2, 3, 0, NULL, 0),
+};
+
+static const struct snd_soc_dapm_route t7_frddr_aed_routes[] = {
+	{ "AED", NULL, "Playback" },
+};
+
+static int t7_frddr_component_probe(struct snd_soc_component *component)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+	int ret;
+
+	ret = snd_soc_dapm_new_controls(dapm, t7_frddr_aed_widgets,
+					ARRAY_SIZE(t7_frddr_aed_widgets));
+	if (ret)
+		return ret;
+	return snd_soc_dapm_add_routes(dapm, t7_frddr_aed_routes,
+				       ARRAY_SIZE(t7_frddr_aed_routes));
+}
+
+static const struct snd_soc_component_driver t7_frddr_component = {
+	.probe = t7_frddr_component_probe,
+	.dapm_widgets = sm1_frddr_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(sm1_frddr_dapm_widgets),
+	.dapm_routes = g12a_frddr_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(g12a_frddr_dapm_routes),
+	.open = axg_fifo_pcm_open,
+	.close = axg_fifo_pcm_close,
+	.hw_params = g12a_fifo_pcm_hw_params,
+	.hw_free = axg_fifo_pcm_hw_free,
+	.pointer = axg_fifo_pcm_pointer,
+	.trigger = axg_fifo_pcm_trigger,
+	.legacy_dai_naming = 1,
+};
+
 static const struct axg_fifo_match_data t7_frddr_match_data = {
 	.field_threshold = REG_FIELD(FIFO_CTRL1, 16, 23),
-	.component_drv = &sm1_frddr_component_drv,
+	.component_drv = &t7_frddr_component,
 	.dai_drv = &t7_frddr_dai_drv,
 };
 

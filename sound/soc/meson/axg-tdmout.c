@@ -360,13 +360,44 @@ static const struct snd_kcontrol_new t7_tdmout_controls[] = {
 	SOC_SINGLE("Gain Ramp Period", T7_TDMOUT_GAIN_CTRL, 0, 65535, 0),
 };
 
+static const char * const t7_tdmout_paths[] = { "FIFO", "AED" };
+static SOC_ENUM_SINGLE_DECL(t7_tdmout_path_enum, TDMOUT_CTRL1, 31, t7_tdmout_paths);
+static const struct snd_kcontrol_new t7_tdmout_path_mux =
+	SOC_DAPM_ENUM("Processing Source", t7_tdmout_path_enum);
+
+static const struct snd_soc_dapm_widget t7_tdmout_widgets[] = {
+	SND_SOC_DAPM_AIF_IN("IN 0", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 1", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 2", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 3", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 4", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("AED", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_MUX("SRC SEL", SND_SOC_NOPM, 0, 0, &sm1_tdmout_in_mux),
+	SND_SOC_DAPM_MUX("PROCESSING SEL", SND_SOC_NOPM, 0, 0, &t7_tdmout_path_mux),
+	SND_SOC_DAPM_PGA_E("ENC", SND_SOC_NOPM, 0, 0, NULL, 0,
+			   axg_tdm_formatter_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_PRE_PMD),
+	SND_SOC_DAPM_AIF_OUT("OUT", NULL, 0, SND_SOC_NOPM, 0, 0),
+};
+
+static const struct snd_soc_dapm_route t7_tdmout_routes[] = {
+	{ "SRC SEL", "IN 0", "IN 0" },
+	{ "SRC SEL", "IN 1", "IN 1" },
+	{ "SRC SEL", "IN 2", "IN 2" },
+	{ "SRC SEL", "IN 3", "IN 3" },
+	{ "SRC SEL", "IN 4", "IN 4" },
+	{ "PROCESSING SEL", "FIFO", "SRC SEL" },
+	{ "PROCESSING SEL", "AED", "AED" },
+	{ "ENC", NULL, "PROCESSING SEL" },
+	{ "OUT", NULL, "ENC" },
+};
+
 static const struct snd_soc_component_driver t7_tdmout_component_drv = {
 	.controls = t7_tdmout_controls,
 	.num_controls = ARRAY_SIZE(t7_tdmout_controls),
-	.dapm_widgets = sm1_tdmout_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(sm1_tdmout_dapm_widgets),
-	.dapm_routes = sm1_tdmout_dapm_routes,
-	.num_dapm_routes = ARRAY_SIZE(sm1_tdmout_dapm_routes),
+	.dapm_widgets = t7_tdmout_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(t7_tdmout_widgets),
+	.dapm_routes = t7_tdmout_routes,
+	.num_dapm_routes = ARRAY_SIZE(t7_tdmout_routes),
 };
 
 static const struct axg_tdm_formatter_driver t7_tdmout_drv = {
