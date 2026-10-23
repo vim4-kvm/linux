@@ -36,21 +36,27 @@ typedef int32_t s32;
 #define V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE 10
 #define V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE 9
 #define V4L2_SEL_TGT_CROP 0
+#define V4L2_SEL_FLAG_GE 1
+#define V4L2_SEL_FLAG_LE 2
 #define VPU_INST_STATE_NONE 0
+#define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define IS_ALIGNED(x,a) (!((x) & ((a)-1)))
 #define dev_dbg(...) ((void)0)
 #define dev_err(...) ((void)0)
 struct v4l2_rect { int left, top; unsigned width, height; };
-struct v4l2_selection { unsigned type, target; struct v4l2_rect r; };
+struct v4l2_selection { unsigned type, target, flags; struct v4l2_rect r; };
 struct vpu_attr { bool support_hevc10bit_enc, support_avc10bit_enc; };
 struct vpu_device { int product, dev_lock; struct vpu_attr attr; bool isolated, legacy_firmware; };
-struct v4l2_m2m_ctx { bool running, linked, output, capture; };
+struct v4l2_m2m_ctx { bool running, linked, output, capture, output_busy, capture_busy; };
+static bool *v4l2_m2m_get_src_vq(struct v4l2_m2m_ctx *ctx) { return ctx?&ctx->output_busy:NULL; }
+static bool *v4l2_m2m_get_dst_vq(struct v4l2_m2m_ctx *ctx) { return ctx?&ctx->capture_busy:NULL; }
+static bool vb2_is_busy(bool *queue) { return queue && *queue; }
 struct vpu_instance {
     bool released;
     struct vpu_device *dev;
     int std, id, state;
-    struct { unsigned width, height; } dst_fmt;
+    struct { unsigned width, height; } src_fmt, dst_fmt;
     struct v4l2_rect conf_win;
     struct { struct v4l2_m2m_ctx *m2m_ctx; } v4l2_fh;
 };
@@ -105,7 +111,7 @@ checks = r'''
 int main(void)
 {
     struct vpu_device dev = {.product=PRODUCT_ID_521};
-    struct vpu_instance inst = {.dev=&dev,.dst_fmt={1920,1080},
+    struct vpu_instance inst = {.dev=&dev,.src_fmt={1920,1088},.dst_fmt={1920,1080},
                                 .conf_win={0,0,1920,1080}};
     struct file file = {.inst=&inst};
     const unsigned dimensions[][2] = {
@@ -117,8 +123,7 @@ int main(void)
         for (unsigned i=0; i<sizeof(dimensions)/sizeof(dimensions[0]); i++) {
             unsigned w=dimensions[i][0], h=dimensions[i][1];
             bool supported = w >= W5_MIN_ENC_PIC_WIDTH && h >= W5_MIN_ENC_PIC_HEIGHT &&
-                             !(w % (codec==W_HEVC_ENC ? 8:2)) &&
-                             !(h % (codec==W_HEVC_ENC ? 8:2));
+                             !(w % 2) && !(h % 2);
             struct v4l2_rect before = inst.conf_win;
             struct v4l2_selection s = {.type=V4L2_BUF_TYPE_VIDEO_OUTPUT,
                                        .target=V4L2_SEL_TGT_CROP,.r={0,0,w,h}};
@@ -126,11 +131,32 @@ int main(void)
             assert(ret == (supported ? 0:-EINVAL));
             if (!supported) assert(!memcmp(&inst.conf_win,&before,sizeof(before)));
             else assert(inst.conf_win.width==w && inst.conf_win.height==h);
-            /* A stale or internal caller must not evade selection validation. */
+            /* The firmware guard still rejects unpadded internal callers. */
             struct enc_open_param p = {.pic_width=w,.pic_height=h,.frame_rate_info=60};
-            assert(wave5_vpu_enc_check_open_param(&inst,&p) == (supported ? 0:-EINVAL));
+            bool aligned = supported && !(w % (codec==W_HEVC_ENC ? 8:2)) &&
+                           !(h % (codec==W_HEVC_ENC ? 8:2));
+            assert(wave5_vpu_enc_check_open_param(&inst,&p) == (aligned ? 0:-EINVAL));
         }
     }
+    struct v4l2_rect saved = inst.conf_win;
+    struct v4l2_selection offset = {.type=V4L2_BUF_TYPE_VIDEO_OUTPUT,
+        .target=V4L2_SEL_TGT_CROP,.r={2,4,1366,768}};
+    assert(!wave5_vpu_enc_s_selection(&file,NULL,&offset));
+    assert(inst.conf_win.left==2 && inst.conf_win.top==4);
+    inst.state=1;
+    assert(wave5_vpu_enc_s_selection(&file,NULL,&offset)==-EBUSY);
+    inst.state=0;
+    struct v4l2_m2m_ctx allocated={.output_busy=true};
+    inst.v4l2_fh.m2m_ctx=&allocated;
+    assert(wave5_vpu_enc_s_selection(&file,NULL,&offset)==-EBUSY);
+    allocated.output_busy=false; allocated.capture_busy=true;
+    assert(wave5_vpu_enc_s_selection(&file,NULL,&offset)==-EBUSY);
+    inst.v4l2_fh.m2m_ctx=NULL;
+    offset.r.left=1920;
+    assert(wave5_vpu_enc_s_selection(&file,NULL,&offset)==-ERANGE);
+    offset.r.left=-2;
+    assert(wave5_vpu_enc_s_selection(&file,NULL,&offset)==-EINVAL);
+    inst.conf_win=saved;
     /* Close before STREAMON, during a job, and after either STREAMOFF order. */
     for (int output=0; output<2; output++)
     for (int capture=0; capture<2; capture++)

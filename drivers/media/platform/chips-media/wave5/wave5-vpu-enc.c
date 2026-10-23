@@ -30,8 +30,8 @@ static const struct v4l2_frmsize_stepwise enc_frmsize[FMT_TYPES] = {
 	},
 };
 
-/* T7 HEVC firmware stalls on non-eight-aligned visible dimensions. AVC's
- * conformance window supports the even dimensions advertised above.
+/* HEVC SRC_SIZE is block aligned. Smaller visible sizes use the conformance
+ * window, independently of the negotiated raw frame's storage alignment.
  */
 static const struct v4l2_frmsize_stepwise hevc_frmsize = {
 	.min_width = W5_MIN_ENC_PIC_WIDTH,
@@ -179,7 +179,7 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 		return -EINVAL;
 
 	if (info->mem_planes == 1) {
-		luma_size = stride * inst->dst_fmt.height;
+		luma_size = stride * inst->src_fmt.height;
 		chroma_size = luma_size / (info->hdiv * info->vdiv);
 	} else {
 		luma_size = inst->src_fmt.plane_fmt[0].sizeimage;
@@ -387,9 +387,8 @@ static int wave5_vpu_enc_enum_framesizes(struct file *f, void *fh, struct v4l2_f
 	}
 
 	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
-	/* Raw caps describe visible input; storage alignment is set by TRY_FMT. */
 	fsize->stepwise = fsize->pixel_format == V4L2_PIX_FMT_HEVC ?
-		hevc_frmsize : enc_frmsize[VPU_FMT_TYPE_CODEC];
+		hevc_frmsize : *vpu_fmt->v4l2_frmsize;
 
 	return 0;
 }
@@ -429,8 +428,9 @@ static int wave5_vpu_enc_try_fmt_cap(struct file *file, void *fh, struct v4l2_fo
 		f->fmt.pix_mp.pixelformat = inst->dst_fmt.pixelformat;
 		frmsize = &enc_frmsize[VPU_FMT_TYPE_CODEC];
 	} else {
-		width = f->fmt.pix_mp.width;
-		height = f->fmt.pix_mp.height;
+		/* Coded dimensions are read-only on the CAPTURE queue. */
+		width = inst->conf_win.left + inst->conf_win.width;
+		height = inst->conf_win.top + inst->conf_win.height;
 		f->fmt.pix_mp.pixelformat = vpu_fmt->v4l2_pix_fmt;
 		frmsize = vpu_fmt->v4l2_frmsize;
 	}
@@ -449,6 +449,10 @@ static int wave5_vpu_enc_s_fmt_cap(struct file *file, void *fh, struct v4l2_form
 {
 	struct vpu_instance *inst = file_to_vpu_inst(file);
 	int i, ret;
+
+	if (vb2_is_busy(v4l2_m2m_get_src_vq(inst->v4l2_fh.m2m_ctx)) ||
+	    vb2_is_busy(v4l2_m2m_get_dst_vq(inst->v4l2_fh.m2m_ctx)))
+		return -EBUSY;
 
 	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
 		__func__, f->fmt.pix_mp.pixelformat, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
@@ -556,6 +560,10 @@ static int wave5_vpu_enc_s_fmt_out(struct file *file, void *fh, struct v4l2_form
 	const struct v4l2_format_info *info;
 	int i, ret;
 
+	if (vb2_is_busy(v4l2_m2m_get_src_vq(inst->v4l2_fh.m2m_ctx)) ||
+	    vb2_is_busy(v4l2_m2m_get_dst_vq(inst->v4l2_fh.m2m_ctx)))
+		return -EBUSY;
+
 	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
 		__func__, f->fmt.pix_mp.pixelformat, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
 		f->fmt.pix_mp.num_planes, f->fmt.pix_mp.field);
@@ -623,14 +631,11 @@ static int wave5_vpu_enc_g_selection(struct file *file, void *fh, struct v4l2_se
 	case V4L2_SEL_TGT_CROP_BOUNDS:
 		s->r.left = 0;
 		s->r.top = 0;
-		s->r.width = inst->dst_fmt.width;
-		s->r.height = inst->dst_fmt.height;
+		s->r.width = inst->src_fmt.width;
+		s->r.height = inst->src_fmt.height;
 		break;
 	case V4L2_SEL_TGT_CROP:
-		s->r.left = 0;
-		s->r.top = 0;
-		s->r.width = inst->conf_win.width;
-		s->r.height = inst->conf_win.height;
+		s->r = inst->conf_win;
 		break;
 	default:
 		return -EINVAL;
@@ -642,29 +647,49 @@ static int wave5_vpu_enc_g_selection(struct file *file, void *fh, struct v4l2_se
 static int wave5_vpu_enc_s_selection(struct file *file, void *fh, struct v4l2_selection *s)
 {
 	struct vpu_instance *inst = file_to_vpu_inst(file);
+	struct v4l2_rect rect = s->r;
+	u32 width, height;
 
 	if (s->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
 		return -EINVAL;
 
 	if (s->target != V4L2_SEL_TGT_CROP)
 		return -EINVAL;
+	if (s->flags & ~(V4L2_SEL_FLAG_GE | V4L2_SEL_FLAG_LE))
+		return -EINVAL;
+	if (inst->state != VPU_INST_STATE_NONE ||
+	    vb2_is_busy(v4l2_m2m_get_src_vq(inst->v4l2_fh.m2m_ctx)) ||
+	    vb2_is_busy(v4l2_m2m_get_dst_vq(inst->v4l2_fh.m2m_ctx)))
+		return -EBUSY;
 
 	dev_dbg(inst->dev->dev, "%s: V4L2_SEL_TGT_CROP width: %u | height: %u\n",
 		__func__, s->r.width, s->r.height);
 
-	s->r.left = 0;
-	s->r.top = 0;
-	s->r.width = min(s->r.width, inst->dst_fmt.width);
-	s->r.height = min(s->r.height, inst->dst_fmt.height);
-
-	/* Selection feeds the firmware picture size, bypassing TRY_FMT. */
-	if (s->r.width < W5_MIN_ENC_PIC_WIDTH ||
-	    s->r.height < W5_MIN_ENC_PIC_HEIGHT ||
-	    !IS_ALIGNED(s->r.width, inst->std == W_HEVC_ENC ? 8 : 2) ||
-	    !IS_ALIGNED(s->r.height, inst->std == W_HEVC_ENC ? 8 : 2))
+	/* The 4:2:0 conformance window uses pairs of luma samples. Do not
+	 * silently change a requested visible rectangle or its chroma phase.
+	 */
+	if (rect.left < 0 || rect.top < 0 ||
+	    rect.width < W5_MIN_ENC_PIC_WIDTH ||
+	    rect.height < W5_MIN_ENC_PIC_HEIGHT ||
+	    !IS_ALIGNED(rect.left | rect.top | rect.width | rect.height, 2))
 		return -EINVAL;
+	if ((u32)rect.left > inst->src_fmt.width || (u32)rect.top > inst->src_fmt.height ||
+	    rect.width > inst->src_fmt.width - rect.left ||
+	    rect.height > inst->src_fmt.height - rect.top)
+		return -ERANGE;
 
-	inst->conf_win = s->r;
+	width = rect.left + rect.width;
+	height = rect.top + rect.height;
+	if (inst->std == W_HEVC_ENC) {
+		width = ALIGN(width, 8);
+		height = ALIGN(height, 8);
+	}
+	if (width > inst->src_fmt.width || height > inst->src_fmt.height)
+		return -ERANGE;
+
+	inst->conf_win = rect;
+	inst->dst_fmt.width = width;
+	inst->dst_fmt.height = height;
 
 	return 0;
 }
@@ -1235,6 +1260,26 @@ static void wave5_set_intra_refresh(struct enc_wave_param *param, u32 height,
 	param->intra_refresh_arg = hevc ? refresh_rows : 0;
 }
 
+static void wave5_set_enc_picture_size(struct enc_open_param *open_param,
+				       struct vpu_instance *inst)
+{
+	/* SRC_SIZE must remain block aligned even when the visible rectangle is
+	 * not. Padding comes from the negotiated OUTPUT storage, never beyond it.
+	 */
+	open_param->pic_width = inst->conf_win.left + inst->conf_win.width;
+	open_param->pic_height = inst->conf_win.top + inst->conf_win.height;
+	if (inst->std == W_HEVC_ENC) {
+		open_param->pic_width = ALIGN(open_param->pic_width, 8);
+		open_param->pic_height = ALIGN(open_param->pic_height, 8);
+	}
+	open_param->wave_param.conf_win_left = inst->conf_win.left;
+	open_param->wave_param.conf_win_top = inst->conf_win.top;
+	open_param->wave_param.conf_win_right = open_param->pic_width -
+		inst->conf_win.left - inst->conf_win.width;
+	open_param->wave_param.conf_win_bot = open_param->pic_height -
+		inst->conf_win.top - inst->conf_win.height;
+}
+
 static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 				   struct vpu_instance *inst)
 {
@@ -1281,8 +1326,7 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.lambda_scaling_enable = 1;
 
 	open_param->line_buf_int_en = true;
-	open_param->pic_width = inst->conf_win.width;
-	open_param->pic_height = inst->conf_win.height;
+	wave5_set_enc_picture_size(open_param, inst);
 	open_param->frame_rate_info = inst->frame_rate;
 	open_param->rc_enable = inst->rc_enable;
 	if (inst->rc_enable) {

@@ -7,7 +7,7 @@ import tempfile
 
 root = Path(__file__).parent
 source = (root / 'wave5-vpu-enc.c').read_text()
-helper = source[source.index('static void wave5_set_intra_refresh('):source.index('static int wave5_set_enc_openparam(')]
+helper = source[source.index('static void wave5_set_intra_refresh('):source.index('static void wave5_set_enc_picture_size(')]
 controls = source[source.index('\tcase V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD:'):source.index('\tcase V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:')]
 defines = '\n'.join(line for line in (root / 'wave5-vpuapi.h').read_text().splitlines()
                     if line.startswith(('#define REFRESH_MODE_', '#define REFRESH_MB_MODE_')))
