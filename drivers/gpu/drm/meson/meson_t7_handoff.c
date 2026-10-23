@@ -39,6 +39,7 @@
 #include "meson_t7_modeset.h"
 #include "meson_t7_scanout.h"
 #include "meson_t7_layers.h"
+#include "meson_t7_fb.h"
 
 #define HANDOFF_WIDTH	1920
 #define HANDOFF_HEIGHT	1080
@@ -396,8 +397,6 @@ static int meson_t7_handoff_layer_check(struct drm_plane_state *new,
 					struct drm_crtc_state *crtc_state)
 {
 	struct drm_framebuffer *fb = new->fb;
-	struct drm_gem_dma_object *object;
-	dma_addr_t address;
 	int ret;
 
 	ret = drm_atomic_helper_check_plane_state(new, crtc_state, 1 << 14, 4 << 16,
@@ -414,19 +413,9 @@ static int meson_t7_handoff_layer_check(struct drm_plane_state *new,
 	default:
 		return -EINVAL;
 	}
-	if ((new->src.x1 | new->src.y1 | new->src.x2 | new->src.y2) & 0xffff ||
-	    fb->width > 3840 || fb->height > 2160 ||
-	    fb->modifier != DRM_FORMAT_MOD_LINEAR || !IS_ALIGNED(fb->pitches[0], 32) ||
-	    fb->pitches[0] > 0xfff * 16 || fb->pitches[0] < fb->width * fb->format->cpp[0])
+	if ((new->src.x1 | new->src.y1 | new->src.x2 | new->src.y2) & 0xffff)
 		return -EINVAL;
-	object = drm_fb_dma_get_gem_obj(fb, 0);
-	if (!object)
-		return -EINVAL;
-	address = object->dma_addr + fb->offsets[0];
-	if (address < object->dma_addr || !IS_ALIGNED(address, 16) || address > U32_MAX ||
-	    (u64)fb->pitches[0] * fb->height > (u64)U32_MAX + 1 - address)
-		return -ERANGE;
-	return 0;
+	return meson_t7_fb_check(fb);
 }
 
 static int meson_t7_handoff_plane_check(struct drm_plane *plane,

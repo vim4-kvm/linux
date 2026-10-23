@@ -77,7 +77,10 @@ layers_header = Path(__file__).with_name('meson_t7_layers.h').read_text()
 types = layers_header[layers_header.index('#define MESON_T7_OSD_LAYERS'):
                       layers_header.rindex('#endif')] + types
 layers_source = Path(__file__).with_name('meson_t7_layers.c').read_text()
-functions = source[source.index('static u32 meson_t7_osd_alpha'):
+fb_source = Path(__file__).with_name('meson_t7_fb.h').read_text()
+functions = fb_source[fb_source.index('static inline int meson_t7_fb_check'):
+                      fb_source.rindex('#endif')]
+functions += source[source.index('static u32 meson_t7_osd_alpha'):
                    source.index('/* Both interrupt orders')]
 functions += source[source.index('static void meson_t7_handoff_rdma_complete'):
                    source.index('static int meson_t7_handoff_plane_check')]
@@ -112,7 +115,7 @@ struct drm_display_mode {int hdisplay, vdisplay;};
 struct drm_rect {int x1,y1,x2,y2;};
 static int drm_rect_width(const struct drm_rect *r) {return r->x2-r->x1;}
 static int drm_rect_height(const struct drm_rect *r) {return r->y2-r->y1;}
-struct drm_gem_dma_object {dma_addr_t dma_addr;};
+struct drm_gem_dma_object {dma_addr_t dma_addr; struct {u64 size;} base;};
 struct drm_crtc_state {
     bool active, modeset;
     struct drm_display_mode adjusted_mode;
@@ -123,7 +126,11 @@ static bool drm_atomic_crtc_needs_modeset(struct drm_crtc_state *state)
 struct drm_plane { struct drm_device *dev; struct drm_plane_state *state; };
 struct drm_crtc { struct drm_device *dev; struct drm_crtc_state *state; };
 struct drm_encoder { int unused; };
-struct drm_format_info { unsigned int format; unsigned int cpp[1]; };
+struct drm_format_info { unsigned int format; unsigned int cpp[1]; unsigned int num_planes; };
+static int drm_format_info_plane_width(const struct drm_format_info *f, int w, int p)
+{return w;}
+static int drm_format_info_plane_height(const struct drm_format_info *f, int h, int p)
+{return h;}
 struct drm_framebuffer {
     unsigned int references;
     const struct drm_format_info *format;
@@ -228,7 +235,8 @@ static int drm_atomic_helper_check_plane_state(struct drm_plane_state *plane,
 static struct drm_gem_dma_object *drm_fb_dma_get_gem_obj(struct drm_framebuffer *fb,
                                                       unsigned int index)
 {
-    static struct drm_gem_dma_object default_object={0x20000000};
+    static struct drm_gem_dma_object default_object={.dma_addr=0x20000000,
+                                                    .base.size=64*1024*1024};
     assert(fb);
     return fb->object ? fb->object : &default_object;
 }
@@ -367,8 +375,8 @@ int main(void)
     puts("OSD two-vsync retirement, active-CRTC RMFB, wrap and timeout pinning passed");
 
     /* M2 imports can carry a padded 32-bit pitch, but never a non-linear modifier. */
-    const struct drm_format_info xrgb = {DRM_FORMAT_XRGB8888, {4}};
-    const struct drm_format_info xbgr = {DRM_FORMAT_XBGR8888, {4}};
+    const struct drm_format_info xrgb = {DRM_FORMAT_XRGB8888, {4}, 1};
+    const struct drm_format_info xbgr = {DRM_FORMAT_XBGR8888, {4}, 1};
     struct drm_framebuffer gpu = {.references=1, .format=&xrgb,
         .width=1920, .height=1080, .pitches={8192}};
     struct drm_plane_state visible = {.fb=&gpu, .crtc=&display.crtc,
@@ -496,6 +504,16 @@ int main(void)
         rmfb.new_crtc=&output;
         assert(!meson_t7_handoff_plane_check(p,&rmfb));
     }
+    /* An imported object shorter than its final padded row never reaches DMA. */
+    struct drm_gem_dma_object short_import={.dma_addr=0x21000000,
+        .base.size=7680*1080-1};
+    cursor.object=&short_import;
+    unsigned int writes_before_check=writes;
+    assert(meson_t7_handoff_plane_check(&multi.extra_planes[1],&rmfb)==-ERANGE);
+    assert(writes==writes_before_check && cursor.references==1);
+    short_import.base.size++;
+    assert(!meson_t7_handoff_plane_check(&multi.extra_planes[1],&rmfb));
+    cursor.object=NULL;
     fail_modeset=false; inject_timeout=false;
     meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
     unsigned int frame_start=vblanks;
