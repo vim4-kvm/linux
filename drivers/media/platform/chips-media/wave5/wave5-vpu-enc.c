@@ -1011,9 +1011,6 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1:
 			param->level = 51 * 3;
 			break;
-		case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2:
-			param->level = 52 * 3;
-			break;
 		default:
 			return -EINVAL;
 		}
@@ -1981,7 +1978,7 @@ static int wave5_vpu_open_enc(struct file *filp)
 			       V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
-			       V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2, 0,
+			       V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1, 0,
 			       V4L2_MPEG_VIDEO_HEVC_LEVEL_1);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_HEVC_TIER,
