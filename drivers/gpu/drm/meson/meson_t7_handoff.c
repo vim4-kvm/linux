@@ -119,15 +119,15 @@ static int meson_t7_handoff_plane_check(struct drm_plane *plane,
 {
 	struct drm_plane_state *new = drm_atomic_get_new_plane_state(state, plane);
 	struct meson_t7_handoff *display = to_handoff(plane->dev);
-	struct drm_crtc_state *crtc_state;
+	struct drm_crtc_state *crtc_state = NULL;
 	dma_addr_t addr;
 	int ret;
 
 	if (READ_ONCE(display->faulted))
 		return -EIO;
-	if (!new->crtc)
-		return 0;
-	crtc_state = drm_atomic_get_new_crtc_state(state, new->crtc);
+	if (new->crtc)
+		crtc_state = drm_atomic_get_new_crtc_state(state, new->crtc);
+	/* RMFB detaches a copied plane state whose visible flag can still be set. */
 	ret = drm_atomic_helper_check_plane_state(new, crtc_state,
 						  DRM_PLANE_NO_SCALING, DRM_PLANE_NO_SCALING,
 						  false, false);

@@ -73,26 +73,57 @@ defines = '\n'.join(line for line in source.splitlines() if line.startswith('#de
 types = source[source.index('struct meson_t7_handoff {'):source.index('static struct meson_t7_handoff *')]
 functions = source[source.index('static irqreturn_t meson_t7_handoff_irq'):
                    source.index('static int meson_t7_handoff_plane_check')]
+functions += source[source.index('static int meson_t7_handoff_plane_check'):
+                    source.index('static void meson_t7_handoff_plane_update')]
+functions += source[source.index('static void meson_t7_handoff_flush'):
+                    source.index('static void meson_t7_handoff_enable(')]
 prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <errno.h>
 typedef uint32_t u32;
 typedef uint64_t dma_addr_t;
 typedef int spinlock_t;
 typedef int wait_queue_head_t;
 typedef int irqreturn_t;
-struct drm_device { int unused; };
-struct drm_plane { int unused; };
-struct drm_crtc { int unused; };
+struct drm_device { int event_lock; };
+struct drm_plane_state;
+struct drm_crtc_state { bool active; void *event; };
+struct drm_plane { struct drm_device *dev; struct drm_plane_state *state; };
+struct drm_crtc { struct drm_device *dev; struct drm_crtc_state *state; };
 struct drm_encoder { int unused; };
-struct drm_framebuffer { unsigned int references; };
+struct drm_format_info { unsigned int format; };
+struct drm_framebuffer {
+    unsigned int references;
+    const struct drm_format_info *format;
+    unsigned int width, height, pitches[1], offsets[1];
+    uint64_t modifier;
+};
+struct drm_plane_state {
+    bool visible;
+    struct drm_crtc *crtc;
+    struct drm_framebuffer *fb;
+    unsigned int src_x, src_y, src_w, src_h;
+    int crtc_x, crtc_y, crtc_w, crtc_h;
+};
+struct drm_atomic_commit {
+    struct drm_plane_state *plane;
+    struct drm_crtc_state *old_crtc, *new_crtc;
+};
+#define DRM_FORMAT_RGB888 1
+#define DRM_FORMAT_MOD_LINEAR 0
+#define DRM_PLANE_NO_SCALING 1
+#define U32_MAX UINT32_MAX
+#define IS_ALIGNED(value, alignment) (!((value) & ((alignment) - 1)))
 #define __iomem
 #define BIT(n) (1U << (n))
 #define IRQ_HANDLED 1
 #define spin_lock_irqsave(lock, flags) ((void)(lock), (void)((flags) = 0))
 #define spin_unlock_irqrestore(lock, flags) ((void)(lock), (void)(flags))
+#define spin_lock_irq(lock) ((void)(lock))
+#define spin_unlock_irq(lock) ((void)(lock))
 #define READ_ONCE(value) (value)
 #define WRITE_ONCE(target, value) ((target) = (value))
 #define msecs_to_jiffies(value) (value)
@@ -100,6 +131,30 @@ struct drm_framebuffer { unsigned int references; };
 static bool inject_timeout;
 static u32 osd[32], venc[66];
 static unsigned int writes, vblanks;
+static struct meson_t7_handoff *to_handoff(struct drm_device *drm);
+static struct drm_plane_state *drm_atomic_get_new_plane_state(
+    struct drm_atomic_commit *state, struct drm_plane *plane) { return state->plane; }
+static struct drm_crtc_state *drm_atomic_get_new_crtc_state(
+    struct drm_atomic_commit *state, struct drm_crtc *crtc) { return state->new_crtc; }
+static struct drm_crtc_state *drm_atomic_get_old_crtc_state(
+    struct drm_atomic_commit *state, struct drm_crtc *crtc) { return state->old_crtc; }
+static int drm_atomic_helper_check_plane_state(struct drm_plane_state *plane,
+    struct drm_crtc_state *crtc, int min_scale, int max_scale,
+    bool can_position, bool can_update_disabled)
+{
+    /* DRM's helper clears copied visibility when the new framebuffer is NULL. */
+    plane->visible = plane->fb != NULL;
+    return 0;
+}
+static dma_addr_t drm_fb_dma_get_gem_addr(struct drm_framebuffer *fb,
+    struct drm_plane_state *plane, unsigned int index)
+{
+    assert(fb);
+    return 0x20000000;
+}
+static int drm_crtc_vblank_get(struct drm_crtc *crtc) { return 0; }
+static void drm_crtc_vblank_put(struct drm_crtc *crtc) { }
+static void drm_crtc_send_vblank_event(struct drm_crtc *crtc, void *event) { }
 static u32 readl(void *address) { return *(u32 *)address; }
 static void writel(u32 value, void *address)
 {
@@ -130,7 +185,16 @@ checks = r'''
 int main(void)
 {
     struct meson_t7_handoff display = { .osd = osd, .venc = venc };
-    struct drm_framebuffer first = { 1 }, second = { 1 }, third = { 1 };
+    struct drm_framebuffer first = { .references = 1 };
+    struct drm_framebuffer second = { .references = 1 }, third = { .references = 1 };
+    struct drm_crtc_state running = { .active = true };
+    struct drm_plane_state removed = { .visible = true };
+    struct drm_atomic_commit rmfb = { .plane = &removed,
+        .old_crtc = &running, .new_crtc = &running };
+
+    display.plane.dev = display.crtc.dev = &display.drm;
+    display.plane.state = &removed;
+    display.crtc.state = &running;
 
     meson_t7_handoff_irq(0, &display);
     assert(!writes);
@@ -138,7 +202,10 @@ int main(void)
     assert(writes == 1 && first.references == 2 && osd[4] == 0x02000000);
     meson_t7_handoff_scanout(&display, &second, 0x21000000);
     assert(writes == 2 && first.references == 1 && second.references == 2);
-    meson_t7_handoff_scanout(&display, NULL, HANDOFF_BOOT_ADDR);
+    /* RMFB/file close detaches fb and crtc from a copied, visible plane state. */
+    assert(!meson_t7_handoff_plane_check(&display.plane, &rmfb));
+    assert(!removed.visible);
+    meson_t7_handoff_flush(&display.crtc, &rmfb);
     assert(writes == 3 && second.references == 1 && !display.scanout);
     assert(osd[4] == HANDOFF_BOOT_ADDR >> 4);
     /* Counter wrap must not retire the buffer before two real interrupts. */
@@ -155,14 +222,15 @@ int main(void)
     /* A delayed IRQ cannot make the failed path drop either DMA reference. */
     meson_t7_handoff_irq(0, &display);
     assert(first.references == 2 && second.references == 2);
-    puts("OSD address publication, two-vsync retirement, wrap and timeout pinning passed");
+    puts("OSD two-vsync retirement, active-CRTC RMFB, wrap and timeout pinning passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     code = Path(directory) / 'handoff.c'
     executable = Path(directory) / 'handoff'
     code.write_text(prefix + registers + '\n' + defines + '\n' +
-                    types + functions + checks)
+                    types + '\nstatic struct meson_t7_handoff *to_handoff(struct drm_device *drm) '
+                    '{ return (struct meson_t7_handoff *)drm; }\n' + functions + checks)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-I', str(Path(__file__).parent),
                     str(code), '-o', str(executable)], check=True)
