@@ -149,7 +149,8 @@ struct v4l2_m2m_ctx {
 #define v4l2_m2m_for_each_src_buf(ctx,b) \
     for(unsigned cursor=0;cursor<(ctx)->count && ((b)=(ctx)->src[cursor]);cursor++)
 struct frame_buffer { uint64_t buf_y, buf_cb, buf_cr; unsigned stride; };
-struct enc_wave_param { unsigned intra_qp, fixed_qp_p, fixed_qp_b; };
+struct enc_wave_param { unsigned intra_qp, fixed_qp_p, fixed_qp_b;
+    bool hier_enabled, hier_qp_enable; };
 struct enc_param {
     uint64_t pic_stream_buffer_addr, pic_stream_buffer_size;
     unsigned src_idx;
@@ -246,7 +247,8 @@ behavior = r'''
 int main(void)
 {
     struct vpu_device dev={0};
-    struct codec_info codec={.enc_info.open_param.wave_param={23,26,29}};
+    struct codec_info codec={.enc_info.open_param.wave_param={.intra_qp=23,
+        .fixed_qp_p=26,.fixed_qp_b=29}};
     struct vpu_src_buffer src[3]={0};
     struct vb2_v4l2_buffer dst[4]={0};
     struct v4l2_m2m_ctx ctx={.count=3,.dst=&dst[0]};
@@ -335,7 +337,8 @@ int main(void)
     wave5_vpu_enc_stop_streaming(&empty);
     assert(destroy_calls==1 && inst.state==VPU_INST_STATE_NONE);
     inst.state=VPU_INST_STATE_PIC_RUN;
-    codec.enc_info.open_param.wave_param=(struct enc_wave_param){23,26,29};
+    codec.enc_info.open_param.wave_param=(struct enc_wave_param){.intra_qp=23,
+        .fixed_qp_p=26,.fixed_qp_b=29};
     dst[0].done=0; dst[0].payload=1234;
     other=(struct v4l2_m2m_ctx){.is_draining=true,.dst=&dst[0]};
     fail_command=1;

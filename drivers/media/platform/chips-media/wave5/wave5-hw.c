@@ -1821,6 +1821,33 @@ int wave5_vpu_enc_init_seq(struct vpu_instance *inst)
 	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
 	struct enc_open_param *p_open_param = &p_enc_info->open_param;
 	struct enc_wave_param *p_param = &p_open_param->wave_param;
+	unsigned int i;
+	int ret;
+
+	/* CUSTOM_GOP precedes COMMON, which produces the sequence-init report. */
+	if (p_param->gop_preset_idx == PRESET_IDX_CUSTOM_GOP) {
+		vpu_write_reg(inst->dev, W5_CMD_ENC_CUSTOM_GOP_PARAM,
+			      p_open_param->custom_gop_size);
+		for (i = 0; i < MAX_GOP_NUM; i++) {
+			const struct custom_gop_pic_param *pic = &p_open_param->custom_gop[i];
+
+			reg_val = 0;
+			if (i < p_open_param->custom_gop_size) {
+				reg_val = pic->pic_type | (pic->poc_offset << 2) |
+					(pic->pic_qp << 6) | ((pic->ref_poc_l0 & 0x1f) << 14) |
+					((pic->ref_poc_l1 & 0x1f) << 19) | (pic->temporal_id << 24);
+				/* Legacy encodes numRefPicL0; current ABI encodes multiref-P. */
+				if (inst->dev->legacy_firmware)
+					reg_val |= BIT(12);
+			}
+			vpu_write_reg(inst->dev, W5_CMD_ENC_CUSTOM_GOP_PIC_PARAM_0 + i * 4,
+				      reg_val);
+		}
+		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_SET_PARAM_OPTION, OPT_CUSTOM_GOP);
+		ret = send_firmware_command(inst, W5_ENC_SET_PARAM, true, NULL, NULL);
+		if (ret)
+			return ret;
+	}
 
 	/*
 	 * OPT_COMMON:
@@ -2604,7 +2631,7 @@ int wave5_vpu_enc_finish_seq(struct vpu_instance *inst, u32 *fail_res)
 static bool wave5_vpu_enc_check_common_param_valid(struct vpu_instance *inst,
 						   struct enc_open_param *open_param)
 {
-	bool low_delay = true;
+	bool low_delay = !inst->b_frames;
 	struct enc_wave_param *param = &open_param->wave_param;
 	struct vpu_device *vpu_dev = inst->dev;
 	struct device *dev = vpu_dev->dev;

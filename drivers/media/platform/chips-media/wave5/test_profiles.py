@@ -273,6 +273,8 @@ param = api[api.index('struct enc_wave_param {'):]
 param = param[:param.index('\n};') + 3]
 setter = controls[controls.index('static int wave5_set_qp_limits('):
                   controls.index('static const struct v4l2_ctrl_ops')]
+gop_pic = api[api.index('struct custom_gop_pic_param {'):]
+param += '\n' + gop_pic[:gop_pic.index('\n};') + 3]
 protocol = '\n'.join(line for line in api.splitlines()
                      if line.startswith(('#define HEVC_PROFILE_', '#define H264_PROFILE_',
                                          '#define ENC_CHANGE_')))
@@ -297,6 +299,12 @@ typedef uint64_t u64;
 #define BIT(n) (1ULL<<(n))
 #define VPU_INST_STATE_NONE 0
 #define VPU_INST_STATE_PIC_RUN 3
+#define MAX_GOP_NUM 8
+#define PRESET_IDX_CUSTOM_GOP 0
+#define PRESET_IDX_IBPBP 4
+#define PRESET_IDX_IPP_SINGLE 9
+#define PIC_TYPE_P 1
+#define PIC_TYPE_B 2
 #define dev_dbg(...) ((void)0)
 #ifndef V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE
 #define V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE 0x00990b00
@@ -309,7 +317,7 @@ struct vpu_instance;
 struct v4l2_ctrl { unsigned id; int val; struct vpu_instance *owner; struct v4l2_ctrl **cluster;
     int minimum, maximum, step; uint64_t skip; };
 struct v4l2_ctrl_handler { int error; unsigned count; struct vpu_instance *owner;
-    struct v4l2_ctrl controls[96]; };
+    struct v4l2_ctrl controls[128]; };
 struct vpu_device { bool legacy_firmware; };
 struct vpu_instance {
     struct enc_wave_param enc_param, hevc_param;
@@ -320,21 +328,22 @@ struct vpu_instance {
     struct v4l2_ctrl *avc_qp_limits[8], *hevc_qp_limits[8];
     struct vpu_device *dev;
 };
-struct enc_open_param { unsigned vbv_buffer_size; };
+struct enc_open_param { unsigned vbv_buffer_size, custom_gop_size;
+    struct enc_wave_param wave_param; struct custom_gop_pic_param custom_gop[8]; };
 static struct vpu_instance *wave5_ctrl_to_vpu_inst(struct v4l2_ctrl *c) { return c->owner; }
 static void atomic_set(unsigned *value, int setting) { *value=setting; }
 static void atomic_or(unsigned mask,unsigned *value) { *value|=mask; }
 static void atomic_andnot(unsigned mask,unsigned *value) { *value&=~mask; }
 static int wave5_vpu_enc_ctrl_ops;
 static void v4l2_ctrl_handler_init(struct v4l2_ctrl_handler *hdl,unsigned count)
-{ assert(count<=96 && !hdl->count); }
+{ assert(count<=128 && !hdl->count); }
 static struct v4l2_ctrl *v4l2_ctrl_new_std(struct v4l2_ctrl_handler *hdl,void *ops,
         unsigned id,int minimum,int maximum,int step,int value)
 {
     (void)ops;
     if(id==V4L2_CID_MPEG_VIDEO_USE_LTR_FRAMES) assert(step==0);
     else if(id!=V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME) assert(step>0);
-    assert(hdl->count<96 && minimum<=value && value<=maximum);
+    assert(hdl->count<128 && minimum<=value && value<=maximum);
     struct v4l2_ctrl *ctrl=&hdl->controls[hdl->count++];
     *ctrl=(struct v4l2_ctrl){.id=id,.val=value,.owner=hdl->owner,
         .minimum=minimum,.maximum=maximum,.step=step};
@@ -385,7 +394,7 @@ int main(void)
     assert(!set(&a,V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,0));
     assert(!set(&a,V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,51));
     assert(set(&a,V4L2_CID_MPEG_VIDEO_HEVC_MAX_NUM_MERGE_MV_MINUS1,2)==-ERANGE);
-    assert(set(&a,V4L2_CID_MPEG_VIDEO_B_FRAMES,2)==-ERANGE);
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_B_FRAMES,8)==-ERANGE);
     assert(set(&a,V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2)==-ERANGE);
     assert(set(&a,V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY,101)==-ERANGE);
     assert(set(&a,V4L2_CID_MPEG_VIDEO_HEADER_MODE,V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE)==-EINVAL);
@@ -487,6 +496,49 @@ int main(void)
     a.ltr_pending=0;
     assert(!set(&a,V4L2_CID_MPEG_VIDEO_FRAME_LTR_INDEX,0));
     assert(a.ltr_pending==1);
+    a.state=VPU_INST_STATE_NONE; a.std=W_HEVC_ENC;
+    for(unsigned codec=1;codec<=2;codec++) {
+        a.std=codec;
+        struct enc_wave_param *input=codec==W_HEVC_ENC?&a.hevc_param:&a.enc_param;
+        input->hier_enabled=false;
+        for(unsigned count=2;count<8;count++) {
+            a.b_frames=count;
+            open=(struct enc_open_param){.wave_param={.fixed_qp_p=26,.fixed_qp_b=28,
+                .max_qp_p=51,.max_qp_b=51}};
+            assert(!wave5_set_enc_gop(&open,&a) && open.custom_gop_size==count+1);
+            assert(open.custom_gop[0].poc_offset==count+1);
+            for(unsigned i=1;i<=count;i++) assert(open.custom_gop[i].poc_offset==i);
+        }
+        for(unsigned layers=1;layers<=4;layers++) {
+            input->hier_enabled=true; input->hier_qp_enable=true;
+            input->hier_layers=layers;
+            for(unsigned t=0;t<4;t++) input->hier_qp[t]=24+t;
+            a.b_frames=(1U<<(layers-1))-1;
+            open=(struct enc_open_param){.wave_param={.max_qp_p=51,.max_qp_b=51}};
+            assert(!wave5_set_enc_gop(&open,&a));
+            unsigned seen=1, size=a.b_frames+1;
+            int temporal[9]={0};
+            for(unsigned i=0;i<size;i++) {
+                struct custom_gop_pic_param *pic=&open.custom_gop[i];
+                unsigned poc=pic->poc_offset, left=pic->ref_poc_l0, right=pic->ref_poc_l1;
+                assert(poc>0 && poc<=size && !(seen&BIT(poc)));
+                assert(seen&BIT(left)); assert(temporal[left]<=pic->temporal_id);
+                if(pic->pic_type==PIC_TYPE_B) {
+                    assert(left<poc && right>poc && (seen&BIT(right)));
+                    assert(temporal[right]<=pic->temporal_id);
+                }
+                assert(pic->pic_qp==24+(unsigned)pic->temporal_id);
+                seen|=BIT(poc); temporal[poc]=pic->temporal_id;
+            }
+            assert(seen==BIT(size+1)-1);
+            open.wave_param.intra_period=size+1;
+            if(size>1) assert(wave5_set_enc_gop(&open,&a)==-EINVAL);
+            open.wave_param.intra_period=size*4;
+            assert(!wave5_set_enc_gop(&open,&a));
+        }
+        input->hier_layers=0;
+        assert(wave5_set_enc_gop(&open,&a)==-EINVAL);
+    }
     puts("Wave5 codec control isolation, busy setters, flip reversal and two instances passed");
 }
 '''
@@ -502,10 +554,84 @@ with tempfile.TemporaryDirectory(prefix='wave5-controls-') as directory:
     registration = controls[controls.index('\tv4l2_ctrl_handler_init('):
                             controls.index('\tif (v4l2_ctrl_hdl->error)')]
     create = ('static void create_controls(struct vpu_instance *inst) {\n'
+              'int ret;\n'
               'struct v4l2_ctrl_handler *v4l2_ctrl_hdl=&inst->v4l2_ctrl_hdl;\n'
               'struct vpu_device *dev=inst->dev;\n' + registration + '}\n')
     source.write_text(framework[:split] + protocol + '\n' + param +
                       framework[split:] + setter + vbv + cluster + create + behavior)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     str(source), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+# Exercise the real CUSTOM_GOP command, including both firmware ABIs and failure.
+custom = hardware[hardware.index('\t/* CUSTOM_GOP precedes COMMON,'):]
+custom = custom[:custom.index('\n\t/*\n\t * OPT_COMMON:')]
+gop_command = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <errno.h>
+#include "wave5-regdefine.h"
+typedef uint32_t u32;
+typedef int32_t s32;
+#define BIT(n) (1U<<(n))
+#define PRESET_IDX_CUSTOM_GOP 0
+#define OPT_CUSTOM_GOP 1
+#define MAX_GOP_NUM 8
+'''
+gop_mock = r'''
+struct enc_wave_param { unsigned gop_preset_idx; };
+struct enc_open_param { struct enc_wave_param wave_param; unsigned custom_gop_size;
+    struct custom_gop_pic_param custom_gop[8]; };
+struct vpu_device { bool legacy_firmware; };
+struct vpu_instance { struct vpu_device *dev; };
+static unsigned registers[0x1000/4], count, commands;
+static int fail;
+static void vpu_write_reg(struct vpu_device *dev,unsigned reg,unsigned value)
+{ (void)dev; assert(reg<sizeof(registers)); registers[reg/4]=value; count++; }
+static int send_firmware_command(struct vpu_instance *inst,int cmd,bool wait,void *a,void *b)
+{
+    (void)inst; (void)a; (void)b;
+    assert(wait && cmd==W5_ENC_SET_PARAM && count==10);
+    assert(registers[W5_CMD_ENC_SEQ_SET_PARAM_OPTION/4]==OPT_CUSTOM_GOP);
+    commands++; return fail;
+}
+static int program(struct vpu_instance *inst,struct enc_open_param *p_open_param)
+{
+    struct enc_wave_param *p_param=&p_open_param->wave_param;
+    u32 reg_val; unsigned i; int ret;
+'''
+gop_checks = r'''
+int main(void)
+{
+    struct vpu_device dev={0}; struct vpu_instance inst={.dev=&dev};
+    struct enc_open_param open={.custom_gop_size=4,.custom_gop={
+        {.pic_type=1,.poc_offset=4,.pic_qp=24},
+        {.pic_type=2,.poc_offset=2,.pic_qp=25,.ref_poc_l1=4,.temporal_id=1},
+        {.pic_type=2,.poc_offset=1,.pic_qp=26,.ref_poc_l1=2,.temporal_id=2},
+        {.pic_type=2,.poc_offset=3,.pic_qp=26,.ref_poc_l0=2,.ref_poc_l1=4,.temporal_id=2}}};
+    for(unsigned legacy=0;legacy<2;legacy++) {
+        dev.legacy_firmware=legacy; count=0;
+        assert(!program(&inst,&open) && count==10);
+        unsigned word=registers[(W5_CMD_ENC_CUSTOM_GOP_PIC_PARAM_0+12)/4];
+        assert((word&3)==2 && (word>>2&15)==3 && (word>>6&63)==26);
+        assert((word>>12&3)==legacy && (word>>14&31)==2 && (word>>19&31)==4);
+        assert((word>>24&7)==2);
+        for(unsigned i=4;i<8;i++) assert(!registers[(W5_CMD_ENC_CUSTOM_GOP_PIC_PARAM_0+i*4)/4]);
+    }
+    count=0; fail=-ETIMEDOUT;
+    assert(program(&inst,&open)==-ETIMEDOUT && commands==3);
+    open.wave_param.gop_preset_idx=9; count=0;
+    assert(!program(&inst,&open) && !count && commands==3);
+    puts("Wave5 custom GOP firmware ABI, unused slots and timeout boundary passed");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='wave5-gop-') as directory:
+    code = Path(directory) / 'gop.c'
+    binary = Path(directory) / 'gop'
+    code.write_text(gop_command + gop_pic[:gop_pic.index('\n};') + 3] +
+                    gop_mock + custom + '\nreturn 0;\n}\n' + gop_checks)
+    subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I', str(root),
+                    str(code), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

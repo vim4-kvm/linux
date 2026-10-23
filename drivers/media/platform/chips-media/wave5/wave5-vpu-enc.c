@@ -258,7 +258,7 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 		const struct enc_wave_param *param =
 			&inst->codec_info->enc_info.open_param.wave_param;
 
-		pic_param.force_qp = true;
+		pic_param.force_qp = !(param->hier_enabled && param->hier_qp_enable);
 		pic_param.qp_i = param->intra_qp;
 		pic_param.qp_p = param->fixed_qp_p;
 		pic_param.qp_b = param->fixed_qp_b;
@@ -969,10 +969,44 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		if (duration < MIN_VBV_BUFFER_SIZE || duration > MAX_VBV_BUFFER_SIZE)
 			return -ERANGE;
 	}
+	if (inst->state == VPU_INST_STATE_PIC_RUN &&
+	    (ctrl->id == V4L2_CID_MPEG_VIDEO_GOP_SIZE ||
+	     ctrl->id == V4L2_CID_MPEG_VIDEO_H264_I_PERIOD ||
+	     ctrl->id == V4L2_CID_MPEG_VIDEO_HEVC_REFRESH_PERIOD) &&
+	    ctrl->val % (inst->b_frames + 1))
+		return -EINVAL;
 
 	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
 
 	switch (ctrl->id) {
+	case V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING:
+		param->hier_enabled = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_TYPE:
+	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_TYPE:
+		break;
+	case V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER:
+		param->hier_layers = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER_QP:
+		if ((ctrl->val & 0xffff) > 51 || (ctrl->val >> 16) > 3)
+			return -ERANGE;
+		param->hier_qp[ctrl->val >> 16] = ctrl->val & 0xffff;
+		param->hier_qp_enable = true;
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_QP:
+		param->hier_qp_enable = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER:
+		param->hier_enabled = ctrl->val != 0;
+		param->hier_layers = ctrl->val + 1;
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L0_QP:
+	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L1_QP:
+	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L2_QP:
+	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L3_QP:
+		param->hier_qp[ctrl->id - V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L0_QP] = ctrl->val;
+		break;
 	case V4L2_CID_MPEG_VIDEO_LTR_COUNT:
 		inst->ltr_count = ctrl->val;
 		break;
@@ -1501,6 +1535,63 @@ static void wave5_set_constant_quality(struct enc_wave_param *param,
 	param->fixed_qp_b = qp;
 }
 
+static int wave5_set_enc_gop(struct enc_open_param *open, struct vpu_instance *inst)
+{
+	const struct enc_wave_param *input = inst->std == W_HEVC_ENC ?
+		&inst->hevc_param : &inst->enc_param;
+	struct enc_wave_param *param = &open->wave_param;
+	u32 size = inst->b_frames + 1;
+	unsigned int index = 0, layer, step, poc;
+
+	if (size > MAX_GOP_NUM)
+		return -EINVAL;
+	if (input->hier_enabled &&
+	    (!input->hier_layers || input->hier_layers > 4 ||
+	     size != BIT(input->hier_layers - 1)))
+		return -EINVAL;
+	if ((param->intra_period && param->intra_period % size) ||
+	    (param->avc_idr_period && param->avc_idr_period % size))
+		return -EINVAL;
+	param->hier_enabled = input->hier_enabled;
+	param->hier_qp_enable = input->hier_qp_enable;
+	if (!input->hier_enabled && inst->b_frames < 2) {
+		param->gop_preset_idx = inst->b_frames ? PRESET_IDX_IBPBP : PRESET_IDX_IPP_SINGLE;
+		return 0;
+	}
+	param->gop_preset_idx = PRESET_IDX_CUSTOM_GOP;
+	open->custom_gop_size = size;
+	open->custom_gop[index++] = (struct custom_gop_pic_param) {
+		.pic_type = PIC_TYPE_P, .poc_offset = size,
+		.pic_qp = input->hier_enabled && input->hier_qp_enable ?
+			input->hier_qp[0] : param->fixed_qp_p,
+	};
+	/* Breadth-first subdivision emits references before their dependent B pictures. */
+	for (layer = 1, step = size / 2; index < size; layer++, step /= 2) {
+		for (poc = input->hier_enabled ? step : 1; poc < size;
+		     poc += input->hier_enabled ? step * 2 : 1) {
+			struct custom_gop_pic_param *pic = &open->custom_gop[index++];
+
+			*pic = (struct custom_gop_pic_param) {
+				.pic_type = PIC_TYPE_B, .poc_offset = poc,
+				.pic_qp = input->hier_enabled && input->hier_qp_enable ?
+					input->hier_qp[layer] : param->fixed_qp_b,
+				.temporal_id = input->hier_enabled ? layer : 0,
+				.ref_poc_l0 = input->hier_enabled ? poc - step : 0,
+				.ref_poc_l1 = input->hier_enabled ? poc + step : size,
+			};
+		}
+	}
+	for (index = 0; index < size; index++) {
+		const struct custom_gop_pic_param *pic = &open->custom_gop[index];
+		u32 min_qp = pic->pic_type == PIC_TYPE_P ? param->min_qp_p : param->min_qp_b;
+		u32 max_qp = pic->pic_type == PIC_TYPE_P ? param->max_qp_p : param->max_qp_b;
+
+		if (pic->pic_qp < min_qp || pic->pic_qp > max_qp)
+			return -ERANGE;
+	}
+	return 0;
+}
+
 static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 				   struct vpu_instance *inst)
 {
@@ -1535,9 +1626,6 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	default:
 		break;
 	}
-	/* The fixed IBPBP preset has one reordered B picture between P pictures. */
-	open_param->wave_param.gop_preset_idx = inst->b_frames ?
-		PRESET_IDX_IBPBP : PRESET_IDX_IPP_SINGLE;
 	/* The Wave521 protocol exposes one LTR slot and no reordered-LTR contract. */
 	if (inst->ltr_count && inst->b_frames)
 		return -EINVAL;
@@ -1631,7 +1719,7 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 			       inst->intra_refresh_period, inst->std == W_HEVC_ENC);
 	open_param->wave_param.forced_idr_header_enable = common->forced_idr_header_enable;
 
-	return 0;
+	return wave5_set_enc_gop(open_param, inst);
 }
 
 static int wave5_apply_enc_changes(struct vpu_instance *inst)
@@ -2112,7 +2200,7 @@ static int wave5_vpu_open_enc(struct file *filp)
 	}
 	v4l2_m2m_set_src_buffered(inst->v4l2_fh.m2m_ctx, true);
 
-	v4l2_ctrl_handler_init(v4l2_ctrl_hdl, 80);
+	v4l2_ctrl_handler_init(v4l2_ctrl_hdl, 104);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
 			       V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10, 0,
@@ -2270,7 +2358,32 @@ static int wave5_vpu_open_enc(struct file *filp)
 			  V4L2_CID_MPEG_VIDEO_GOP_SIZE,
 			  0, 2047, 1, 0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
-			  V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, 1, 1, 0);
+			  V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, MAX_GOP_NUM - 1, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 0, 1, 1, 0);
+	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			       V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_TYPE,
+			       V4L2_MPEG_VIDEO_H264_HIERARCHICAL_CODING_B, 0,
+			       V4L2_MPEG_VIDEO_H264_HIERARCHICAL_CODING_B);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER, 1, 4, 1, 1);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER_QP,
+			  0, (3 << 16) | 51, 1, 30);
+	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			       V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_TYPE,
+			       V4L2_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_B, 0,
+			       V4L2_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_B);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER, 0, 3, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_HEVC_HIER_QP, 0, 1, 1, 0);
+	for (ret = 0; ret < 4; ret++) {
+		inst->enc_param.hier_qp[ret] = 30;
+		v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+				  V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L0_QP + ret,
+				  0, 51, 1, 30);
+	}
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_LTR_COUNT, 0, 1, 1, 0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,

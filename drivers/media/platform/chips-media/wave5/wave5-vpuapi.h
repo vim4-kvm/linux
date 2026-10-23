@@ -486,6 +486,10 @@ struct custom_gop_pic_param {
 
 struct enc_wave_param {
 	bool use_long_term;
+	bool hier_enabled;
+	bool hier_qp_enable;
+	u32 hier_layers;
+	u32 hier_qp[4];
 	/*
 	 * profile indicator (HEVC only)
 	 *
@@ -600,6 +604,8 @@ struct enc_open_param {
 	u32 vbv_buffer_size;
 	u32 bit_rate; /* target bitrate in bps */
 	struct enc_wave_param wave_param;
+	u32 custom_gop_size;
+	struct custom_gop_pic_param custom_gop[MAX_GOP_NUM];
 	enum packed_format_num packed_format; /* <<vpuapi_h_packed_format_num>> */
 	enum frame_buffer_format src_format;
 	bool line_buf_int_en;
