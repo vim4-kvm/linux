@@ -47,3 +47,4 @@ obj-$(CONFIG_SND_MESON_G12A_TOACODEC) += snd-soc-meson-g12a-toacodec.o
 obj-$(CONFIG_SND_MESON_G12A_TOHDMITX) += snd-soc-meson-g12a-tohdmitx.o
 obj-$(CONFIG_SND_SOC_MESON_T9015) += snd-soc-meson-t9015.o
 obj-$(CONFIG_SND_MESON_T7_ASRC) += t7-asrc.o
+obj-$(CONFIG_SND_MESON_T7_LOOPBACK) += t7-loopback.o

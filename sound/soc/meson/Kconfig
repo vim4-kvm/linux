@@ -144,4 +144,13 @@ config SND_MESON_T7_ASRC
 	  ASRC A feeds capture DMA and ASRC B supplies the reference input
 	  of the microphone loopback combiner at a fixed 16 kHz output rate.
 
+config SND_MESON_T7_LOOPBACK
+	tristate "Amlogic T7 hardware loopback combiner"
+	select REGMAP_MMIO
+	help
+	  Enable the T7 microphone and playback reference channel combiners.
+	  Each combiner merges microphone data with an independently selected
+	  playback reference. Both input synchronizers are configured by DAPM.
+	  Reference sample rate conversion is provided by the separate ASRC B.
+
 endmenu
