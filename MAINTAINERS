@@ -1434,10 +1434,10 @@ F:	drivers/spi/spi-amlogic-spisg.c
 AMLOGIC T7 AUDIO PROCESSING COMPONENTS
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Maintained
+F:	Documentation/devicetree/bindings/sound/amlogic,t7-aed.yaml
 F:	Documentation/devicetree/bindings/sound/amlogic,t7-asrc.yaml
 F:	Documentation/devicetree/bindings/sound/amlogic,t7-loopback.yaml
 F:	sound/soc/meson/t7-asrc*
-
 F:	sound/soc/meson/t7-loopback*
 
 AMLOGIC T7 AUDIO OFFLINE TESTS
