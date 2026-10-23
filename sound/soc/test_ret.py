@@ -23,22 +23,26 @@ static void dev_dbg(const struct device *dev, const char *fmt, ...)
 int main(void)
 {
     struct device dev = { 0 };
-    int faults[] = { -EIO, -EINVAL, -ENODEV, -ERANGE, -EAGAIN };
+    int faults[] = { -EIO, -EINVAL, -ENODEV, -ERANGE };
     unsigned int i;
 
     /* Repeated unplug/retry preserves errno without flooding error logs. */
     for (i = 0; i < 100; i++)
         assert(snd_soc_ret(&dev, -ENOLINK, "hw_params %d", i) == -ENOLINK);
     assert(errors == 0 && debug == 100);
+    /* Qualification can race a changing ACR/AIF snapshot even with TMDS up. */
+    for (i = 0; i < 100; i++)
+        assert(snd_soc_ret(&dev, -EAGAIN, "hw_params %d", i) == -EAGAIN);
+    assert(errors == 0 && debug == 200);
     for (i = 0; i < sizeof(faults) / sizeof(faults[0]); i++)
         assert(snd_soc_ret(&dev, faults[i], "device fault") == faults[i]);
-    assert(errors == 5 && debug == 100);
+    assert(errors == 4 && debug == 200);
     assert(snd_soc_ret(&dev, 0, "success") == 0);
     assert(snd_soc_ret(&dev, 7, "positive result") == 7);
     assert(snd_soc_ret(&dev, -EPROBE_DEFER, "probe") == -EPROBE_DEFER);
     assert(snd_soc_ret(&dev, -ENOTSUPP, "optional") == -ENOTSUPP);
     assert(snd_soc_ret(&dev, -EOPNOTSUPP, "optional") == -EOPNOTSUPP);
-    assert(errors == 5 && debug == 100);
+    assert(errors == 4 && debug == 200);
     return 0;
 }
 '''
@@ -48,4 +52,4 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', str(root / 'test.c'),
                     '-o', str(root / 'test')], check=True)
     subprocess.run([str(root / 'test')], check=True)
-print('ASOC_ENOLINK_RETURN_AND_DIAGNOSTICS_PASS')
+print('ASOC_RETRY_RETURN_AND_DIAGNOSTICS_PASS')
