@@ -49,3 +49,4 @@ obj-$(CONFIG_SND_SOC_MESON_T9015) += snd-soc-meson-t9015.o
 obj-$(CONFIG_SND_MESON_T7_ASRC) += t7-asrc.o
 obj-$(CONFIG_SND_MESON_T7_LOOPBACK) += t7-loopback.o
 obj-$(CONFIG_SND_MESON_T7_AED) += t7-aed.o
+obj-$(CONFIG_SND_MESON_T7_VAD) += t7-vad.o

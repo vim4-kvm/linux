@@ -1441,6 +1441,7 @@ F:	Documentation/devicetree/bindings/sound/amlogic,t7-vad.yaml
 F:	sound/soc/meson/t7-aed*
 F:	sound/soc/meson/t7-asrc*
 F:	sound/soc/meson/t7-loopback*
+F:	sound/soc/meson/t7-vad*
 
 AMLOGIC T7 AUDIO OFFLINE TESTS
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
@@ -1456,6 +1457,7 @@ F:	sound/soc/meson/test_t7_spdifout.py
 F:	sound/soc/meson/test_t7_tdmin.py
 F:	sound/soc/meson/test_t7_tdmout.py
 F:	sound/soc/meson/test_t7_toddr.py
+F:	sound/soc/meson/test_t7_vad.py
 
 AMLOGIC T7 BOOT DISPLAY HANDOFF EXPERIMENT
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>

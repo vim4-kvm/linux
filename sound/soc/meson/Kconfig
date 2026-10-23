@@ -162,4 +162,13 @@ config SND_MESON_T7_AED
 	  stereo lane to TDMOUT B. Equalizer coefficients are validated before
 	  loading both coefficient RAM banks while the engine is stopped.
 
+config SND_MESON_T7_VAD
+	tristate "Amlogic T7 voice activity detector"
+	select REGMAP
+	help
+	  Enable hardware speech activity detection on an existing 16 kHz PDM
+	  stream. Keyword recognition and suspend clock policy are separate.
+	  The component reports hardware activity interrupts using a standard
+	  read-only ALSA control without depending on a speech recognition SDK.
+
 endmenu
