@@ -1038,7 +1038,13 @@ meson_hdmitx21_boot_mode_valid(struct drm_bridge *bridge,
 			       const struct drm_display_info *info,
 			       const struct drm_display_mode *mode)
 {
-	return drm_mode_equal(mode, &meson_t7_handoff_mode) ? MODE_OK : MODE_BAD;
+	enum drm_mode_status status = meson_t7_handoff_mode_valid(mode);
+
+	if (status != MODE_OK)
+		drm_dbg_kms(bridge->dev, "Reject " DRM_MODE_FMT
+			    ": firmware ENC2/VPP/PLL timing is fixed (status=%d)\n",
+			    DRM_MODE_ARG(mode), status);
+	return status;
 }
 
 static enum drm_connector_status

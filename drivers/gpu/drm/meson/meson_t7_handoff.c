@@ -285,7 +285,7 @@ static int meson_t7_handoff_crtc_check(struct drm_crtc *crtc,
 {
 	struct drm_crtc_state *new = drm_atomic_get_new_crtc_state(state, crtc);
 
-	if (new->enable && !drm_mode_equal(&new->mode, &meson_t7_handoff_mode))
+	if (new->enable && meson_t7_handoff_mode_valid(&new->mode) != MODE_OK)
 		return -EINVAL;
 	return drm_atomic_add_affected_planes(state, crtc);
 }

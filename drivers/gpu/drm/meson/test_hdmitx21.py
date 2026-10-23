@@ -384,6 +384,58 @@ int main(void) {
 '''
 run_test('audio_hw', audio_hw)
 
+mode_test = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+#define DRM_MODE_TYPE_DRIVER 0
+#define DRM_MODE_TYPE_PREFERRED 0
+#define DRM_MODE_FLAG_PHSYNC 1
+#define DRM_MODE_FLAG_PVSYNC 2
+#define DRM_MODE_FLAG_INTERLACE 4
+#define DRM_MODE_FLAG_DBLSCAN 8
+enum drm_mode_status {
+    MODE_OK, MODE_NO_INTERLACE, MODE_NO_DBLESCAN, MODE_ONE_WIDTH,
+    MODE_ONE_HEIGHT, MODE_NOCLOCK, MODE_BAD
+};
+struct drm_display_mode {
+    int clock, hdisplay, hsync_start, hsync_end, htotal;
+    int vdisplay, vsync_start, vsync_end, vtotal, flags;
+};
+#define DRM_MODE(nm,t,c,hd,hss,hse,ht,hsk,vd,vss,vse,vt,vs,f) \
+    .clock=c, .hdisplay=hd, .hsync_start=hss, .hsync_end=hse, .htotal=ht, \
+    .vdisplay=vd, .vsync_start=vss, .vsync_end=vse, .vtotal=vt, .flags=f
+static bool drm_mode_equal(const struct drm_display_mode *a, const struct drm_display_mode *b)
+{ return !memcmp(a, b, sizeof(*a)); }
+'''
+header = Path(__file__).with_name('meson_t7_handoff.h').read_text()
+mode_test += header[header.index('/* Firmware contract'):header.index('\n#endif')]
+mode_test += r'''
+int main(void) {
+    struct drm_display_mode mode=meson_t7_handoff_mode;
+    assert(meson_t7_handoff_mode_valid(&mode) == MODE_OK);
+    mode.hdisplay=3840; mode.vdisplay=2160;
+    mode.clock=297000; assert(meson_t7_handoff_mode_valid(&mode) == MODE_ONE_WIDTH);
+    mode.clock=594000; assert(meson_t7_handoff_mode_valid(&mode) == MODE_ONE_WIDTH);
+    mode.hdisplay=1280; mode.vdisplay=720;
+    mode.clock=74250; assert(meson_t7_handoff_mode_valid(&mode) == MODE_ONE_WIDTH);
+    mode=meson_t7_handoff_mode; mode.clock=148352;
+    assert(meson_t7_handoff_mode_valid(&mode) == MODE_NOCLOCK);
+    mode.clock=74250; assert(meson_t7_handoff_mode_valid(&mode) == MODE_NOCLOCK);
+    mode=meson_t7_handoff_mode; mode.htotal=2640;
+    assert(meson_t7_handoff_mode_valid(&mode) == MODE_BAD);
+    mode=meson_t7_handoff_mode; mode.vdisplay=720;
+    assert(meson_t7_handoff_mode_valid(&mode) == MODE_ONE_HEIGHT);
+    mode=meson_t7_handoff_mode; mode.flags |= DRM_MODE_FLAG_INTERLACE;
+    assert(meson_t7_handoff_mode_valid(&mode) == MODE_NO_INTERLACE);
+    mode=meson_t7_handoff_mode; mode.flags |= DRM_MODE_FLAG_DBLSCAN;
+    assert(meson_t7_handoff_mode_valid(&mode) == MODE_NO_DBLESCAN);
+    puts("Firmware mode gate: 4K/720p, alternate clock/porches, interlace and doublescan rejected");
+}
+'''
+run_test('mode_valid', mode_test)
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--dtb', type=Path, help='M2 compiled DTB with TX audio')
 parser.add_argument('--baseline-dtb', type=Path, help='M1 compiled DTB for RX comparison')
