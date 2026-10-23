@@ -10,6 +10,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
+#include <dt-bindings/power/amlogic,t7-pwrc.h>
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
@@ -55,6 +56,7 @@ struct meson_t7_handoff {
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
 	void __iomem *osd;
+	void __iomem *extra_osd[2];
 	void __iomem *venc;
 	void __iomem *rdma;
 	u32 *rdma_table;
@@ -71,6 +73,7 @@ struct meson_t7_handoff {
 	bool linear_formats;
 	struct meson_t7_modeset *modeset;
 	bool native_modeset;
+	bool managed_sram;
 	u32 requested, written, applied;
 	u32 vsync_count;
 	bool faulted;
@@ -576,6 +579,51 @@ static void meson_t7_handoff_domain_put(void *data)
 	dev_pm_domain_detach(domain, true);
 }
 
+static int meson_t7_handoff_domains_get(struct device *dev, unsigned int first,
+					unsigned int end)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = first; i < end; i++) {
+		struct device *domain = dev_pm_domain_attach_by_id(dev, i);
+
+		if (IS_ERR_OR_NULL(domain))
+			return domain ? PTR_ERR(domain) : -ENODEV;
+		ret = pm_runtime_resume_and_get(domain);
+		if (ret < 0) {
+			dev_pm_domain_detach(domain, true);
+			return ret;
+		}
+		ret = devm_add_action_or_reset(dev, meson_t7_handoff_domain_put, domain);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static int meson_t7_handoff_sram_get(struct meson_t7_handoff *display)
+{
+	u32 start;
+	unsigned int i;
+
+	/*
+	 * Only the M3 profile owns these domains. Stop boot fetches and drain them
+	 * while IRQs and the boot SRAM are still alive. A later probe failure can
+	 * then unwind domains without removing memory from under an active fetch.
+	 */
+	writel(readl(display->osd) & ~BIT(0), display->osd);
+	for (i = 0; i < ARRAY_SIZE(display->extra_osd); i++)
+		writel(readl(display->extra_osd[i]) & ~BIT(0), display->extra_osd[i]);
+	readl(display->osd);
+	start = READ_ONCE(display->vsync_count);
+	if (!wait_event_timeout(display->wait,
+				(u32)(READ_ONCE(display->vsync_count) - start) >= 2,
+				msecs_to_jiffies(100)))
+		return -ETIMEDOUT;
+	return meson_t7_handoff_domains_get(display->drm.dev, 3, 10);
+}
+
 static void __iomem *meson_t7_handoff_map(struct platform_device *pdev,
 					  const char *name, resource_size_t start,
 					  resource_size_t size)
@@ -594,6 +642,31 @@ static int meson_t7_handoff_check_dt(struct device *dev)
 	struct reserved_mem *memory;
 	int ret;
 
+	if (of_property_read_bool(dev->of_node, "amlogic,managed-osd-sram")) {
+		static const u32 ids[] = {
+			PWRC_T7_VPU_HDMI_ID, PWRC_T7_VI_CLK1_ID, PWRC_T7_VI_CLK2_ID,
+			PWRC_T7_OSD1_MEM_ID, PWRC_T7_OSD2_MEM_ID, PWRC_T7_OSD3_MEM_ID,
+			PWRC_T7_OSD_SCALE_MEM_ID, PWRC_T7_OSD2_SCALE_MEM_ID,
+			PWRC_T7_OSD_BLD34_MEM_ID, PWRC_T7_RDMA_MEM_ID,
+		};
+		unsigned int i;
+
+		if (!of_device_is_compatible(dev->of_node, "amlogic,t7-display") ||
+		    of_count_phandle_with_args(dev->of_node, "power-domains",
+					       "#power-domain-cells") != ARRAY_SIZE(ids))
+			return -EINVAL;
+		for (i = 0; i < ARRAY_SIZE(ids); i++) {
+			ret = of_parse_phandle_with_args(dev->of_node, "power-domains",
+							 "#power-domain-cells", i, &pll);
+			if (ret)
+				return ret;
+			ret = pll.args_count == 1 && pll.args[0] == ids[i] &&
+				of_device_is_compatible(pll.np, "amlogic,t7-pwrc") ? 0 : -EINVAL;
+			of_node_put(pll.np);
+			if (ret)
+				return ret;
+		}
+	}
 	if (!of_device_is_compatible(dev->of_node, "amlogic,t7-display")) {
 		ret = of_parse_phandle_with_args(dev->of_node, "clocks", "#clock-cells", 4, &pll);
 		if (ret)
@@ -657,6 +730,7 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		return PTR_ERR(display);
 	drm = &display->drm;
 	display->native_modeset = of_device_is_compatible(dev->of_node, "amlogic,t7-display");
+	display->managed_sram = of_property_read_bool(dev->of_node, "amlogic,managed-osd-sram");
 	display->linear_formats = display->native_modeset || of_device_is_compatible(dev->of_node,
 							"amlogic,t7-display-linear");
 	platform_set_drvdata(pdev, display);
@@ -670,23 +744,23 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		return ret;
 	if (display->native_modeset && (ret != 5 || clk_get_rate(clocks[4].clk) != 24000000))
 		return dev_err_probe(dev, -EINVAL, "Native PLL requires a 24MHz reference\n");
-	for (i = 0; i < 3; i++) {
-		struct device *domain = dev_pm_domain_attach_by_id(dev, i);
-
-		if (IS_ERR_OR_NULL(domain))
-			return domain ? PTR_ERR(domain) : -ENODEV;
-		ret = pm_runtime_resume_and_get(domain);
-		if (ret < 0) {
-			dev_pm_domain_detach(domain, true);
-			return ret;
-		}
-		ret = devm_add_action_or_reset(dev, meson_t7_handoff_domain_put, domain);
-		if (ret)
-			return ret;
-	}
+	ret = meson_t7_handoff_domains_get(dev, 0, 3);
+	if (ret)
+		return ret;
 	display->osd = meson_t7_handoff_map(pdev, "osd1", 0xff006840, 0x80);
 	if (IS_ERR(display->osd))
 		return PTR_ERR(display->osd);
+	if (display->managed_sram) {
+		display->extra_osd[0] = meson_t7_handoff_map(pdev, "osd2", 0xff0068c0, 0x80);
+		display->extra_osd[1] = meson_t7_handoff_map(pdev, "osd3", 0xff00f600, 0x80);
+		for (i = 0; i < ARRAY_SIZE(display->extra_osd); i++)
+			if (IS_ERR(display->extra_osd[i]))
+				return PTR_ERR(display->extra_osd[i]);
+		/* No ownership or decoder-idle contract exists for other boot layers. */
+		for (i = 0; i < ARRAY_SIZE(display->extra_osd); i++)
+			if (readl(display->extra_osd[i]) & BIT(0))
+				return dev_err_probe(dev, -EBUSY, "Firmware extra OSD active\n");
+	}
 	/* The matching firmware selects ENC2: vendor VENC words have +0x800. */
 	display->venc = meson_t7_handoff_map(pdev, "venc", 0xff008db8,
 					   display->native_modeset ? 0x608 : 0x108);
@@ -818,6 +892,11 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	if (!wait_event_timeout(display->wait, READ_ONCE(display->vsync_count) >= 2,
 				msecs_to_jiffies(100)))
 		return dev_err_probe(dev, -ETIMEDOUT, "No firmware VIU1 vsync IRQ\n");
+	if (display->managed_sram) {
+		ret = meson_t7_handoff_sram_get(display);
+		if (ret)
+			return dev_err_probe(dev, ret, "Cannot safely acquire OSD SRAM\n");
+	}
 	return drm_dev_register(drm, 0);
 }
 
