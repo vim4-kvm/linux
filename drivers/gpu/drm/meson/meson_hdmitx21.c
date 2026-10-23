@@ -178,6 +178,7 @@ struct meson_hdmitx21 {
 
 	/* Audio: kept to set up again after a mode change */
 	struct mutex audio_lock;	/* audio state */
+	struct mutex packet_lock; /* Shared TPI InfoFrame selector and payload window. */
 	bool audio_enabled;
 	bool audio_muted;
 	bool sink_hdmi;
@@ -548,10 +549,12 @@ static void meson_hdmitx21_write_infoframe(struct meson_hdmitx21 *tx, u8 sel,
 {
 	int i;
 
+	mutex_lock(&tx->packet_lock);
 	cor_write(tx, TPI_INFO_FSEL, sel);
 	for (i = 0; i < 31; i++)
 		cor_write(tx, TPI_INFO_B0 + i, i < len ? buf[i] : 0);
 	cor_write(tx, TPI_INFO_EN, 0xe0);
+	mutex_unlock(&tx->packet_lock);
 }
 
 static void meson_hdmitx21_write_avi(struct meson_hdmitx21 *tx,
@@ -708,8 +711,36 @@ static void meson_hdmitx21_audio_off(struct meson_hdmitx21 *tx)
 {
 	meson_hdmitx21_audio_mute(tx, true);
 	cor_update(tx, ACR_CTRL, ACR_CTRL_EN, 0);
+	mutex_lock(&tx->packet_lock);
 	cor_write(tx, TPI_INFO_FSEL, TPI_INFO_FSEL_AUDIO);
 	cor_write(tx, TPI_INFO_EN, 0);
+	mutex_unlock(&tx->packet_lock);
+}
+
+static void meson_hdmitx21_audio_disconnect(struct meson_hdmitx21 *tx)
+{
+	if (!(tx->bridge.ops & DRM_BRIDGE_OP_HDMI_AUDIO))
+		return;
+	mutex_lock(&tx->audio_lock);
+	tx->pixel_khz = 0;
+	tx->sink_hdmi = false;
+	meson_hdmitx21_audio_off(tx);
+	mutex_unlock(&tx->audio_lock);
+}
+
+static void meson_hdmitx21_audio_mode(struct meson_hdmitx21 *tx, int pixel_khz,
+				    bool hdmi)
+{
+	if (!(tx->bridge.ops & DRM_BRIDGE_OP_HDMI_AUDIO))
+		return;
+	mutex_lock(&tx->audio_lock);
+	tx->pixel_khz = pixel_khz;
+	tx->sink_hdmi = hdmi;
+	if (tx->audio_enabled && hdmi)
+		meson_hdmitx21_audio_config(tx);
+	else
+		meson_hdmitx21_audio_off(tx);
+	mutex_unlock(&tx->audio_lock);
 }
 
 static int meson_hdmitx21_audio_prepare(struct drm_bridge *bridge,
@@ -902,12 +933,8 @@ static void meson_hdmitx21_bridge_atomic_enable(struct drm_bridge *bridge,
 	cor_update(tx, TMDS_CTRL, BIT(3), BIT(3));
 	meson_hdmitx21_set_avmute(tx, false);
 
-	mutex_lock(&tx->audio_lock);
-	tx->pixel_khz = mode->clock;
-	tx->sink_hdmi = hdmi_mode;
-	if (tx->audio_enabled && hdmi_mode)
-		meson_hdmitx21_audio_config(tx);
-	mutex_unlock(&tx->audio_lock);
+	meson_hdmitx21_audio_mode(tx, mode->clock,
+				 hdmi_mode && connector->display_info.has_audio);
 
 	dev_dbg(tx->dev, "enabled %dx%d@%d %s\n", mode->hdisplay,
 		mode->vdisplay, drm_mode_vrefresh(mode), hdmi_mode ? "HDMI" : "DVI");
@@ -918,15 +945,13 @@ static void meson_hdmitx21_bridge_atomic_disable(struct drm_bridge *bridge,
 {
 	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
 
-	mutex_lock(&tx->audio_lock);
-	meson_hdmitx21_audio_off(tx);
-	tx->pixel_khz = 0;
-	tx->sink_hdmi = false;
-	mutex_unlock(&tx->audio_lock);
+	meson_hdmitx21_audio_disconnect(tx);
 	meson_hdmitx21_set_avmute(tx, true);
 	meson_hdmitx21_phy_off(tx);
+	mutex_lock(&tx->packet_lock);
 	cor_write(tx, TPI_INFO_FSEL, 0);
 	cor_write(tx, TPI_INFO_EN, 0);
+	mutex_unlock(&tx->packet_lock);
 }
 
 /* GPIOW15 is the T7 HPD level. TOP_STAT0 bit 0 is not a cable indication.
@@ -942,6 +967,8 @@ static void meson_hdmitx21_hpd_work(struct work_struct *work)
 	if (status != connector_status_unknown && status == tx->hpd_sample &&
 	    status != tx->hpd_reported) {
 		tx->hpd_reported = status;
+		if (status == connector_status_disconnected)
+			meson_hdmitx21_audio_disconnect(tx);
 		drm_bridge_hpd_notify(&tx->bridge, status);
 	}
 	tx->hpd_sample = status;
@@ -1043,6 +1070,37 @@ static const struct drm_bridge_funcs meson_hdmitx21_boot_funcs = {
 	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 };
 
+static void meson_hdmitx21_monitor_atomic_enable(struct drm_bridge *bridge,
+						struct drm_atomic_commit *state)
+{
+	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
+	struct drm_connector *connector;
+	struct drm_connector_state *conn_state;
+	struct drm_crtc_state *crtc_state;
+
+	if (!(bridge->ops & DRM_BRIDGE_OP_HDMI_AUDIO))
+		return;
+	connector = drm_atomic_get_new_connector_for_encoder(state, bridge->encoder);
+	if (WARN_ON(!connector))
+		return;
+	conn_state = drm_atomic_get_new_connector_state(state, connector);
+	crtc_state = drm_atomic_get_new_crtc_state(state, conn_state->crtc);
+	if (WARN_ON(!crtc_state))
+		return;
+	/* CRTC validated the firmware timing. Never reconfigure video in this path. */
+	meson_hdmitx21_audio_mode(tx, crtc_state->adjusted_mode.clock,
+				 connector->display_info.is_hdmi &&
+				 connector->display_info.has_audio &&
+				 meson_hdmitx21_bridge_detect(bridge, connector) ==
+				 connector_status_connected);
+}
+
+static void meson_hdmitx21_monitor_atomic_disable(struct drm_bridge *bridge,
+						 struct drm_atomic_commit *state)
+{
+	meson_hdmitx21_audio_disconnect(bridge_to_hdmitx(bridge));
+}
+
 /* Observe DDC/HPD without changing the firmware's video, PHY or PLL.
  * EDID can enumerate 4K, but mode_valid accepts only the boot timing.
  */
@@ -1053,6 +1111,11 @@ static const struct drm_bridge_funcs meson_hdmitx21_monitor_funcs = {
 	.mode_valid = meson_hdmitx21_boot_mode_valid,
 	.hpd_enable = meson_hdmitx21_monitor_hpd_enable,
 	.hpd_disable = meson_hdmitx21_monitor_hpd_disable,
+	.atomic_enable = meson_hdmitx21_monitor_atomic_enable,
+	.atomic_disable = meson_hdmitx21_monitor_atomic_disable,
+	.hdmi_audio_prepare = meson_hdmitx21_audio_prepare,
+	.hdmi_audio_shutdown = meson_hdmitx21_audio_shutdown,
+	.hdmi_audio_mute_stream = meson_hdmitx21_audio_mute_stream,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
 	.atomic_create_state = drm_atomic_helper_bridge_create_state,
@@ -1081,6 +1144,9 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	if (IS_ERR(tx))
 		return PTR_ERR(tx);
 	tx->dev = dev;
+	mutex_init(&tx->audio_lock);
+	mutex_init(&tx->packet_lock);
+	tx->audio_muted = true;
 	tx->boot_top = top->start;
 	tx->boot_cor = cor->start;
 	tx->pclk = devm_clk_get_enabled(dev, "pclk");
@@ -1107,6 +1173,14 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 			return ret;
 		tx->bridge.ddc = &tx->ddc;
 		tx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID | DRM_BRIDGE_OP_HPD;
+		if (of_property_present(dev->of_node, "#sound-dai-cells")) {
+			tx->bridge.ops |= DRM_BRIDGE_OP_HDMI_AUDIO;
+			tx->bridge.hdmi_audio_dev = dev;
+			tx->bridge.hdmi_audio_max_i2s_playback_channels = 2;
+			tx->bridge.hdmi_audio_i2s_formats = SNDRV_PCM_FMTBIT_S16_LE |
+							 SNDRV_PCM_FMTBIT_S24_LE;
+			tx->bridge.hdmi_audio_dai_port = -1;
+		}
 	}
 	ret = devm_drm_bridge_add(dev, &tx->bridge);
 	if (ret || !monitor)
@@ -1133,6 +1207,7 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 	tx->dev = dev;
 	platform_set_drvdata(pdev, tx);
 	mutex_init(&tx->audio_lock);
+	mutex_init(&tx->packet_lock);
 	tx->audio_muted = true;
 	tx->hpd = devm_gpiod_get(dev, "hpd", GPIOD_IN);
 	if (IS_ERR(tx->hpd))

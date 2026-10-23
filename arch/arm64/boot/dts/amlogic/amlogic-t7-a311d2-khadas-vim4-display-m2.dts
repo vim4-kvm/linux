@@ -14,6 +14,43 @@
 
 &hdmi_tx {
 	amlogic,boot-monitor;
+	#sound-dai-cells = <0>;
 	pinctrl-0 = <&hdmitx_ddc_pins>;
 	pinctrl-names = "default";
+};
+
+/ {
+	sound-hdmi-tx {
+		compatible = "amlogic,axg-sound-card";
+		model = "VIM4HDMITX";
+		/* Vendor board's 48k/44.1k master families; RX uses its own ACR/PLL. */
+		clocks = <&hifi CLKID_HIFI_PLL>, <&mpll CLKID_MPLL1>;
+		assigned-clocks = <&hifi CLKID_HIFI_PLL>, <&mpll CLKID_MPLL1>;
+		assigned-clock-rates = <1179648000>, <338688000>;
+		audio-aux-devs = <&tdmout_a>;
+		audio-routing = "TDMOUT_A IN 0", "FRDDR_A OUT 0",
+				"TDM_A Playback", "TDMOUT_A OUT";
+
+		dai-link-0 {
+			sound-dai = <&frddr_a>;
+		};
+
+		dai-link-1 {
+			sound-dai = <&tdmif_a>;
+			dai-format = "i2s";
+			dai-tdm-slot-tx-mask-0 = <1 1>;
+			dai-tdm-slot-width = <32>;
+			mclk-fs = <256>;
+			codec {
+				sound-dai = <&tohdmitx TOHDMITX_I2S_IN_A>;
+			};
+		};
+
+		dai-link-2 {
+			sound-dai = <&tohdmitx TOHDMITX_I2S_OUT>;
+			codec {
+				sound-dai = <&hdmi_tx>;
+			};
+		};
+	};
 };
