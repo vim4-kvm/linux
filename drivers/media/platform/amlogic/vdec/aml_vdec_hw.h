@@ -121,13 +121,15 @@ struct pm_pd_s {
  * @secure_swap: Scratch G supplied by the secure microcode loader.
  * @nic3_dev: Parent domain held explicitly for DOS-top access before VDEC on.
  * @nic3_held: An explicit parent runtime PM reference is owned.
- * @clocks_held: Both DOS bus and VDEC functional clocks are owned.
+ * @clocks_held: DOS bus and VDEC functional clocks are owned.
  * @probe_step: Last completed single-register diagnostic step, zero if idle.
  * @probe_value: Cached value of the last diagnostic read.
  * @probe_en0: DOS-top gate sample, including the shared HCODEC bits.
  * @probe_failed: A failed diagnostic prohibits another attempt in this probe.
  * @probe_pinned: Module reference held across diagnostic sysfs writes.
  * @clkctrl: Clock provider's regmap, used only to verify physical gate state.
+ * @apb_gates: CPU APB bridge gates retained during experimental T7 power-on.
+ * @apb_held: APB references remain held until secure power-off completes.
  */
 struct aml_vdec_hw {
 	struct platform_device *pdev;
@@ -157,6 +159,8 @@ struct aml_vdec_hw {
 	bool probe_failed;
 	bool probe_pinned;
 	struct regmap *clkctrl;
+	struct clk_bulk_data apb_gates[2];
+	bool apb_held;
 };
 
 /**

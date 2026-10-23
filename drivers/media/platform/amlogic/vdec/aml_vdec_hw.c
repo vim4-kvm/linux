@@ -317,6 +317,11 @@ static int vdec_clock_gate_init(struct aml_vdec_hw *hw)
 	ret = devm_clk_bulk_get(hw->dev, hw->has_dbus_ctrl ? 2 : DOS_CLK_MAX, hw->gates);
 	if (ret || !hw->has_dbus_ctrl)
 		return ret;
+	hw->apb_gates[0].id = "sys-apb";
+	hw->apb_gates[1].id = "a73-apb";
+	ret = devm_clk_bulk_get(hw->dev, ARRAY_SIZE(hw->apb_gates), hw->apb_gates);
+	if (ret)
+		return ret;
 	return t7_clock_provider_init(hw);
 }
 
@@ -615,6 +620,37 @@ static void t7_power_fault(struct aml_vdec_hw *hw)
 	dev_crit(hw->dev, "VDEC power state uncertain; retain lease until system reset\n");
 }
 
+static int t7_clocks_on(struct aml_vdec_hw *hw)
+{
+	int ret;
+
+	/* Vendor keeps these CPU APB gates on via CLK_IGNORE_UNUSED. */
+	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hw->apb_gates), hw->apb_gates);
+	if (ret)
+		return ret;
+	hw->apb_held = true;
+	ret = clk_bulk_prepare_enable(2, hw->gates);
+	if (ret) {
+		clk_bulk_disable_unprepare(ARRAY_SIZE(hw->apb_gates), hw->apb_gates);
+		hw->apb_held = false;
+		return ret;
+	}
+	hw->clocks_held = true;
+	return 0;
+}
+
+static void t7_clocks_off(struct aml_vdec_hw *hw)
+{
+	if (hw->clocks_held) {
+		clk_bulk_disable_unprepare(2, hw->gates);
+		hw->clocks_held = false;
+	}
+	if (hw->apb_held) {
+		clk_bulk_disable_unprepare(ARRAY_SIZE(hw->apb_gates), hw->apb_gates);
+		hw->apb_held = false;
+	}
+}
+
 static int t7_power_off(struct aml_vdec_hw *hw)
 {
 	s32 state;
@@ -632,6 +668,8 @@ static int t7_power_off(struct aml_vdec_hw *hw)
 		parent_ret = pm_runtime_put_sync_suspend(hw->nic3_dev);
 		hw->nic3_held = false;
 	}
+	/* Vendor leaves the CPU bridges on even across secure power-off. */
+	t7_clocks_off(hw);
 	if (ret < 0 || parent_ret < 0 ||
 	    t7_domain_state(PWRC_T7_DOS_VDEC_ID, &state) || state != 1) {
 		t7_power_fault(hw);
@@ -642,7 +680,7 @@ static int t7_power_off(struct aml_vdec_hw *hw)
 
 static int t7_clock_preflight(struct aml_vdec_hw *hw)
 {
-	u32 sys, p0, p1, selected;
+	u32 sys, apb, p0, p1, selected;
 	int ret;
 
 	/*
@@ -654,6 +692,9 @@ static int t7_clock_preflight(struct aml_vdec_hw *hw)
 	ret = regmap_read(hw->clkctrl, 0x44, &sys);
 	if (ret)
 		return ret;
+	ret = regmap_read(hw->clkctrl, 0x4c, &apb);
+	if (ret)
+		return ret;
 	ret = regmap_read(hw->clkctrl, 0x140, &p0);
 	if (ret)
 		return ret;
@@ -661,10 +702,11 @@ static int t7_clock_preflight(struct aml_vdec_hw *hw)
 	if (ret)
 		return ret;
 	selected = p1 & BIT(15) ? p1 : p0;
-	dev_info(hw->dev, "CLKCTRL: SYS=%#x VDEC0=%#x VDEC1=%#x path=%u\n",
-		 sys, p0, p1, !!(p1 & BIT(15)));
+	dev_info(hw->dev, "CLKCTRL: SYS=%#x APB=%#x VDEC0=%#x VDEC1=%#x path=%u\n",
+		 sys, apb, p0, p1, !!(p1 & BIT(15)));
 	/* 800 MHz recipe: fclk_div2p5, divide by one, gate enabled. */
-	if (!(sys & BIT(1)) || (selected & 0xf7f) != BIT(8)) {
+	if (!(sys & BIT(1)) || (apb & (BIT(19) | BIT(20))) != (BIT(19) | BIT(20)) ||
+	    (selected & 0xf7f) != BIT(8)) {
 		dev_err(hw->dev, "refusing DOS MMIO: physical clock configuration mismatch\n");
 		return -EHOSTDOWN;
 	}
@@ -683,14 +725,12 @@ static int t7_power_on(struct aml_vdec_hw *hw)
 	ret = clk_set_rate(hw->gates[VDEC_MUX].clk, 800000000);
 	if (ret)
 		return ret;
-	ret = clk_bulk_prepare_enable(2, hw->gates);
+	ret = t7_clocks_on(hw);
 	if (ret)
 		return ret;
-	hw->clocks_held = true;
 	ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_1].dev);
 	if (ret < 0) {
-		clk_bulk_disable_unprepare(2, hw->gates);
-		hw->clocks_held = false;
+		t7_clocks_off(hw);
 		return ret;
 	}
 	hw->powered = true;
@@ -750,13 +790,12 @@ static int t7_probe_begin(struct aml_vdec_hw *hw)
 
 	/*
 	 * Vendor vdec_set_clk() programs DOS_GCLK_EN0 BEFORE secure VDEC on.
-	 * Hold NIC3 and both clocks for that DOS-top access. Its first read is
+	 * Hold NIC3, DOS clocks and CPU APB gates for that DOS-top access. Its first read is
 	 * an explicit probe; never access internal MDEC registers in this phase.
 	 */
-	ret = clk_bulk_prepare_enable(2, hw->gates);
+	ret = t7_clocks_on(hw);
 	if (ret)
 		return ret;
-	hw->clocks_held = true;
 	ret = pm_runtime_resume_and_get(hw->nic3_dev);
 	if (ret < 0)
 		return ret;
