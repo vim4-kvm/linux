@@ -13,6 +13,8 @@
 #include <linux/slab.h>
 #include <linux/firmware.h>
 #include <linux/iopoll.h>
+#include <media/meson-t7-dos.h>
+#include <dt-bindings/power/amlogic,t7-pwrc.h>
 
 #include "aml_vdec_drv.h"
 #include "aml_vdec_hw.h"
@@ -537,25 +539,126 @@ out:
 	return ret;
 }
 
+/* Vendor sec_pwr_ctrl.c: read-only status, 0 = on, 1 = off. */
+static int t7_domain_state(unsigned int domain, s32 *state)
+{
+	struct arm_smccc_res result;
+
+	arm_smccc_smc(0x82000095, domain, 0, 0, 0, 0, 0, 0, &result);
+	*state = (s32)result.a0;
+	return (*state == 0 || *state == 1) ? 0 : -EIO;
+}
+
+int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3)
+{
+	int ret;
+
+	if (!hw->has_dbus_ctrl)
+		return -EOPNOTSUPP;
+	ret = t7_domain_state(PWRC_T7_DOS_VDEC_ID, vdec);
+	if (ret)
+		return ret;
+	return t7_domain_state(PWRC_T7_NIC3_ID, nic3);
+}
+
+static void t7_power_fault(struct aml_vdec_hw *hw)
+{
+	/* No DOS access: domain or clock state is no longer trustworthy. */
+	if (xchg(&hw->faulted, true))
+		return;
+	__module_get(THIS_MODULE);
+	get_device(hw->dev);
+	meson_t7_dos_poison();
+	dev_crit(hw->dev, "VDEC power state uncertain; retain lease until system reset\n");
+}
+
+static int t7_power_off(struct aml_vdec_hw *hw)
+{
+	s32 state;
+	int ret;
+
+	/* Vendor order: clocks off, then secure domain off; no local PD reset. */
+	clk_bulk_disable_unprepare(2, hw->gates);
+	ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_1].dev);
+	hw->powered = false;
+	if (ret < 0 || t7_domain_state(PWRC_T7_DOS_VDEC_ID, &state) || state != 1) {
+		t7_power_fault(hw);
+		return -EIO;
+	}
+	return 0;
+}
+
+static int t7_power_on(struct aml_vdec_hw *hw)
+{
+	s32 vdec = -1, nic3 = -1;
+	int ret;
+
+	if (hw->faulted)
+		return -EIO;
+	/* vdec_power_ctrl.c enables the functional clock before secure PM. */
+	ret = clk_set_rate(hw->gates[VDEC_MUX].clk, 500000000);
+	if (ret)
+		return ret;
+	ret = clk_bulk_prepare_enable(2, hw->gates);
+	if (ret)
+		return ret;
+	ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_1].dev);
+	if (ret < 0) {
+		clk_bulk_disable_unprepare(2, hw->gates);
+		return ret;
+	}
+	/*
+	 * genpd's successful SET call does not verify firmware a0 or GET status.
+	 * Do not touch even DOS_GCLK_EN0 until both VDEC and its NIC3 parent
+	 * report on. This query itself uses SMC, never the gated DOS aperture.
+	 */
+	ret = aml_vdec_t7_power_state(hw, &vdec, &nic3);
+	dev_info(hw->dev, "pre-DOS power: VDEC[4]=%d NIC3[39]=%d rate=%lu\n",
+		 vdec, nic3, clk_get_rate(hw->gates[VDEC_MUX].clk));
+	if (ret || vdec || nic3) {
+		dev_err(hw->dev, "refusing DOS MMIO: secure power check failed\n");
+		t7_power_off(hw);
+		return ret ?: -EHOSTDOWN;
+	}
+	hw->powered = true;
+	return 0;
+}
+
+int aml_vdec_t7_power_test(struct aml_vdec_hw *hw)
+{
+	int ret, off_ret;
+
+	if (!hw->has_dbus_ctrl)
+		return -EOPNOTSUPP;
+	hw->power_test_passed = false;
+	ret = t7_power_on(hw);
+	if (ret)
+		return ret;
+	/*
+	 * No documented VDEC silicon ID register was found. Sample the known
+	 * reset register read by vendor amvdec_start(), without writing reset,
+	 * enabling internal gates/IRQ, loading firmware or starting any DMA.
+	 */
+	ret = regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &hw->power_test_reset);
+	if (!ret)
+		dev_info(hw->dev, "power test DOS_SW_RESET0 offset=%#x value=%#x\n",
+			 DOS_SW_RESET0, hw->power_test_reset);
+	off_ret = t7_power_off(hw);
+	if (ret || off_ret)
+		return ret ?: off_ret;
+	hw->power_test_passed = true;
+	dev_info(hw->dev, "power test complete: VDEC off; no firmware or DMA started\n");
+	return 0;
+}
+
 int vdec_enable(struct aml_vdec_hw *hw)
 {
 	int ret;
 
 	if (hw->has_dbus_ctrl) {
-		if (hw->faulted)
-			return -EIO;
-		ret = clk_set_rate(hw->gates[VDEC_MUX].clk, 500000000);
+		ret = t7_power_on(hw);
 		if (ret)
 			return ret;
-		ret = clk_bulk_prepare_enable(2, hw->gates);
-		if (ret)
-			return ret;
-		ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_1].dev);
-		if (ret < 0) {
-			clk_bulk_disable_unprepare(2, hw->gates);
-			return ret;
-		}
-		hw->powered = true;
 		dos_enable(hw);
 		regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_MASK, 0);
 		regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_CLR_REG, 1);
@@ -567,8 +670,6 @@ int vdec_enable(struct aml_vdec_hw *hw)
 
 int vdec_disable(struct aml_vdec_hw *hw)
 {
-	int ret;
-
 	if (hw->has_dbus_ctrl) {
 		if (hw->faulted)
 			return -EIO;
@@ -576,18 +677,7 @@ int vdec_disable(struct aml_vdec_hw *hw)
 			return 0;
 		regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_MASK, 0);
 		disable_irq(hw->dec_irq);
-		/* No automatic consumer link may put the domain before clocks. */
-		clk_bulk_disable_unprepare(2, hw->gates);
-		ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_1].dev);
-		if (ret < 0) {
-			if (clk_bulk_prepare_enable(2, hw->gates))
-				dev_crit(hw->dev, "VDEC clock recovery failed; reset required\n");
-			/* Power-off failed: do not issue any further DOS accesses. */
-			hw->powered = false;
-			return ret;
-		}
-		hw->powered = false;
-		return 0;
+		return t7_power_off(hw);
 	}
 	return vdec_poweroff(hw, VDEC_1);
 }

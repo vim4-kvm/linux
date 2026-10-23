@@ -114,6 +114,8 @@ struct pm_pd_s {
  * @has_dbus_ctrl: Isolate VDEC through DOS instead of DMC; no local PD writes.
  * @faulted: DMA ownership could not be returned; reset the system to recover.
  * @powered: Domain and functional clocks are held.
+ * @power_test_passed: Explicit read-only DOS access and power-off succeeded.
+ * @power_test_reset: Cached DOS_SW_RESET0 sample; not a silicon identifier.
  * @secure_swap: Scratch G supplied by the secure microcode loader.
  */
 struct aml_vdec_hw {
@@ -130,6 +132,8 @@ struct aml_vdec_hw {
 	bool has_dbus_ctrl;
 	bool faulted;
 	bool powered;
+	bool power_test_passed;
+	u32 power_test_reset;
 	u32 secure_swap;
 };
 
@@ -157,6 +161,8 @@ struct aml_vdec_hw *vdec_get_hw(void *priv);
 u32 read_dos_reg(struct aml_vdec_hw *hw, u32 reg_addr);
 int vdec_enable(struct aml_vdec_hw *hw);
 int vdec_disable(struct aml_vdec_hw *hw);
+int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3);
+int aml_vdec_t7_power_test(struct aml_vdec_hw *hw);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
 int aml_stop_vdec_hw(struct aml_vdec_hw *hw);

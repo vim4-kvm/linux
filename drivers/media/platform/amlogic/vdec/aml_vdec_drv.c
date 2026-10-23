@@ -19,6 +19,56 @@ static bool enable_t7;
 module_param(enable_t7, bool, 0400);
 MODULE_PARM_DESC(enable_t7, "Enable unverified T7 decode experiment; requires local RESET access");
 
+static bool allow_t7_power;
+module_param(allow_t7_power, bool, 0600);
+MODULE_PARM_DESC(allow_t7_power, "Allow supervised T7 power test; video open also requires a passed test");
+
+static ssize_t power_state_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
+	s32 state = -1, nic3 = -1;
+	int ret;
+
+	/* Read-only SMC status, including while video opens are forbidden. */
+	ret = aml_vdec_t7_power_state(vdec->dec_hw, &state, &nic3);
+	if (ret)
+		return ret;
+	return sysfs_emit(buf, "VDEC[4]=%d NIC3[39]=%d (0=on 1=off)\n", state, nic3);
+}
+static DEVICE_ATTR_RO(power_state);
+
+static ssize_t power_test_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
+	struct aml_vdec_hw *hw = vdec->dec_hw;
+
+	/* Cached result only: reading this file never powers up the decoder. */
+	return sysfs_emit(buf, "passed=%u DOS_SW_RESET0=%#x\n",
+			 READ_ONCE(hw->power_test_passed), READ_ONCE(hw->power_test_reset));
+}
+
+static ssize_t power_test_store(struct device *dev, struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
+	bool run;
+	int ret;
+
+	ret = kstrtobool(buf, &run);
+	if (ret || !run)
+		return -EINVAL;
+	mutex_lock(&vdec->dev_mutex);
+	if (!READ_ONCE(allow_t7_power))
+		ret = -EPERM;
+	else if (vdec->dec_ctx || !pm_runtime_suspended(dev))
+		ret = -EBUSY;
+	else
+		ret = aml_vdec_t7_power_test(vdec->dec_hw);
+	mutex_unlock(&vdec->dev_mutex);
+	return ret ?: count;
+}
+static DEVICE_ATTR_RW(power_test);
+
 static ssize_t faulted_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
@@ -29,6 +79,8 @@ static DEVICE_ATTR_RO(faulted);
 
 static struct attribute *aml_vdec_attrs[] = {
 	&dev_attr_faulted.attr,
+	&dev_attr_power_state.attr,
+	&dev_attr_power_test.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(aml_vdec);
@@ -38,6 +90,11 @@ static int fops_vcodec_open(struct file *file)
 	struct aml_vdec_dev *dec_dev = video_drvdata(file);
 	struct aml_vdec_ctx *ctx = NULL;
 	int ret = 0;
+
+	/* udev v4l_id opens a newly registered node. Do not let it power DOS. */
+	if (dec_dev->pvdec_data->has_dbus_ctrl &&
+	    (!READ_ONCE(allow_t7_power) || !READ_ONCE(dec_dev->dec_hw->power_test_passed)))
+		return -EPERM;
 
 	ctx = kzalloc_obj(*ctx, GFP_KERNEL);
 	if (!ctx)
@@ -213,6 +270,11 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		goto err_hw_init;
 	}
 
+	/* Runtime PM must be ready before registration exposes an openable node. */
+	if (pdata->has_dbus_ctrl) {
+		pm_runtime_set_suspended(&pdev->dev);
+		pm_runtime_enable(&pdev->dev);
+	}
 	ret = video_register_device(vfd_dec, VFL_TYPE_VIDEO, -1);
 	if (ret) {
 		v4l2_err(&dev->v4l2_dev, "Failed to register video device");
@@ -238,8 +300,6 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		goto err_media_dev_register;
 	}
 	if (pdata->has_dbus_ctrl) {
-		pm_runtime_set_suspended(&pdev->dev);
-		pm_runtime_enable(&pdev->dev);
 		return 0;
 	}
 	ret = vdec_enable(dev->dec_hw);
@@ -254,6 +314,8 @@ err_media_dev_register:
 error_m2m_mc_register:
 	media_device_cleanup(&dev->mdev);
 err_vid_dev_register:
+	if (pdata->has_dbus_ctrl)
+		pm_runtime_disable(&pdev->dev);
 	v4l2_m2m_release(dev->m2m_dev_dec);
 err_hw_init:
 	dev->pvdec_data->destroy_hw_resource(dev);
@@ -305,6 +367,9 @@ static int aml_vdec_runtime_resume(struct device *dev)
 {
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
 
+	if (vdec->pvdec_data->has_dbus_ctrl &&
+	    (!READ_ONCE(allow_t7_power) || !READ_ONCE(vdec->dec_hw->power_test_passed)))
+		return -EPERM;
 	return vdec_enable(vdec->dec_hw);
 }
 
