@@ -26,6 +26,7 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 #define READ_ONCE(v) (v)
 #define WRITE_ONCE(v, x) ((v) = (x))
+#define smp_store_release(p, value) (*(p) = (value))
 #define cmpxchg(p, old, value) ({ unsigned _was = *(p); if (_was == (old)) *(p) = (value); _was; })
 #define container_of(p, type, member) ((type *)((char *)(p) - offsetof(type, member)))
 #define WAVE5_JOB_TIMEOUT_MS 5000

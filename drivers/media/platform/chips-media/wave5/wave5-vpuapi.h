@@ -778,7 +778,7 @@ struct vpu_device {
 	struct semaphore irq_sem; /* signal to irq_thread when interrupt happens*/
 	struct reset_control *resets;
 	spinlock_t irq_spinlock; /* protect instances list */
-	/* Quarantine is irreversible until the next boot. */
+	/* 0: normal, 1: claimed, 2: metadata published; irreversible until boot. */
 	unsigned int isolated;
 	u32 isolation_command;
 	u32 last_command;
