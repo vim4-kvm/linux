@@ -17,6 +17,7 @@
 #include <drm/drm_bridge_connector.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fb_dma_helper.h>
+#include <drm/drm_file.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_dma_helper.h>
@@ -290,6 +291,24 @@ static int meson_t7_handoff_crtc_check(struct drm_crtc *crtc,
 	return drm_atomic_add_affected_planes(state, crtc);
 }
 
+static void meson_t7_handoff_abort_event(struct drm_crtc *crtc)
+{
+	struct drm_pending_event *event = &crtc->state->event->base;
+
+	/* Unblock atomic dependencies, without claiming a successful DMA latch. */
+	if (event->fence) {
+		dma_fence_set_error(event->fence, -EIO);
+		dma_fence_signal(event->fence);
+	}
+	if (event->completion) {
+		complete_all(event->completion);
+		event->completion_release(event->completion);
+		event->completion = NULL;
+	}
+	crtc->state->event = NULL;
+	drm_event_cancel_free(crtc->dev, event);
+}
+
 static void meson_t7_handoff_flush(struct drm_crtc *crtc,
 				   struct drm_atomic_commit *state)
 {
@@ -308,6 +327,8 @@ static void meson_t7_handoff_flush(struct drm_crtc *crtc,
 		else
 			meson_t7_handoff_scanout(display, NULL, HANDOFF_BOOT_ADDR);
 	}
+	if (crtc->state->event && READ_ONCE(display->faulted))
+		meson_t7_handoff_abort_event(crtc);
 	if (crtc->state->event) {
 		spin_lock_irq(&crtc->dev->event_lock);
 		drm_crtc_send_vblank_event(crtc, crtc->state->event);

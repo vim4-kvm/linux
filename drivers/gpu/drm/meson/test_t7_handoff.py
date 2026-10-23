@@ -74,7 +74,7 @@ functions = source[source.index('static void meson_t7_handoff_rdma_complete'):
                    source.index('static int meson_t7_handoff_plane_check')]
 functions += source[source.index('static int meson_t7_handoff_plane_check'):
                     source.index('static void meson_t7_handoff_plane_update')]
-functions += source[source.index('static void meson_t7_handoff_flush'):
+functions += source[source.index('static void meson_t7_handoff_abort_event'):
                     source.index('static void meson_t7_handoff_enable(')]
 prefix = r'''
 #include <assert.h>
@@ -88,8 +88,16 @@ typedef int spinlock_t;
 typedef int wait_queue_head_t;
 typedef int irqreturn_t;
 struct drm_device { int event_lock; };
+struct dma_fence { int error; bool signaled; };
+struct completion { unsigned int completed, released; };
+struct drm_pending_event {
+    struct dma_fence *fence;
+    struct completion *completion;
+    void (*completion_release)(struct completion *);
+};
+struct drm_pending_vblank_event { struct drm_pending_event base; };
 struct drm_plane_state;
-struct drm_crtc_state { bool active; void *event; };
+struct drm_crtc_state { bool active; struct drm_pending_vblank_event *event; };
 struct drm_plane { struct drm_device *dev; struct drm_plane_state *state; };
 struct drm_crtc { struct drm_device *dev; struct drm_crtc_state *state; };
 struct drm_encoder { int unused; };
@@ -161,7 +169,14 @@ static dma_addr_t drm_fb_dma_get_gem_addr(struct drm_framebuffer *fb,
 }
 static int drm_crtc_vblank_get(struct drm_crtc *crtc) { return 0; }
 static void drm_crtc_vblank_put(struct drm_crtc *crtc) { }
-static void drm_crtc_send_vblank_event(struct drm_crtc *crtc, void *event) { }
+static unsigned int sent, cancelled;
+static void drm_crtc_send_vblank_event(struct drm_crtc *crtc, void *event) { sent++; }
+static void dma_fence_set_error(struct dma_fence *fence, int error) { fence->error=error; }
+static void dma_fence_signal(struct dma_fence *fence) { fence->signaled=true; }
+static void complete_all(struct completion *completion) { completion->completed++; }
+static void release_completion(struct completion *completion) { completion->released++; }
+static void drm_event_cancel_free(struct drm_device *drm, struct drm_pending_event *event)
+{ cancelled++; assert(!event->completion); }
 static u32 readl(void *address) { return *(u32 *)address; }
 static void writel(u32 value, void *address)
 {
@@ -320,6 +335,22 @@ int main(void)
         assert(old.references == 2 && next.references == 2);
     }
     puts("RDMA: 60 flips/60 vsyncs, IRQ orders/wrap, detach, missing DMA/vsync pinning passed");
+
+    struct dma_fence fence={0};
+    struct completion completion={0};
+    struct drm_pending_vblank_event event={.base={.fence=&fence,
+        .completion=&completion, .completion_release=release_completion}};
+    display.faulted=true; running.event=&event;
+    unsigned int previously_sent=sent;
+    meson_t7_handoff_flush(&display.crtc, &rmfb);
+    assert(!running.event && cancelled == 1 && sent == previously_sent);
+    assert(fence.error == -EIO && fence.signaled);
+    assert(completion.completed == 1 && completion.released == 1);
+    /* Legacy event without an explicit out-fence follows the same cancellation path. */
+    event.base.fence=NULL; event.base.completion=NULL; running.event=&event;
+    meson_t7_handoff_flush(&display.crtc, &rmfb);
+    assert(!running.event && cancelled == 2 && sent == previously_sent);
+    puts("Latch failure: no successful page-flip event, error fence and released commit dependency passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
