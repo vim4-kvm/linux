@@ -151,6 +151,7 @@ with tempfile.TemporaryDirectory() as directory:
         'VD1': 'VPU_VIU_VD1', 'VD2': 'VPU_VIU_VD2', 'OSD3': 'VPU_VIU_OSD3',
         'OSD_SCALE': 'VPU_VIU_OSD_SCALE', 'OSD2_SCALE': 'VPU_VD2_OSD2_SCALE',
         'MALI_AFBC': 'VPU_MAIL_AFBCD', 'VD1_SCALE': 'VPU_VD1_SCALE',
+        'VD2_SCALE': 'VPU_VD2_SCALE', 'VD2_OFIFO': 'VPU_VD2_OFIFO',
         'OSD_BLD34': 'VPU_OSD_BLD34', 'RDMA': 'VPU_RDMA',
     }
     assert set(names) == vendor_modules.keys()
@@ -170,4 +171,4 @@ with tempfile.TemporaryDirectory() as directory:
         abi += f'assert(smc_id == PWRC_T7_{name}_MEM_ID && smc_state == 1);\n'
     abi += '}\n'
     execute('vendor-abi', abi)
-print('OSD SRAM: 35 acquisition/unwind cases, missing vsync, wrap and 11 vendor SMC IDs passed')
+print(f'OSD SRAM: 35 acquisition/unwind cases, missing vsync, wrap and {len(names)} vendor SMC IDs passed')
