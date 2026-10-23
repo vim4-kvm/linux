@@ -512,6 +512,20 @@ static int meson_ao_cec_set_log_addr(struct cec_adapter *adap, u8 logical_addr)
 	struct meson_ao_cec_device *ao_cec = adap->priv;
 	int ret = 0;
 
+	if (ao_cec->cecb_route) {
+		unsigned int mask = 0;
+
+		/* A1 and later use two address bitmaps, not GX's valid-bit slots. */
+		if (logical_addr != CEC_LOG_ADDR_INVALID) {
+			if (logical_addr > 15)
+				return -EINVAL;
+			mask = BIT(logical_addr);
+		}
+		meson_ao_cec_write(ao_cec, CEC_LOGICAL_ADDR0, mask & 0xff, &ret);
+		meson_ao_cec_write(ao_cec, CEC_LOGICAL_ADDR1, mask >> 8, &ret);
+		return ret;
+	}
+
 	meson_ao_cec_write(ao_cec, CEC_LOGICAL_ADDR0,
 			   LOGICAL_ADDR_DISABLE, &ret);
 	if (ret)

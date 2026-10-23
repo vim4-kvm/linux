@@ -41,7 +41,10 @@ prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <errno.h>
+#include <stddef.h>
 typedef uint32_t u32;
+typedef uint8_t u8;
 #define BIT(n) (1U << (n))
 #define GENMASK(h,l) ((UINT32_MAX << (l)) & (UINT32_MAX >> (31-(h))))
 #define FIELD_PREP(mask, value) (((value) << __builtin_ctz(mask)) & (mask))
@@ -52,6 +55,32 @@ struct meson_ao_cec_device {
     void *notify, *adap, *core;
 };
 struct platform_device {struct meson_ao_cec_device *driver_data;};
+struct cec_adapter {void *priv;};
+#define CEC_LOG_ADDR_INVALID 255
+#define CEC_LOGICAL_ADDR0 0x16
+#define CEC_LOGICAL_ADDR1 0x17
+#define LOGICAL_ADDR_DISABLE 0
+#define LOGICAL_ADDR_MASK 0xf
+#define LOGICAL_ADDR_VALID 0x10
+static u8 command[256];
+static int write_error, write_count;
+static int meson_ao_cec_clear(struct meson_ao_cec_device *cec) {(void)cec; return 0;}
+static void udelay(unsigned int delay) {(void)delay;}
+static void meson_ao_cec_write(struct meson_ao_cec_device *cec,
+                              unsigned long address, u8 value, int *ret)
+{
+    (void)cec;
+    if (*ret) return;
+    write_count++;
+    if (write_error) *ret=write_error;
+    else command[address]=value;
+}
+static unsigned int aocec_rd_reg(unsigned int address) {return reference[address];}
+static void aocec_wr_reg(unsigned int address, unsigned int value) {reference[address]=value;}
+#define CONFIG_AMLOGIC_ZAPPER_CUT 1
+#define CEC_CHIP_A1 0
+static struct {int chip_id;} platform={0};
+static struct {void *unused; __typeof__(platform) *plat_data;} device={0,&platform}, *cec_dev=&device;
 static bool clock_live=true, notifier_live=true, adapter_live=true;
 static struct meson_ao_cec_device *platform_get_drvdata(struct platform_device *pdev)
 {return pdev->driver_data;}
@@ -79,7 +108,9 @@ body = prefix + defines + '\n'
 body += function(source, 'meson_ao_cec_t7_setup') + '\n'
 body += function(source, 'meson_ao_cec_t7_restore_route') + '\n'
 body += function(source, 'meson_ao_cec_remove') + '\n'
+body += function(source, 'meson_ao_cec_set_log_addr') + '\n'
 body += function(vendor, 'cec_ip_share_io') + '\n'
+body += function(vendor, 'ceca_addr_add') + '\n'
 body += 'static void vendor_init(void) {unsigned long data32;\n' + init + '}\n'
 body += r'''
 int main(void)
@@ -107,6 +138,23 @@ int main(void)
         assert((regs[16] & CEC_GEN_CNTL_SHARE_IO) == cec.cecb_route_saved);
     }
     struct platform_device pdev = {.driver_data=&cec};
+    struct cec_adapter adap = {.priv=&cec};
+    for (unsigned int addr = 0; addr < 16; addr++) {
+        reference[CEC_LOGICAL_ADDR0] = reference[CEC_LOGICAL_ADDR1] = 0;
+        ceca_addr_add(addr);
+        command[CEC_LOGICAL_ADDR0] = command[CEC_LOGICAL_ADDR1] = 0xff;
+        assert(meson_ao_cec_set_log_addr(&adap, addr) == 0);
+        assert(command[CEC_LOGICAL_ADDR0] == reference[CEC_LOGICAL_ADDR0]);
+        assert(command[CEC_LOGICAL_ADDR1] == reference[CEC_LOGICAL_ADDR1]);
+    }
+    assert(meson_ao_cec_set_log_addr(&adap, CEC_LOG_ADDR_INVALID) == 0);
+    assert(!command[CEC_LOGICAL_ADDR0] && !command[CEC_LOGICAL_ADDR1]);
+    assert(meson_ao_cec_set_log_addr(&adap, 16) == -EINVAL);
+    write_error=-EIO; write_count=0;
+    assert(meson_ao_cec_set_log_addr(&adap, 8) == -EIO && write_count == 1);
+    write_error=0; cec.cecb_route=NULL;
+    assert(meson_ao_cec_set_log_addr(&adap, 4) == 0);
+    assert(command[CEC_LOGICAL_ADDR0] == (LOGICAL_ADDR_VALID | 4));
     meson_ao_cec_remove(&pdev);
     assert(!clock_live && !notifier_live && !adapter_live);
 }
@@ -117,7 +165,7 @@ with tempfile.TemporaryDirectory() as work:
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     str(path / 'cec.c'), '-o', str(path / 'cec')], check=True)
     subprocess.run([str(path / 'cec')], check=True)
-print('T7 CECA: 256 filter/routing combinations, masked restore and clocked teardown passed')
+print('T7 CECA: filters, routing, vendor logical-address bitmaps, I/O failure and teardown passed')
 if args.dtb:
     def prop(node, key, kind='x'):
         return subprocess.check_output(['fdtget', '-t', kind, str(args.dtb), node, key],
