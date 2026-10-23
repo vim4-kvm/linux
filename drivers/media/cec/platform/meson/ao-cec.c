@@ -39,6 +39,10 @@
 #define CEC_GEN_CNTL_CLK_ENABLE		1
 #define CEC_GEN_CNTL_CLK_ENABLE_DBG	2
 #define CEC_GEN_CNTL_CLK_CTRL_MASK	GENMASK(2, 1)
+#define CEC_GEN_CNTL_SYS_CLK_EN		BIT(3)
+#define CEC_GEN_CNTL_SHARE_IO		BIT(4)
+#define CEC_GEN_CNTL_FILTER_TICK		GENMASK(9, 8)
+#define CEC_GEN_CNTL_FILTER_DELAY		GENMASK(14, 12)
 
 /*
  * [7:0] cec_reg_addr
@@ -218,6 +222,8 @@
 struct meson_ao_cec_device {
 	struct platform_device		*pdev;
 	void __iomem			*base;
+	void __iomem			*cecb_route;
+	u32				cecb_route_saved;
 	struct clk			*core;
 	spinlock_t			cec_reg_lock;
 	struct cec_notifier		*notify;
@@ -227,6 +233,26 @@ struct meson_ao_cec_device {
 
 #define writel_bits_relaxed(mask, val, addr) \
 	writel_relaxed((readl_relaxed(addr) & ~(mask)) | (val), addr)
+
+static void meson_ao_cec_t7_restore_route(void *data)
+{
+	struct meson_ao_cec_device *ao_cec = data;
+
+	writel_bits_relaxed(CEC_GEN_CNTL_SHARE_IO, ao_cec->cecb_route_saved,
+			    ao_cec->cecb_route);
+}
+
+static void meson_ao_cec_t7_setup(struct meson_ao_cec_device *ao_cec)
+{
+	/* Use CECA on GPIOW12. CECB must not redirect its output to this pad. */
+	writel_bits_relaxed(CEC_GEN_CNTL_SHARE_IO, 0, ao_cec->cecb_route);
+	writel_bits_relaxed(CEC_GEN_CNTL_SHARE_IO | CEC_GEN_CNTL_SYS_CLK_EN |
+			    CEC_GEN_CNTL_FILTER_TICK | CEC_GEN_CNTL_FILTER_DELAY,
+			    CEC_GEN_CNTL_SYS_CLK_EN |
+			    FIELD_PREP(CEC_GEN_CNTL_FILTER_TICK, 1) |
+			    FIELD_PREP(CEC_GEN_CNTL_FILTER_DELAY, 7),
+			    ao_cec->base + CEC_GEN_CNTL_REG);
+}
 
 static inline int meson_ao_cec_wait_busy(struct meson_ao_cec_device *ao_cec)
 {
@@ -553,6 +579,9 @@ static int meson_ao_cec_adap_enable(struct cec_adapter *adap, bool enable)
 	if (!enable)
 		return 0;
 
+	if (ao_cec->cecb_route)
+		meson_ao_cec_t7_setup(ao_cec);
+
 	/* Enable gated clock (Normal mode). */
 	writel_bits_relaxed(CEC_GEN_CNTL_CLK_CTRL_MASK,
 			    FIELD_PREP(CEC_GEN_CNTL_CLK_CTRL_MASK,
@@ -630,6 +659,26 @@ static int meson_ao_cec_probe(struct platform_device *pdev)
 		ret = PTR_ERR(ao_cec->base);
 		goto out_probe_adapter;
 	}
+	if (of_device_is_compatible(pdev->dev.of_node, "amlogic,t7-ao-cec")) {
+		struct clk *pclk;
+
+		pclk = devm_clk_get_enabled(&pdev->dev, "pclk");
+		if (IS_ERR(pclk)) {
+			ret = PTR_ERR(pclk);
+			goto out_probe_adapter;
+		}
+		/* Claim the routing word so another CECB driver cannot race CECA. */
+		ao_cec->cecb_route = devm_platform_ioremap_resource(pdev, 1);
+		if (IS_ERR(ao_cec->cecb_route)) {
+			ret = PTR_ERR(ao_cec->cecb_route);
+			goto out_probe_adapter;
+		}
+		ao_cec->cecb_route_saved = readl_relaxed(ao_cec->cecb_route) &
+					 CEC_GEN_CNTL_SHARE_IO;
+		ret = devm_add_action_or_reset(&pdev->dev, meson_ao_cec_t7_restore_route, ao_cec);
+		if (ret)
+			goto out_probe_adapter;
+	}
 
 	irq = platform_get_irq(pdev, 0);
 	ret = devm_request_threaded_irq(&pdev->dev, irq,
@@ -706,6 +755,7 @@ static void meson_ao_cec_remove(struct platform_device *pdev)
 
 static const struct of_device_id meson_ao_cec_of_match[] = {
 	{ .compatible = "amlogic,meson-gx-ao-cec", },
+	{ .compatible = "amlogic,t7-ao-cec", },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, meson_ao_cec_of_match);

@@ -17619,6 +17619,7 @@ F:	Documentation/devicetree/bindings/media/cec/amlogic,meson-gx-ao-cec.yaml
 F:	Documentation/devicetree/bindings/media/cec/amlogic,t7-ao-cec.yaml
 F:	drivers/media/cec/platform/meson/ao-cec-g12a.c
 F:	drivers/media/cec/platform/meson/ao-cec.c
+F:	drivers/media/cec/platform/meson/test_ao_cec_t7.py
 
 MESON GE2D DRIVER FOR AMLOGIC SOCS
 M:	Neil Armstrong <neil.armstrong@linaro.org>
