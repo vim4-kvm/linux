@@ -56,6 +56,7 @@ struct vpu_instance {
     bool released;
     struct vpu_device *dev;
     int std, id, state;
+    unsigned frame_rate;
     struct { unsigned width, height; } src_fmt, dst_fmt;
     struct v4l2_rect conf_win;
     struct { struct v4l2_m2m_ctx *m2m_ctx; } v4l2_fh;
@@ -185,5 +186,52 @@ with tempfile.TemporaryDirectory(prefix='wave5-hang-') as directory:
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-Wno-unused-function',
                     '-fsanitize=address,undefined',
+                    str(source), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+interval = encoder[encoder.index('static int wave5_vpu_enc_s_parm('):
+                   encoder.index('static int wave5_set_qp_limits(')]
+# Keep only the requested function, independent of adjacent control helpers.
+interval = interval[:interval.index('\n}\n') + 3]
+interval_types = r'''
+#define V4L2_CAP_TIMEPERFRAME 0x1000
+#define max_t(type,a,b) ((type)(a)>(type)(b)?(type)(a):(type)(b))
+struct v4l2_streamparm {
+    unsigned type;
+    struct { struct { unsigned capability;
+        struct { unsigned numerator, denominator; } timeperframe;
+    } output; } parm;
+};
+'''
+interval_checks = r'''
+int main(void)
+{
+    struct vpu_instance inst={.frame_rate=30};
+    struct file file={.inst=&inst};
+    struct v4l2_streamparm parm={.type=V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE};
+    assert(!wave5_vpu_enc_s_parm(&file,NULL,&parm));
+    assert(parm.parm.output.timeperframe.numerator==1);
+    assert(parm.parm.output.timeperframe.denominator==30);
+    parm.parm.output.timeperframe.numerator=1001;
+    parm.parm.output.timeperframe.denominator=60000;
+    assert(!wave5_vpu_enc_s_parm(&file,NULL,&parm));
+    assert(inst.frame_rate==59 && parm.parm.output.timeperframe.numerator==1);
+    assert(parm.parm.output.timeperframe.denominator==59);
+    parm.parm.output.timeperframe.numerator=2;
+    parm.parm.output.timeperframe.denominator=1;
+    assert(!wave5_vpu_enc_s_parm(&file,NULL,&parm) && inst.frame_rate==1);
+    inst.state=1;
+    assert(wave5_vpu_enc_s_parm(&file,NULL,&parm)==-EBUSY);
+    parm.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    assert(wave5_vpu_enc_s_parm(&file,NULL,&parm)==-EINVAL);
+    puts("Wave5 negotiated frame intervals and busy sequence state passed");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='wave5-interval-') as directory:
+    source = Path(directory) / 'interval.c'
+    binary = Path(directory) / 'interval'
+    source.write_text(prefix + interval_types + interval + interval_checks)
+    subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                    '-Wno-unused-parameter', '-Wno-unused-function',
                     str(source), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

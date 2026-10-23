@@ -486,7 +486,8 @@ static int wave5_vpu_enc_s_fmt_cap(struct file *file, void *fh, struct v4l2_form
 	struct vpu_instance *inst = file_to_vpu_inst(file);
 	int i, ret;
 
-	if (vb2_is_busy(v4l2_m2m_get_src_vq(inst->v4l2_fh.m2m_ctx)) ||
+	if (inst->state != VPU_INST_STATE_NONE ||
+	    vb2_is_busy(v4l2_m2m_get_src_vq(inst->v4l2_fh.m2m_ctx)) ||
 	    vb2_is_busy(v4l2_m2m_get_dst_vq(inst->v4l2_fh.m2m_ctx)))
 		return -EBUSY;
 
@@ -596,7 +597,8 @@ static int wave5_vpu_enc_s_fmt_out(struct file *file, void *fh, struct v4l2_form
 	const struct v4l2_format_info *info;
 	int i, ret;
 
-	if (vb2_is_busy(v4l2_m2m_get_src_vq(inst->v4l2_fh.m2m_ctx)) ||
+	if (inst->state != VPU_INST_STATE_NONE ||
+	    vb2_is_busy(v4l2_m2m_get_src_vq(inst->v4l2_fh.m2m_ctx)) ||
 	    vb2_is_busy(v4l2_m2m_get_dst_vq(inst->v4l2_fh.m2m_ctx)))
 		return -EBUSY;
 
@@ -650,6 +652,8 @@ static int wave5_vpu_enc_s_fmt_out(struct file *file, void *fh, struct v4l2_form
 			     vpu_fmt->v4l2_frmsize);
 	inst->conf_win.width = inst->dst_fmt.width;
 	inst->conf_win.height = inst->dst_fmt.height;
+	inst->conf_win.left = 0;
+	inst->conf_win.top = 0;
 
 	return 0;
 }
@@ -773,7 +777,6 @@ static int wave5_vpu_enc_g_parm(struct file *file, void *fh, struct v4l2_streamp
 
 	if (a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT && a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 		return -EINVAL;
-
 	a->parm.output.capability = V4L2_CAP_TIMEPERFRAME;
 	a->parm.output.timeperframe.numerator = 1;
 	a->parm.output.timeperframe.denominator = inst->frame_rate;
@@ -794,14 +797,17 @@ static int wave5_vpu_enc_s_parm(struct file *file, void *fh, struct v4l2_streamp
 	if (a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT && a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 		return -EINVAL;
 
+	if (inst->state != VPU_INST_STATE_NONE)
+		return -EBUSY;
+
 	a->parm.output.capability = V4L2_CAP_TIMEPERFRAME;
 	if (a->parm.output.timeperframe.denominator && a->parm.output.timeperframe.numerator) {
-		inst->frame_rate = a->parm.output.timeperframe.denominator /
-				   a->parm.output.timeperframe.numerator;
-	} else {
-		a->parm.output.timeperframe.numerator = 1;
-		a->parm.output.timeperframe.denominator = inst->frame_rate;
+		inst->frame_rate = max_t(u32, 1, a->parm.output.timeperframe.denominator /
+					a->parm.output.timeperframe.numerator);
 	}
+	/* This command interface currently negotiates whole frames per second. */
+	a->parm.output.timeperframe.numerator = 1;
+	a->parm.output.timeperframe.denominator = inst->frame_rate;
 
 	dev_dbg(inst->dev->dev, "%s: numerator: %u | denominator: %u\n",
 		__func__, a->parm.output.timeperframe.numerator,
