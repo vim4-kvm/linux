@@ -14,6 +14,8 @@ types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
                source.index('static int t7_hdmirx_validate_edid')]
 functions = source[source.index('static u32 t7_hdmirx_core_read16'):
                    source.index('static u32 t7_hdmirx_audio_word')]
+functions = source[source.index('static u32 t7_hdmirx_meter_hz'):
+                   source.index('static u32 t7_hdmirx_sample_cable')] + functions
 ioctls = vdin[vdin.index('static int t7_vdin_query_dv_timings'):
              vdin.index('static int t7_vdin_set_input')]
 prefix = r'''
@@ -38,6 +40,8 @@ typedef uint64_t u64;
 #define WRITE_ONCE(place, value) ((place) = (value))
 static u64 ktime_get_ns(void) { return 1000000000ULL; }
 #define EXPORT_SYMBOL_GPL(name)
+#define FIELD_GET(mask,value) (((value)&(mask)) >> __builtin_ctz(mask))
+#define U32_MAX UINT32_MAX
 struct mutex { int unused; };
 struct delayed_work { int unused; };
 struct clk_bulk_data { void *clk; };
@@ -119,6 +123,9 @@ static void setup(bool uhd, unsigned int ticks) {
     memset(core,0,sizeof(core)); memset(top,0,sizeof(top));
     u32 value = BIT(21); memcpy(top + T7_RX_TOP_HPD_PWR5V,&value,4);
     value = 1; memcpy(top + T7_RX_TOP_TMDS_ALIGN_STAT,&value,4);
+    memcpy(top + T7_RX_TOP_MISC_STAT0,&value,4);
+    value = T7_RX_METER_VALID|4096; memcpy(top + T7_RX_TOP_METER_CABLE_STAT,&value,4);
+    value = T7_RX_METER_VALID|(uhd?16384:4096); memcpy(top + T7_RX_TOP_METER_HDMI_STAT,&value,4);
     value = T7_RX_PHY_PLL_LOCK; memcpy(phy + T7_RX_PHY_APLL0,&value,4);
     word(T7_RX_COR_WIDTH, uhd ? 3840 : 1920);
     word(T7_RX_COR_HEIGHT, uhd ? 2160 : 1080);
@@ -155,6 +162,27 @@ int main(void) {
             assert(parm.parm.capture.timeperframe.denominator==166666664);
             assert(!parm.parm.capture.capability);
         }
+        /* An APLL status dip must not revoke a valid vendor-qualified link. */
+        u32 value = 0;
+        memcpy(phy+T7_RX_PHY_APLL0,&value,4);
+        assert(!t7_hdmirx_query_timings(&dev,&timing,&interval));
+        memcpy(top+T7_RX_TOP_MISC_STAT0,&value,4);
+        assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-ENOLINK);
+        value=1;memcpy(top+T7_RX_TOP_MISC_STAT0,&value,4);
+        value=4096;memcpy(top+T7_RX_TOP_METER_CABLE_STAT,&value,4);
+        assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-ENOLINK);
+        value=T7_RX_METER_VALID|4096;memcpy(top+T7_RX_TOP_METER_CABLE_STAT,&value,4);
+        for (int sign=-1;sign<=1;sign+=2) {
+            value=T7_RX_METER_VALID|((uhd?16384:4096)+sign*98);
+            memcpy(top+T7_RX_TOP_METER_HDMI_STAT,&value,4);
+            assert(!t7_hdmirx_query_timings(&dev,&timing,&interval));
+            value=T7_RX_METER_VALID|((uhd?16384:4096)+sign*99);
+            memcpy(top+T7_RX_TOP_METER_HDMI_STAT,&value,4);
+            assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-ENOLINK);
+        }
+        setup(uhd,2777778);
+        value=0;memcpy(top+T7_RX_TOP_TMDS_ALIGN_STAT,&value,4);
+        assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-ENOLINK);
     }
     setup(true,2777778);
     struct v4l2_dv_timings untouched; memset(&untouched,0xa5,sizeof(untouched));
