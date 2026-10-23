@@ -17,6 +17,9 @@ int t7_hdmirx_check_video(struct device *dev);
 /* One process-context sample, without the stable check's inter-sample delay. */
 int t7_hdmirx_check_video_now(struct device *dev);
 
+/* Same admission, with a static reason string for bounded capture diagnostics. */
+int t7_hdmirx_check_capture(struct device *dev, const char **reason);
+
 /* Allocation bound, independent of the currently detected input mode. */
 int t7_hdmirx_get_max_size(struct device *dev, unsigned int *width, unsigned int *height);
 

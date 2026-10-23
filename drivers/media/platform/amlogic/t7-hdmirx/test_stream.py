@@ -209,7 +209,8 @@ static void t7_hdmirx_stream_put(void *dev) {
     assert(receiver_users && !receiver.ring_running && !receiver.armed);
     receiver_users--;
 }
-static int t7_hdmirx_check_video_now(void *dev) {
+static int t7_hdmirx_check_capture(void *dev, const char **reason) {
+    *reason="test-receiver";
     if (__atomic_load_n(&transient_after,__ATOMIC_ACQUIRE) &&
         !__atomic_sub_fetch(&transient_after,1,__ATOMIC_ACQ_REL)) return -EAGAIN;
     bool copying=false;
