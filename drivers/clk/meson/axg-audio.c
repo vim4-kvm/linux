@@ -1487,14 +1487,33 @@ static struct clk_regmap tdmout_d_sclk_post_en = AUD_TDM_SCLK_POST_EN(out_d, 0xe
 static struct clk_regmap tdmout_d_sclk = AUD_TDM_SCLK_WS(out_d, 0xec);
 static struct clk_regmap tdmout_d_lrclk = AUD_TDM_LRLCK(out_d, 0xec);
 
+static const struct clk_parent_data t7_resample_parent_data[] = {
+	{ .hw = &sm1_mst_a_mclk.hw },
+	{ .hw = &sm1_mst_b_mclk.hw },
+	{ .hw = &sm1_mst_c_mclk.hw },
+	{ .hw = &sm1_mst_d_mclk.hw },
+	{ .hw = &sm1_mst_e_mclk.hw },
+	{ .hw = &sm1_mst_f_mclk.hw },
+	{ .fw_name = "slv_sclk0" },
+	{ .fw_name = "slv_sclk1" },
+	{ .fw_name = "slv_sclk2" },
+	{ .fw_name = "slv_sclk3" },
+	{ .fw_name = "slv_sclk4" },
+	{ .fw_name = "slv_sclk5" },
+	{ .fw_name = "slv_sclk6" },
+	{ .fw_name = "slv_sclk7" },
+	{ .fw_name = "slv_sclk8" },
+	{ .fw_name = "slv_sclk9" },
+};
+
 static struct clk_regmap resample_a_clk_sel =
-	AUD_MUX(resample_a_clk_sel, 0xa4, 0xf, 24, 0, mst_mux_parent_data, 0);
+	AUD_MUX(resample_a_clk_sel, 0xa4, 0xf, 24, 0, t7_resample_parent_data, 0);
 static struct clk_regmap resample_a_clk_div =
 	AUD_DIV(resample_a_clk_div, 0xa4, 0, 8, 0, aud_resample_a_clk_sel, 0);
 static struct clk_regmap resample_a_clk =
 	AUD_GATE(resample_a_clk, 0xa4, 31, aud_resample_a_clk_div, CLK_SET_RATE_PARENT);
 static struct clk_regmap resample_b_clk_sel =
-	AUD_MUX(resample_b_clk_sel, 0xb8, 0xf, 24, 0, mst_mux_parent_data, 0);
+	AUD_MUX(resample_b_clk_sel, 0xb8, 0xf, 24, 0, t7_resample_parent_data, 0);
 static struct clk_regmap resample_b_clk_div =
 	AUD_DIV(resample_b_clk_div, 0xb8, 0, 8, 0, aud_resample_b_clk_sel, 0);
 static struct clk_regmap resample_b_clk =
