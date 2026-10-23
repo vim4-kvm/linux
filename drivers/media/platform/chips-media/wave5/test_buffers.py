@@ -320,6 +320,14 @@ int main(void)
         wave5_vpu_enc_stop_streaming(&queue);
         assert(destroy_calls==1 && !other.count);
     }
+    dev.isolated=false; inst.state=VPU_INST_STATE_PIC_RUN;
+    codec.enc_info.open_param.wave_param=(struct enc_wave_param){23,26,29};
+    dst[0].done=0; dst[0].payload=1234;
+    other=(struct v4l2_m2m_ctx){.is_draining=true,.dst=&dst[0]};
+    fail_command=1;
+    assert(start_encode(&inst,&fail)==-EIO);
+    assert(inst.state==VPU_INST_STATE_STOP && !wave5_vpu_enc_job_ready(&inst));
+    assert(dst[0].done==VB2_BUF_STATE_ERROR && !dst[0].payload);
     puts("Wave5 lookahead ownership, reordered timestamps, fair scheduling and drain passed");
 }
 '''

@@ -271,25 +271,18 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 
 		dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame fail: %d\n",
 			__func__, ret);
+		switch_state(inst, VPU_INST_STATE_STOP);
 		if (src_buf)
 			src_buf = v4l2_m2m_src_buf_remove_by_idx(m2m_ctx, src_buf->vb2_buf.index);
-		if (!src_buf) {
-			dev_dbg(inst->dev->dev,
-				"%s: Removing src buf failed, the queue is empty\n",
-				__func__);
-			return -EINVAL;
-		}
 		dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
-		if (!dst_buf) {
-			dev_dbg(inst->dev->dev,
-				"%s: Removing dst buf failed, the queue is empty\n",
-				__func__);
-			return -EINVAL;
+		if (dst_buf) {
+			dst_buf->vb2_buf.timestamp = src_buf ?
+				src_buf->vb2_buf.timestamp : inst->timestamp;
+			vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
+			v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
 		}
-		switch_state(inst, VPU_INST_STATE_STOP);
-		dst_buf->vb2_buf.timestamp = src_buf->vb2_buf.timestamp;
-		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
-		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
+		if (src_buf)
+			v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
 		return ret;
 	} else {
 		if (src_buf)
