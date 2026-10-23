@@ -1015,7 +1015,7 @@ static bool t7_hdmirx_same_measurement(const struct t7_hdmirx_measurement *a,
 }
 
 static int t7_hdmirx_measure_live(struct t7_hdmirx *rx, bool yuv420,
-				struct t7_hdmirx_measurement *measured)
+				  struct t7_hdmirx_measurement *measured)
 {
 	int ret = t7_hdmirx_measure(rx, yuv420, measured);
 
@@ -1113,13 +1113,14 @@ int t7_hdmirx_check_capture(struct device *dev, const char **reason)
 	ret = t7_hdmirx_video_status_reason(rx, reason);
 	if (ret && ret != -EAGAIN && rx && rx->core_active && rx->phy_active)
 		dev_info_ratelimited(dev, "capture check: %s error=%d width=%u height=%u ticks=%u lease=%ux%u/%u pll=%u align=%u\n",
-			*reason, ret, t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH),
-			t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT),
-			t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
-			(readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16),
-			rx->lease_mode.width, rx->lease_mode.height, rx->lease_mode.ticks,
-			!!(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK),
-			!!(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)));
+				     *reason, ret, t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH),
+				     t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT),
+				     t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
+				     (readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16),
+				     rx->lease_mode.width, rx->lease_mode.height,
+				     rx->lease_mode.ticks,
+				     !!(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK),
+				     !!(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)));
 	return ret;
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_check_capture);
