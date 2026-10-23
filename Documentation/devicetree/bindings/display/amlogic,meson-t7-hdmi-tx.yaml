@@ -20,6 +20,13 @@ properties:
   compatible:
     const: amlogic,t7-hdmi-tx
 
+  amlogic,boot-handoff:
+    type: boolean
+    description: |
+      Fixed 1080p firmware handoff. Read TOP/COR through the firmware SMC ABI;
+      do not reset or program TX, PHY, DDC, audio, or clocks. Only valid with
+      the dedicated T7 display-handoff consumer, not normal meson modesetting.
+
   reg:
     items:
       - description: TOP registers
