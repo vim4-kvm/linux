@@ -857,7 +857,7 @@ static int wave5_set_qp_limits(struct enc_wave_param *param, struct v4l2_ctrl *c
 		minimum[i] = max(limits[0]->val, limits[2 + 2 * i]->val);
 		maximum[i] = min(limits[1]->val, limits[3 + 2 * i]->val);
 		if (minimum[i] > maximum[i])
-			return -EINVAL;
+			return -ERANGE;
 	}
 	param->min_qp_i = minimum[0];
 	param->max_qp_i = maximum[0];

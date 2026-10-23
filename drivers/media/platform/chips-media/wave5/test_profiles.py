@@ -232,8 +232,12 @@ int main(void)
     assert(set(&a,V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY,101)==-ERANGE);
     assert(set(&a,V4L2_CID_MPEG_VIDEO_HEADER_MODE,V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE)==-EINVAL);
     assert(!set(&a,V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_MIN_QP,20));
-    assert(set(&a,V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,19)==-EINVAL);
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,19)==-ERANGE);
     assert(a.hevc_param.min_qp_p==20 && a.hevc_param.max_qp_p==51);
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_H264_MIN_QP,8));
+    /* The framework can clamp minimum - 1 to zero before s_ctrl. */
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_H264_MAX_QP,0)==-ERANGE);
+    assert(a.enc_param.min_qp_i==8 && a.enc_param.max_qp_i==51);
     struct enc_wave_param quality={.intra_qp=29,.fixed_qp_p=30,.fixed_qp_b=31};
     wave5_set_constant_quality(&quality,&a);
     assert(quality.intra_qp==29 && quality.fixed_qp_p==30 && quality.fixed_qp_b==31);
@@ -270,7 +274,7 @@ int main(void)
     assert(a.hevc_param.min_qp_i==8 && a.hevc_param.min_qp_p==19);
     assert(a.hevc_param.max_qp_b==43);
     storage[1].val=18;
-    assert(wave5_set_qp_limits(&a.hevc_param,&master)==-EINVAL);
+    assert(wave5_set_qp_limits(&a.hevc_param,&master)==-ERANGE);
     assert(a.hevc_param.max_qp_b==43 && a.hevc_param.min_qp_p==19);
     struct enc_open_param open={0};
     a.std=W_AVC_ENC; a.h264_cpb_size=1000; a.bit_rate=8192000;
