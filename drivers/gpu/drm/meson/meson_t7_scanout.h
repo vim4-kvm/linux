@@ -65,4 +65,18 @@ static inline void meson_t7_scanout_retire(struct meson_t7_scanout *scanout, boo
 	meson_t7_scanout_advance(scanout, safe, false);
 }
 
+/* The active generation stays scanned while a completed long update drains. */
+static inline void meson_t7_scanout_release_retiring(struct meson_t7_scanout *scanout)
+{
+	unsigned int i;
+
+	if (scanout->faulted)
+		return;
+	for (i = 0; i < MESON_T7_MAX_LAYERS; i++) {
+		if (scanout->retiring[i])
+			drm_framebuffer_put(scanout->retiring[i]);
+		scanout->retiring[i] = NULL;
+	}
+}
+
 #endif

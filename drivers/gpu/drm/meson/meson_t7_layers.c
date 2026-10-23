@@ -94,19 +94,20 @@ static void meson_t7_layer_scale(struct meson_t7_rdma_builder *rdma,
 	meson_t7_layer_write(rdma, base + 8, scaled ? BIT(3) | BIT(2) : 0);
 }
 
+static const struct {
+	u32 ctrl, ctrl2, w0, w1, w2, w3, w4, address, stride, fifo, unpack, dimm;
+} regs[] = {
+	{ 0x1a10, 0x1a2d, 0x1a1b, 0x1a1c, 0x1a1d, 0x1a1e, 0x1a13,
+	  0x1a14, 0x1a15, 0x1a2b, 0x1a2f, 0x1adf },
+	{ 0x1a30, 0x1a4d, 0x1a3b, 0x1a3c, 0x1a3d, 0x1a3e, 0x1a64,
+	  0x1a65, 0x1a66, 0x1a4b, 0x1abd, 0x1acf },
+	{ 0x3d80, 0x3d81, 0x3d88, 0x3d8c, 0x3d90, 0x3d94, 0x3d98,
+	  0x3d99, 0x3d9a, 0x3d9c, 0x3d9f, 0x3da0 },
+};
+
 static int meson_t7_layer_mif(struct meson_t7_rdma_builder *rdma,
 			      const struct meson_t7_osd_layer *layer, unsigned int index)
 {
-	static const struct {
-		u32 ctrl, ctrl2, w0, w1, w2, w3, w4, address, stride, fifo, unpack, dimm;
-	} regs[] = {
-		{ 0x1a10, 0x1a2d, 0x1a1b, 0x1a1c, 0x1a1d, 0x1a1e, 0x1a13,
-		  0x1a14, 0x1a15, 0x1a2b, 0x1a2f, 0x1adf },
-		{ 0x1a30, 0x1a4d, 0x1a3b, 0x1a3c, 0x1a3d, 0x1a3e, 0x1a64,
-		  0x1a65, 0x1a66, 0x1a4b, 0x1abd, 0x1acf },
-		{ 0x3d80, 0x3d81, 0x3d88, 0x3d8c, 0x3d90, 0x3d94, 0x3d98,
-		  0x3d99, 0x3d9a, 0x3d9c, 0x3d9f, 0x3da0 },
-	};
 	u32 format, alpha = layer->alpha >> 8;
 	bool replace = layer->blend == DRM_MODE_BLEND_PIXEL_NONE;
 
@@ -159,6 +160,36 @@ static int meson_t7_layer_mif(struct meson_t7_rdma_builder *rdma,
 	meson_t7_layer_scale(rdma, layer, 0x5a00 + index * 0x40);
 	meson_t7_layer_write(rdma, regs[index].ctrl, alpha << 12 | BIT(2) | BIT(0));
 	return 0;
+}
+
+int meson_t7_osd_layers_flip(u32 *table, unsigned int pairs,
+			     const struct meson_t7_osd_layer *next,
+			     const struct meson_t7_osd_layer *old)
+{
+	struct meson_t7_rdma_builder rdma = { .table = table, .capacity = pairs };
+	unsigned int i;
+
+	for (i = 0; i < MESON_T7_OSD_LAYERS; i++) {
+		const struct meson_t7_osd_layer *a = &next[i], *b = &old[i];
+
+		if (a->enabled != b->enabled)
+			return 0;
+		if (!a->enabled)
+			continue;
+		if (a->format != b->format || a->pitch != b->pitch ||
+		    a->src_x != b->src_x || a->src_y != b->src_y ||
+		    a->src_w != b->src_w || a->src_h != b->src_h ||
+		    a->x != b->x || a->y != b->y ||
+		    a->width != b->width || a->height != b->height ||
+		    a->zpos != b->zpos || a->rotation != b->rotation ||
+		    a->alpha != b->alpha || a->blend != b->blend)
+			return 0;
+		meson_t7_layer_write(&rdma, regs[i].address, a->address >> 4);
+	}
+	if (rdma.used > rdma.capacity)
+		return -ENOSPC;
+	/* At most three writes: shorter than the five-pair M2 address update. */
+	return rdma.used * 8;
 }
 
 int meson_t7_osd_layers_build(u32 *table, unsigned int pairs,

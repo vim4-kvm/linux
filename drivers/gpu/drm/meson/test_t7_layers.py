@@ -164,6 +164,27 @@ int main(void)
     assert((hw[0x1a10]&1) && (hw[0x1a30]&1) && (hw[0x3d80]&1));
     assert(hw[0x1a0d]==(0xffffffff & ~GENMASK(25,24)));
     assert((hw[OSD_PATH_MISC_CTRL]&0xffff)==0x5678);
+    struct meson_t7_osd_layer old[3];
+    memcpy(old,layers,sizeof(old));
+    for (unsigned int i=0;i<3;i++) layers[i].address+=0x10000000;
+    assert(meson_t7_osd_layers_flip(table,3,layers,old)==24);
+    for (unsigned int i=0;i<3;i++) {
+        assert(table[2*i]==regs[i].address);
+        assert(table[2*i+1]==layers[i].address>>4);
+    }
+    /* A pitch/format/geometry/blend change must retain the full drain boundary. */
+    layers[1].pitch+=32;
+    assert(!meson_t7_osd_layers_flip(table,3,layers,old));
+    layers[1].pitch-=32; layers[1].src_y++;
+    assert(!meson_t7_osd_layers_flip(table,3,layers,old));
+    layers[1].src_y--; layers[2].alpha=32768;
+    assert(!meson_t7_osd_layers_flip(table,3,layers,old));
+    layers[2].alpha=65535; layers[0].format=DRM_FORMAT_ARGB8888;
+    assert(!meson_t7_osd_layers_flip(table,3,layers,old));
+    layers[0].format=DRM_FORMAT_XRGB8888;
+    table[4]=0xdeadbeef;
+    assert(meson_t7_osd_layers_flip(table,2,layers,old)==-ENOSPC);
+    assert(table[4]==0xdeadbeef);
     /* Truncated descriptors never overflow their allocation or arm hardware. */
     table[6]=0xdeadbeef;
     assert(meson_t7_osd_layers_build(table,3,layers,1920,1080,0,0)==-ENOSPC);

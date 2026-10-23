@@ -78,6 +78,8 @@ struct meson_t7_handoff {
 	struct meson_t7_modeset *modeset;
 	bool native_modeset;
 	bool managed_sram;
+	bool layers_valid;
+	struct meson_t7_osd_layer layers[MESON_T7_OSD_LAYERS];
 	u32 requested, written, applied;
 	u32 vsync_count;
 	bool faulted;
@@ -214,8 +216,10 @@ vblank:
 	return IRQ_HANDLED;
 }
 
-static void meson_t7_handoff_finish(struct meson_t7_handoff *display, u32 sequence)
+static void meson_t7_handoff_finish(struct meson_t7_handoff *display, u32 sequence, bool slow)
 {
+	u32 start;
+
 	if (!wait_event_timeout(display->wait,
 				READ_ONCE(display->applied) == sequence,
 				msecs_to_jiffies(100))) {
@@ -224,8 +228,20 @@ static void meson_t7_handoff_finish(struct meson_t7_handoff *display, u32 sequen
 		drm_err(&display->drm, "OSD latch timeout; DMA buffers pinned until reboot\n");
 		return;
 	}
-	/* A long multi-layer RDMA may straddle the beginning of active fetch. */
-	meson_t7_scanout_advance(&display->buffers, true, display->managed_sram);
+	meson_t7_scanout_advance(&display->buffers, true, slow);
+	if (!slow)
+		return;
+	/* Do not signal a reusable old buffer until a long RDMA's fetches drain. */
+	start = READ_ONCE(display->vsync_count);
+	if (!wait_event_timeout(display->wait,
+				READ_ONCE(display->vsync_count) != start,
+				msecs_to_jiffies(100))) {
+		WRITE_ONCE(display->faulted, true);
+		meson_t7_scanout_retire(&display->buffers, false);
+		drm_err(&display->drm, "OSD drain timeout; DMA buffers pinned until reboot\n");
+		return;
+	}
+	meson_t7_scanout_release_retiring(&display->buffers);
 }
 
 /* The caller is the serialized atomic commit worker, never the IRQ handler. */
@@ -279,7 +295,7 @@ static void meson_t7_handoff_scanout(struct meson_t7_handoff *display,
 	 * M2 instead arms hardware RDMA ahead of vsync, and requires its completion
 	 * interrupt AND a vsync before retiring the previous allocation.
 	 */
-	meson_t7_handoff_finish(display, sequence);
+	meson_t7_handoff_finish(display, sequence, false);
 }
 
 static void meson_t7_handoff_layer_state(struct drm_plane_state *state,
@@ -319,6 +335,7 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 	unsigned long flags;
 	u32 sequence;
 	int bytes;
+	bool slow;
 
 	if (READ_ONCE(display->faulted))
 		return;
@@ -333,9 +350,14 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 	}
 	if (meson_t7_scanout_acquire(&display->buffers, next))
 		return;
-	bytes = meson_t7_osd_layers_build(display->rdma_table, MESON_T7_RDMA_PAIRS,
-					  layers, mode->hdisplay, mode->vdisplay,
-					  readl(display->paths), readl(display->paths + 4));
+	bytes = display->layers_valid ?
+		meson_t7_osd_layers_flip(display->rdma_table, MESON_T7_RDMA_PAIRS,
+					 layers, display->layers) : 0;
+	slow = !bytes;
+	if (slow)
+		bytes = meson_t7_osd_layers_build(display->rdma_table, MESON_T7_RDMA_PAIRS,
+						  layers, mode->hdisplay, mode->vdisplay,
+						  readl(display->paths), readl(display->paths + 4));
 	if (bytes < 0) {
 		WRITE_ONCE(display->faulted, true);
 		meson_t7_scanout_retire(&display->buffers, false);
@@ -347,7 +369,12 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 	sequence = ++display->requested;
 	meson_t7_handoff_rdma_arm(display);
 	spin_unlock_irqrestore(&display->lock, flags);
-	meson_t7_handoff_finish(display, sequence);
+	meson_t7_handoff_finish(display, sequence, slow);
+	if (!READ_ONCE(display->faulted)) {
+		for (i = 0; i < MESON_T7_OSD_LAYERS; i++)
+			display->layers[i] = layers[i];
+		display->layers_valid = true;
+	}
 }
 
 static void meson_t7_handoff_drain_layers(struct meson_t7_handoff *display)
@@ -572,6 +599,7 @@ static void meson_t7_handoff_enable(struct drm_crtc *crtc,
 
 	if (display->native_modeset) {
 		/* Gate fetch before changing geometry; no stale boot-frame DMA at 4K. */
+		display->layers_valid = false;
 		writel(readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT)) & ~BIT(0),
 		       display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
 		ret = meson_t7_modeset_enable(display->modeset, &new->adjusted_mode);

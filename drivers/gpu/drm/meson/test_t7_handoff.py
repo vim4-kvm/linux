@@ -180,6 +180,7 @@ struct drm_atomic_commit {
 #define msecs_to_jiffies(value) (value)
 #define drm_err(...) ((void)0)
 static bool inject_timeout;
+static bool fail_drain;
 static bool native_writes;
 static bool rdma_first;
 static unsigned int timeout_part;
@@ -241,8 +242,12 @@ static int drm_crtc_vblank_get(struct drm_crtc *crtc) { return 0; }
 static void drm_crtc_vblank_put(struct drm_crtc *crtc) { }
 static unsigned int sent, cancelled;
 static void *last_sent;
+static struct drm_framebuffer *retired_before_event;
 static void drm_crtc_send_vblank_event(struct drm_crtc *crtc, void *event)
-{ sent++; last_sent=event; }
+{
+    if (retired_before_event) assert(retired_before_event->references==1);
+    sent++; last_sent=event;
+}
 static void dma_fence_set_error(struct dma_fence *fence, int error) { fence->error=error; }
 static void dma_fence_signal(struct dma_fence *fence) { fence->signaled=true; }
 static void complete_all(struct completion *completion) { completion->completed++; }
@@ -276,10 +281,11 @@ static void drm_framebuffer_put(struct drm_framebuffer *fb)
     fb->references--;
 }
 #define wait_event_timeout(wait, condition, timeout) ({ \
+    bool missed=inject_timeout || (fail_drain && display->managed_sram && !rdma[0x23]); \
     assert((timeout) == 100); \
     assert(!(condition)); \
     if (display->managed_sram && !rdma[0x23]) { \
-        if (!inject_timeout) meson_t7_handoff_irq(0, display); \
+        if (!missed) meson_t7_handoff_irq(0, display); \
     } else if (display->rdma) { \
         assert(!meson_t7_handoff_rdma_irq(0, display)); \
         if (!inject_timeout || timeout_part == 2) { \
@@ -303,8 +309,8 @@ static void drm_framebuffer_put(struct drm_framebuffer *fb)
         assert(!(condition)); \
         if (!inject_timeout) meson_t7_handoff_irq(0, display); \
     } \
-    assert((bool)(condition) == !inject_timeout); \
-    !inject_timeout; \
+    assert((bool)(condition) == !missed); \
+    !missed; \
 })
 '''
 checks = r'''
@@ -491,26 +497,36 @@ int main(void)
         assert(!meson_t7_handoff_plane_check(p,&rmfb));
     }
     fail_modeset=false; inject_timeout=false;
+    meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
     unsigned int frame_start=vblanks;
     for (unsigned int frame=0;frame<60;frame++) {
-        states[0].fb=frame&1 ? &desktop_b : &desktop_a;
-        meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
+        states[0].fb=frame&1 ? &desktop_a : &desktop_b;
+        retired_before_event=frame&1 ? &desktop_b : &desktop_a;
+        output.event=&event; previously_sent=sent;
+        meson_t7_handoff_flush(&multi.crtc,&multi_commit);
+        assert(sent==previously_sent+1 && !output.event);
+        assert(multi.rdma_bytes==24);
         assert(!multi.faulted && multi.buffers.active[0]==states[0].fb);
         assert(multi.buffers.active[1]==&overlay && multi.buffers.active[2]==&cursor);
-        /* Shared unchanged layers retain active and retiring references. */
-        assert(overlay.references==(frame ? 3U : 2U));
-        assert(cursor.references==(frame ? 3U : 2U));
+        assert(overlay.references==2 && cursor.references==2);
     }
     assert(vblanks-frame_start==60);
+    /* Geometry/blend changes wait an extra boundary before exposing reuse. */
+    states[0].fb=&desktop_b; states[1].alpha=32768;
+    retired_before_event=&desktop_a; output.event=&event;
+    frame_start=vblanks;
+    meson_t7_handoff_flush(&multi.crtc,&multi_commit);
+    assert(vblanks-frame_start==2 && !output.event && multi.rdma_bytes>40);
+    retired_before_event=NULL;
     /* RMFB's stale visible bit must not pass a NULL FB into GEM or the builder. */
     states[2].fb=NULL; states[2].crtc=NULL; states[2].visible=true;
     rmfb.plane=&states[2];
     assert(!meson_t7_handoff_plane_check(&multi.extra_planes[1],&rmfb));
     assert(!states[2].visible);
     meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
-    assert(cursor.references==2 && !multi.buffers.active[2]);
+    assert(cursor.references==1 && !multi.buffers.active[2]);
     meson_t7_handoff_scanout_layers(&multi,&multi_commit,true);
-    assert(cursor.references==1 && overlay.references==2);
+    assert(cursor.references==1 && overlay.references==1);
     assert(!(pipeline[0x1a10]&1) && !(pipeline[0x1a30]&1) && !(pipeline[0x3d80]&1));
     meson_t7_handoff_drain_layers(&multi);
     assert(desktop_a.references==1 && desktop_b.references==1 && overlay.references==1);
@@ -538,15 +554,19 @@ int main(void)
     meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
     states[0].fb=&desktop_b;
     meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
-    inject_timeout=true;
-    meson_t7_handoff_scanout_layers(&multi,&multi_commit,true);
+    /* Missing the post-latch boundary must not send an event or release old DMA. */
+    states[0].fb=&desktop_a;
+    fail_drain=true; output.active=false; output.event=&event; previously_sent=sent;
+    struct dma_fence drain_fence={0}; event.base.fence=&drain_fence;
+    meson_t7_handoff_disable(&multi.crtc,&multi_commit);
     assert(multi.faulted && multi.buffers.faulted);
-    assert(desktop_a.references==2 && desktop_b.references==2 && overlay.references==3);
+    assert(sent==previously_sent && !output.event && drain_fence.error==-EIO);
+    assert(desktop_a.references==1 && desktop_b.references==2 && overlay.references==2);
     rdma[0x15]=RDMA_IRQ_STAT_CHAN1;
     meson_t7_handoff_rdma_irq(0,&multi); meson_t7_handoff_irq(0,&multi);
     meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
-    assert(desktop_a.references==2 && desktop_b.references==2 && overlay.references==3);
-    puts("Three OSD engines: 60 flips/60 vsyncs, RMFB, deferred retirement, blank/drain and fault pinning passed");
+    assert(desktop_a.references==1 && desktop_b.references==2 && overlay.references==2);
+    puts("Three OSD engines: 60 safe events/60 vsyncs, long-update event delay, RMFB and drain fault pinning passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

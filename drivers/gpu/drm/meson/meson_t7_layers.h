@@ -22,4 +22,9 @@ int meson_t7_osd_layers_build(u32 *table, unsigned int pairs,
 			      unsigned int width, unsigned int height,
 			      u32 path_start, u32 path_misc);
 
+/* Return address-only descriptor bytes, zero if a full transaction is needed. */
+int meson_t7_osd_layers_flip(u32 *table, unsigned int pairs,
+			     const struct meson_t7_osd_layer *next,
+			     const struct meson_t7_osd_layer *old);
+
 #endif
