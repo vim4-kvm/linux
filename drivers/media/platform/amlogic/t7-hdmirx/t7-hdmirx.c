@@ -1061,6 +1061,14 @@ static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reas
 		return t7_hdmirx_video_error(reason, "lease-encoding", -ENOLINK);
 	if (rx->dynamic_modes) {
 		ret = t7_hdmirx_measure(rx, yuv420, &measured);
+		/* An aligned FDET can briefly saturate at 0xffffff or report zero
+		 * height even when both reads agree. Discard that frame under a
+		 * live lease. The link worker bounds EAGAIN to one second before
+		 * clearing ready; genuine loss and valid mode changes still stop
+		 * capture immediately, and no malformed frame is published.
+		 */
+		if (ret == -ERANGE && rx->link && READ_ONCE(rx->link->users))
+			ret = -EAGAIN;
 		if (!ret && rx->link && rx->link->users &&
 		    !t7_hdmirx_same_measurement(&measured, &rx->lease_mode))
 			return t7_hdmirx_video_error(reason, "lease-timing", -ENOLINK);

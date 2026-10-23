@@ -197,6 +197,28 @@ int main(void) {
         printf("Measured mode %ux%u pixelclock=%llu passed\n",b->width,b->height,
                (unsigned long long)b->pixelclock);
     }
+    /* A coherent but invalid FDET during a lease drops a frame. It must
+     * never become a timing result, hide physical loss, or poison the next
+     * valid frame. Valid clock changes remain a lease violation.
+     */
+    measured_mode(&modes[0]); link.users=1;
+    t7_hdmirx_read_measurement(&rx,&rx.lease_mode);
+    assert(!t7_hdmirx_read_color(&rx,&rx.lease_color));
+    period(0xffffff);
+    assert(t7_hdmirx_check_video_now(&dev)==-EAGAIN);
+    timing=untouched;
+    assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-EAGAIN);
+    assert(!memcmp(&timing,&untouched,sizeof(timing)));
+    measured_mode(&modes[0]); word(T7_RX_COR_HEIGHT,0); period(0xffffff);
+    assert(t7_hdmirx_check_video_now(&dev)==-EAGAIN);
+    link.ready=false;
+    assert(t7_hdmirx_check_video_now(&dev)==-ENOLINK);
+    link.ready=true; measured_mode(&modes[0]);
+    assert(!t7_hdmirx_check_video_now(&dev));
+    measured_mode(&modes[1]);
+    assert(t7_hdmirx_check_video_now(&dev)==-ENOLINK);
+    link.users=0; measured_mode(&modes[0]); period(0xffffff);
+    assert(t7_hdmirx_check_video_now(&dev)==-ERANGE);
     measured_mode(&modes[0]); word(T7_RX_COR_HBACK,1);
     assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-ERANGE);
     measured_mode(&modes[0]); core[T7_RX_COR_FRAME_STATUS]|=BIT(2);
