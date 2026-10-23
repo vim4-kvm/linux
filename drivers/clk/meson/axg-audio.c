@@ -1468,12 +1468,6 @@ static struct clk_hw *sm1_audio_hw_clks[] = {
 	[AUD_CLKID_EARCRX_DMAC]		= &sm1_earcrx_dmac_clk.hw,
 };
 
-static struct regmap_config axg_audio_regmap_cfg = {
-	.reg_bits	= 32,
-	.val_bits	= 32,
-	.reg_stride	= 4,
-};
-
 static struct clk_regmap tdmout_d =
 	AUD_PCLK_GATE(tdmout_d, AUDIO_CLK_GATE_EN1, 10);
 static struct clk_regmap tdmin_d_sclk_sel = AUD_TDM_SCLK_MUX(in_d, 0xe8);
@@ -1629,6 +1623,16 @@ static const struct regmap_bus t7_audio_regmap_bus = {
 	.fast_io = true,
 };
 
+static const struct regmap_range t7_audio_ranges[] = {
+	regmap_reg_range(0, 0xec),
+	regmap_reg_range(0x100, 0x104),
+};
+
+static const struct regmap_access_table t7_audio_access = {
+	.yes_ranges = t7_audio_ranges,
+	.n_yes_ranges = ARRAY_SIZE(t7_audio_ranges),
+};
+
 struct audioclk_data {
 	struct meson_clk_hw_data hw_clks;
 	const struct audioclk_override *overrides;
@@ -1637,6 +1641,31 @@ struct audioclk_data {
 	const char *rst_drvname;
 	unsigned int max_register;
 };
+
+static struct regmap *axg_audio_map(struct device *dev, const struct audioclk_data *data,
+				    void __iomem *regs)
+{
+	const struct regmap_config config = {
+		.reg_bits = 32,
+		.val_bits = 32,
+		.reg_stride = 4,
+		.max_register = data->max_register,
+		.rd_table = data->overrides ? &t7_audio_access : NULL,
+		.wr_table = data->overrides ? &t7_audio_access : NULL,
+	};
+	struct t7_audio_registers *banks;
+
+	if (!data->overrides)
+		return devm_regmap_init_mmio(dev, regs, &config);
+	banks = devm_kzalloc(dev, sizeof(*banks), GFP_KERNEL);
+	if (!banks)
+		return ERR_PTR(-ENOMEM);
+	banks->core = regs;
+	banks->pads = devm_platform_ioremap_resource(to_platform_device(dev), 1);
+	if (IS_ERR(banks->pads))
+		return ERR_CAST(banks->pads);
+	return devm_regmap_init(dev, &t7_audio_regmap_bus, banks, &config);
+}
 
 static int axg_audio_clkc_probe(struct platform_device *pdev)
 {
@@ -1658,22 +1687,7 @@ static int axg_audio_clkc_probe(struct platform_device *pdev)
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 
-	axg_audio_regmap_cfg.max_register = data->max_register;
-	if (data->overrides) {
-		struct t7_audio_registers *banks;
-
-		banks = devm_kzalloc(dev, sizeof(*banks), GFP_KERNEL);
-		if (!banks)
-			return -ENOMEM;
-		banks->core = regs;
-		banks->pads = devm_platform_ioremap_resource(pdev, 1);
-		if (IS_ERR(banks->pads))
-			return PTR_ERR(banks->pads);
-		map = devm_regmap_init(dev, &t7_audio_regmap_bus, banks,
-				       &axg_audio_regmap_cfg);
-	} else {
-		map = devm_regmap_init_mmio(dev, regs, &axg_audio_regmap_cfg);
-	}
+	map = axg_audio_map(dev, data, regs);
 	if (IS_ERR(map)) {
 		dev_err(dev, "failed to init regmap: %ld\n", PTR_ERR(map));
 		return PTR_ERR(map);
