@@ -23,6 +23,10 @@ static bool allow_t7_power;
 module_param(allow_t7_power, bool, 0600);
 MODULE_PARM_DESC(allow_t7_power, "Allow supervised T7 tests; video open requires power and MDEC tests");
 
+static bool t7_snapshot_only = true;
+module_param(t7_snapshot_only, bool, 0400);
+MODULE_PARM_DESC(t7_snapshot_only, "Restrict T7 to outer DOS steps 1-8 and abort; forbid internal DOS and decode");
+
 static ssize_t power_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
@@ -89,7 +93,7 @@ static ssize_t mdec_test_store(struct device *dev, struct device_attribute *attr
 	if (ret || !run)
 		return -EINVAL;
 	mutex_lock(&vdec->dev_mutex);
-	if (!READ_ONCE(allow_t7_power))
+	if (t7_snapshot_only || !READ_ONCE(allow_t7_power))
 		ret = -EPERM;
 	else if (vdec->dec_ctx || vdec->dec_hw->probe_step || !pm_runtime_suspended(dev))
 		ret = -EBUSY;
@@ -125,7 +129,7 @@ static ssize_t register_step_store(struct device *dev, struct device_attribute *
 	if (ret)
 		return ret;
 	mutex_lock(&vdec->dev_mutex);
-	if (step && !READ_ONCE(allow_t7_power))
+	if ((t7_snapshot_only && step > 8) || (step && !READ_ONCE(allow_t7_power)))
 		ret = -EPERM;
 	else if (vdec->dec_ctx || !pm_runtime_suspended(dev))
 		ret = -EBUSY;
@@ -162,7 +166,8 @@ static int fops_vcodec_open(struct file *file)
 
 	/* udev v4l_id opens a newly registered node. Do not let it power DOS. */
 	if (dec_dev->pvdec_data->has_dbus_ctrl &&
-	    (!READ_ONCE(allow_t7_power) || !READ_ONCE(dec_dev->dec_hw->power_test_passed) ||
+	    (t7_snapshot_only || !READ_ONCE(allow_t7_power) ||
+	     !READ_ONCE(dec_dev->dec_hw->power_test_passed) ||
 	     !READ_ONCE(dec_dev->dec_hw->mdec_test_passed)))
 		return -EPERM;
 
@@ -438,7 +443,8 @@ static int aml_vdec_runtime_resume(struct device *dev)
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
 
 	if (vdec->pvdec_data->has_dbus_ctrl &&
-	    (!READ_ONCE(allow_t7_power) || !READ_ONCE(vdec->dec_hw->power_test_passed) ||
+	    (t7_snapshot_only || !READ_ONCE(allow_t7_power) ||
+	     !READ_ONCE(vdec->dec_hw->power_test_passed) ||
 	     !READ_ONCE(vdec->dec_hw->mdec_test_passed)))
 		return -EPERM;
 	return vdec_enable(vdec->dec_hw);
