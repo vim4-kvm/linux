@@ -55,7 +55,7 @@ struct enc_info {
 };
 struct codec_info { struct enc_info enc_info; };
 struct device { void *data; };
-struct vpu_device { struct device *dev; int hw_lock; };
+struct vpu_device { struct device *dev; int hw_lock; bool legacy_firmware; };
 struct vpu_instance { struct vpu_device *dev; struct codec_info *codec_info; int std; };
 struct frame_buffer { uintptr_t buf_y, buf_cb; };
 static unsigned attempts, fail_at, live, commands;
@@ -65,6 +65,9 @@ static int mutex_lock_interruptible(int *lock) { (void)lock; return 0; }
 static void mutex_unlock(int *lock) { (void)lock; }
 static void pm_runtime_resume_and_get(struct device *dev) { (void)dev; }
 static void pm_runtime_put_sync(struct device *dev) { (void)dev; }
+static void pm_runtime_put_autosuspend(struct device *dev) { (void)dev; }
+static void wave5_vpu_isolate(struct vpu_device *dev, const char *reason, u32 command)
+{ (void)dev; (void)reason; (void)command; }
 static void vpu_write_reg(struct vpu_device *dev, u32 reg, uintptr_t value)
 { (void)dev; (void)reg; (void)value; }
 static int wave5_vdi_allocate_dma_memory(struct vpu_device *dev, struct vpu_buf *vb)

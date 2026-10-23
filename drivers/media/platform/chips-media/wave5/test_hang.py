@@ -11,7 +11,7 @@ hardware = (root / 'wave5-hw.c').read_text()
 selection = encoder[encoder.index('static int wave5_vpu_enc_s_selection('):
                     encoder.index('static int wave5_vpu_enc_encoder_cmd(')]
 release = encoder[encoder.index('static int wave5_vpu_enc_release('):
-                  encoder.index('static const struct v4l2_file_operations')]
+                  encoder.index('static long wave5_vpu_enc_ioctl(')]
 # Compile the real validation prefix through the geometry checks. Later
 # profile/GOP checks are independent and have their own test harnesses.
 validation = hardware[hardware.index('int wave5_vpu_enc_check_open_param('):]
@@ -36,6 +36,7 @@ typedef int32_t s32;
 #define V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE 10
 #define V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE 9
 #define V4L2_SEL_TGT_CROP 0
+#define VPU_INST_STATE_NONE 0
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define IS_ALIGNED(x,a) (!((x) & ((a)-1)))
 #define dev_dbg(...) ((void)0)
@@ -43,16 +44,21 @@ typedef int32_t s32;
 struct v4l2_rect { int left, top; unsigned width, height; };
 struct v4l2_selection { unsigned type, target; struct v4l2_rect r; };
 struct vpu_attr { bool support_hevc10bit_enc, support_avc10bit_enc; };
-struct vpu_device { int product, dev_lock; struct vpu_attr attr; };
+struct vpu_device { int product, dev_lock; struct vpu_attr attr; bool isolated, legacy_firmware; };
 struct v4l2_m2m_ctx { bool running, linked, output, capture; };
 struct vpu_instance {
     struct vpu_device *dev;
-    int std, id;
+    int std, id, state;
     struct { unsigned width, height; } dst_fmt;
     struct v4l2_rect conf_win;
     struct { struct v4l2_m2m_ctx *m2m_ctx; } v4l2_fh;
 };
-struct file { struct vpu_instance *inst; };
+struct file { struct vpu_instance *inst; void *private_data; };
+static bool wave5_vpu_isolated(struct vpu_device *dev) { return dev->isolated; }
+static void wave5_vpu_isolate(struct vpu_device *dev, const char *reason, u32 command)
+{ (void)reason; (void)command; dev->isolated = true; }
+#define v4l2_fh_del(...) ((void)0)
+#define v4l2_fh_exit(...) ((void)0)
 struct enc_wave_param { unsigned internal_bit_depth; };
 struct enc_open_param {
     unsigned pic_width, pic_height, frame_rate_info, bit_rate;
@@ -134,6 +140,14 @@ int main(void)
         assert(!wave5_vpu_enc_release(&file));
         assert(!ctx.running && !ctx.linked && !dev.dev_lock);
     }
+    /* Quarantined close must not release a queue or issue DESTROY. */
+    struct v4l2_m2m_ctx pinned = {.linked=true,.running=true,.output=true,.capture=true};
+    inst.v4l2_fh.m2m_ctx = &pinned;
+    dev.isolated = true;
+    file.private_data = &inst;
+    assert(!wave5_vpu_enc_release(&file));
+    assert(pinned.linked && pinned.running && pinned.output && pinned.capture);
+    assert(!file.private_data && !dev.dev_lock);
     puts("Wave5 selection/firmware geometry (20 cases) and close/IRQ ordering (8 cases) passed");
 }
 '''

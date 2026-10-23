@@ -766,6 +766,14 @@ int wave5_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res)
 		}
 
 		if (*fail_res == WAVE5_SYSERR_VPU_STILL_RUNNING &&
+		    vpu_dev->legacy_firmware) {
+			wave5_vpu_isolate(vpu_dev, "instance destroy still running", 0);
+			pm_runtime_put_autosuspend(inst->dev->dev);
+			mutex_unlock(&vpu_dev->hw_lock);
+			return -ETIMEDOUT;
+		}
+
+		if (*fail_res == WAVE5_SYSERR_VPU_STILL_RUNNING &&
 		    retry++ >= MAX_FIRMWARE_CALL_RETRY) {
 			ret = -ETIMEDOUT;
 			goto unlock_and_return;

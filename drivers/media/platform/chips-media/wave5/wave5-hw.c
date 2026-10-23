@@ -209,9 +209,19 @@ static int wave5_wait_bus_busy(struct vpu_device *vpu_dev, unsigned int addr)
 static int wave5_wait_vpu_busy(struct vpu_device *vpu_dev, unsigned int addr)
 {
 	u32 data;
+	int ret;
 
-	return read_poll_timeout(wave5_vdi_read_register, data, data == 0,
-				 0, VPU_BUSY_CHECK_TIMEOUT, false, vpu_dev, addr);
+	if (wave5_vpu_isolated(vpu_dev))
+		return -EIO;
+	ret = read_poll_timeout(wave5_vdi_read_register, data, data == 0,
+				10, VPU_BUSY_CHECK_TIMEOUT, false, vpu_dev, addr);
+	if (!ret && addr == W5_VPU_BUSY_STATUS &&
+	    wave5_vpu_inject_timeout(vpu_dev, vpu_read_reg(vpu_dev, W5_COMMAND)))
+		ret = -ETIMEDOUT;
+	if (ret)
+		wave5_vpu_isolate(vpu_dev, "command acknowledgment timeout",
+				  vpu_read_reg(vpu_dev, W5_COMMAND));
+	return ret;
 }
 
 static int wave5_wait_vcpu_bus_busy(struct vpu_device *vpu_dev, unsigned int addr)
@@ -306,6 +316,8 @@ static int send_firmware_command(struct vpu_instance *inst, u32 cmd, bool check_
 {
 	int ret;
 
+	if (wave5_vpu_isolated(inst->dev))
+		return -EIO;
 	wave5_bit_issue_command(inst->dev, inst, cmd);
 	ret = wave5_wait_vpu_busy(inst->dev, W5_VPU_BUSY_STATUS);
 	if (ret) {
@@ -331,6 +343,8 @@ static int wave5_send_query(struct vpu_device *vpu_dev, struct vpu_instance *ins
 {
 	int ret;
 
+	if (wave5_vpu_isolated(vpu_dev))
+		return -EIO;
 	vpu_write_reg(vpu_dev, W5_QUERY_OPTION, query_opt);
 	vpu_write_reg(vpu_dev, W5_VPU_BUSY_STATUS, 1);
 	wave5_bit_issue_command(vpu_dev, inst, W5_QUERY);

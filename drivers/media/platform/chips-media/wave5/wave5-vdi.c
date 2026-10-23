@@ -78,6 +78,8 @@ int wave5_vdi_release(struct device *dev)
 
 void wave5_vdi_write_register(struct vpu_device *vpu_dev, u32 addr, u32 data)
 {
+	if (wave5_vpu_isolated(vpu_dev))
+		return;
 	writel(data, vpu_dev->vdb_register + addr);
 }
 
@@ -120,6 +122,8 @@ int wave5_vdi_allocate_dma_memory(struct vpu_device *vpu_dev, struct vpu_buf *vb
 	void *vaddr;
 	dma_addr_t daddr;
 
+	if (wave5_vpu_isolated(vpu_dev))
+		return -EIO;
 	if (!vb->size) {
 		dev_err(vpu_dev->dev, "%s: requested size==0\n", __func__);
 		return -EINVAL;
@@ -136,6 +140,8 @@ int wave5_vdi_allocate_dma_memory(struct vpu_device *vpu_dev, struct vpu_buf *vb
 
 int wave5_vdi_free_dma_memory(struct vpu_device *vpu_dev, struct vpu_buf *vb)
 {
+	if (wave5_vpu_isolated(vpu_dev))
+		return -EBUSY;
 	if (vb->size == 0)
 		return -EINVAL;
 
@@ -202,6 +208,8 @@ void wave5_vdi_free_sram(struct vpu_device *vpu_dev)
 {
 	struct vpu_buf *vb = &vpu_dev->sram_buf;
 
+	if (wave5_vpu_isolated(vpu_dev))
+		return;
 	if (!vb->size || !vb->vaddr)
 		return;
 

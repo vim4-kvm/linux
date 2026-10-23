@@ -41,10 +41,18 @@ int wave5_vpu_wait_interrupt(struct vpu_instance *inst, unsigned int timeout)
 {
 	int ret;
 
+	if (wave5_vpu_isolated(inst->dev))
+		return -EIO;
+	if (inst->dev->legacy_firmware)
+		timeout = min(timeout, 5000U);
 	ret = wait_for_completion_timeout(&inst->irq_done,
 					  msecs_to_jiffies(timeout));
-	if (!ret)
+	if (!ret) {
+		wave5_vpu_isolate(inst->dev, "command completion timeout", 0);
 		return -ETIMEDOUT;
+	}
+	if (wave5_vpu_isolated(inst->dev))
+		return -EIO;
 
 	reinit_completion(&inst->irq_done);
 
@@ -62,6 +70,8 @@ static void wave5_vpu_handle_irq(void *dev_id)
 	int val;
 	unsigned long flags;
 
+	if (wave5_vpu_isolated(dev))
+		return;
 	irq_reason = wave5_vdi_read_register(dev, W5_VPU_VINT_REASON);
 	seq_done = wave5_vdi_read_register(dev, W5_RET_SEQ_DONE_INSTANCE_INFO);
 	cmd_done = wave5_vdi_read_register(dev, W5_RET_QUEUE_CMD_DONE_INST);
@@ -114,6 +124,8 @@ static irqreturn_t wave5_vpu_irq(int irq, void *dev_id)
 {
 	struct vpu_device *dev = dev_id;
 
+	if (wave5_vpu_isolated(dev))
+		return IRQ_HANDLED;
 	if (wave5_vdi_read_register(dev, W5_VPU_VPU_INT_STS)) {
 		wave5_vpu_handle_irq(dev);
 		return IRQ_WAKE_THREAD;
@@ -130,7 +142,7 @@ static irqreturn_t wave5_vpu_irq_thread(int irq, void *dev_id)
 
 	mutex_lock(&dev->irq_lock);
 	list_for_each_entry_safe(inst, tmp, &dev->instances, list) {
-		while (kfifo_len(&inst->irq_status)) {
+		while (!wave5_vpu_isolated(dev) && kfifo_len(&inst->irq_status)) {
 			ret = kfifo_out(&inst->irq_status, &irq_status, sizeof(int));
 			if (!ret)
 				break;
@@ -147,6 +159,8 @@ static void wave5_vpu_irq_work_fn(struct kthread_work *work)
 {
 	struct vpu_device *dev = container_of(work, struct vpu_device, work);
 
+	if (wave5_vpu_isolated(dev))
+		return;
 	if (wave5_vdi_read_register(dev, W5_VPU_VPU_INT_STS))
 		wave5_vpu_handle_irq(dev);
 }
@@ -177,7 +191,7 @@ static int irq_thread(void *data)
 
 		mutex_lock(&dev->irq_lock);
 		list_for_each_entry_safe(inst, tmp, &dev->instances, list) {
-			while (kfifo_len(&inst->irq_status)) {
+			while (!wave5_vpu_isolated(dev) && kfifo_len(&inst->irq_status)) {
 				ret = kfifo_out(&inst->irq_status, &irq_status, sizeof(int));
 				if (!ret)
 					break;
@@ -228,6 +242,8 @@ static __maybe_unused int wave5_pm_suspend(struct device *dev)
 {
 	struct vpu_device *vpu = dev_get_drvdata(dev);
 
+	if (wave5_vpu_isolated(vpu))
+		return -EBUSY;
 	/* T7 keeps clocks running until genpd completes its power-off sequence. */
 	if (vpu->legacy_firmware)
 		return 0;
@@ -248,6 +264,8 @@ static __maybe_unused int wave5_pm_resume(struct device *dev)
 	struct vpu_device *vpu = dev_get_drvdata(dev);
 	int ret = 0;
 
+	if (wave5_vpu_isolated(vpu))
+		return -EIO;
 	/* T7 probe owns the clocks before asking genpd to power the block on. */
 	if (vpu->legacy_firmware)
 		return 0;
@@ -305,6 +323,7 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 	mutex_init(&dev->hw_lock);
 	mutex_init(&dev->irq_lock);
 	spin_lock_init(&dev->irq_spinlock);
+	wave5_vpu_isolation_init(dev);
 	dev_set_drvdata(&pdev->dev, dev);
 	dev->dev = &pdev->dev;
 	dev->legacy_firmware = match_data->legacy_firmware;
@@ -446,6 +465,7 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 		wave5_vpu_sleep_wake(&pdev->dev, true, NULL, 0);
 	}
 
+	dev->isolation_ready = true;
 	return 0;
 
 err_enc_unreg:
@@ -496,6 +516,14 @@ static void wave5_vpu_remove(struct platform_device *pdev)
 	const struct wave5_match_data *match_data = device_get_match_data(&pdev->dev);
 	bool stopped = true;
 
+	/* An isolated module is pinned and userspace unbind is disabled. */
+	if (wave5_vpu_isolated(dev)) {
+		dev_err(dev->dev, "isolated device retains DMA storage until reboot\n");
+		return;
+	}
+	dev->isolation_ready = false;
+	cancel_delayed_work_sync(&dev->job_timeout_work);
+	cancel_work_sync(&dev->isolation_work);
 	wave5_vpu_enc_unregister_device(dev);
 	wave5_vpu_dec_unregister_device(dev);
 	v4l2_device_unregister(&dev->v4l2_dev);
@@ -541,6 +569,15 @@ static void wave5_vpu_remove(struct platform_device *pdev)
 	ida_destroy(&dev->inst_ida);
 }
 
+static void wave5_vpu_shutdown(struct platform_device *pdev)
+{
+	struct vpu_device *dev = dev_get_drvdata(&pdev->dev);
+
+	/* No firmware waits, power collapse or reset on the quarantine path. */
+	if (wave5_vpu_isolated(dev))
+		dev_info(dev->dev, "shutdown: retaining quarantined DMA storage\n");
+}
+
 static const struct wave5_match_data ti_wave521c_data = {
 	.flags = WAVE5_IS_ENC | WAVE5_IS_DEC,
 	.fw_name = "cnm/wave521c_k3_codec_fw.bin",
@@ -568,11 +605,17 @@ static struct platform_driver wave5_vpu_driver = {
 		.name = VPU_PLATFORM_DEVICE_NAME,
 		.of_match_table = of_match_ptr(wave5_dt_ids),
 		.pm = &wave5_pm_ops,
+		.dev_groups = (const struct attribute_group *[]) {
+			&wave5_isolation_group, NULL,
+		},
+		.suppress_bind_attrs = true,
 		},
 	.probe = wave5_vpu_probe,
 	.remove = wave5_vpu_remove,
+	.shutdown = wave5_vpu_shutdown,
 };
 
 module_platform_driver(wave5_vpu_driver);
 MODULE_DESCRIPTION("chips&media VPU V4L2 driver");
 MODULE_LICENSE("Dual BSD/GPL");
+MODULE_IMPORT_NS("DMA_BUF");
