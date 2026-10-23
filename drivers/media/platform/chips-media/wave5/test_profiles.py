@@ -467,6 +467,17 @@ int main(void)
     assert(!set(&b,V4L2_CID_MPEG_VIDEO_BITRATE,2000000));
     assert(a.bit_rate==0 && b.bit_rate==2000000);
     a.state=VPU_INST_STATE_PIC_RUN; a.std=W_AVC_ENC; a.h264_cpb_size=0;
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_AU_DELIMITER,0)==-EBUSY);
+    assert(!a.enc_change_mask);
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR,1));
+    assert(a.enc_change_mask==ENC_CHANGE_INTRA);
+    a.enc_change_mask=0; a.std=W_HEVC_ENC;
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR,1)==-EBUSY);
+    assert(!a.enc_change_mask);
+    dev.legacy_firmware=false;
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_AU_DELIMITER,0));
+    assert(a.enc_change_mask==ENC_CHANGE_PICTURE);
+    a.enc_change_mask=0; a.std=W_AVC_ENC; dev.legacy_firmware=true;
     assert(!set(&a,V4L2_CID_MPEG_VIDEO_BITRATE,4000000));
     assert(a.bit_rate==4000000 && a.enc_change_mask==(ENC_CHANGE_BITRATE|ENC_CHANGE_RC));
     a.enc_change_mask=0;

@@ -944,6 +944,13 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	u32 gop_size;
 	int ret;
 
+	/* Legacy firmware has not demonstrated these in-stream header changes. */
+	if (inst->dev->legacy_firmware &&
+	    (ctrl->id == V4L2_CID_MPEG_VIDEO_AU_DELIMITER ||
+	     (ctrl->id == V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR &&
+	      inst->std == W_HEVC_ENC)))
+		mask = 0;
+
 	if ((ctrl->id >= V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP &&
 	     ctrl->id <= V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L6_BR) ||
 	    (ctrl->id >= V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_MIN_QP &&
