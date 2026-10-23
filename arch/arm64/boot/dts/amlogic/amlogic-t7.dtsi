@@ -4,6 +4,8 @@
  */
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/gpio/amlogic,t7-periphs-pinctrl.h>
 #include <dt-bindings/power/amlogic,t7-pwrc.h>
 #include "amlogic-t7-reset.h"
 #include <dt-bindings/clock/amlogic,t7-scmi.h>
@@ -2022,7 +2024,8 @@
 			 <&reset RESET_HDMITXPHY>;
 		reset-names = "hdmitx", "phy";
 		#sound-dai-cells = <0>;
-		pinctrl-0 = <&hdmitx_hpd_pins>, <&hdmitx_ddc_pins>;
+		hpd-gpios = <&gpio GPIOW_15 GPIO_ACTIVE_HIGH>;
+		pinctrl-0 = <&hdmitx_ddc_pins>;
 		pinctrl-names = "default";
 		status = "disabled";
 

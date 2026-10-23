@@ -50,9 +50,82 @@ int main(void)
     puts("TX firmware transport: TOP32/COR8 read and write arguments passed");
 }
 '''
-with tempfile.TemporaryDirectory() as tmp:
-    c = Path(tmp) / 'transport.c'
-    c.write_text(program)
-    binary = Path(tmp) / 'transport'
-    subprocess.run(['cc', '-Wno-overflow', str(c), '-o', str(binary)], check=True)
-    subprocess.run([str(binary)], check=True)
+def run_test(name, program):
+    with tempfile.TemporaryDirectory() as tmp:
+        c = Path(tmp) / (name + '.c')
+        c.write_text(program)
+        binary = Path(tmp) / name
+        subprocess.run(['cc', '-Wno-overflow', str(c), '-o', str(binary)], check=True)
+        subprocess.run([str(binary)], check=True)
+
+
+run_test('transport', program)
+hpd = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+enum drm_connector_status {
+    connector_status_connected, connector_status_disconnected, connector_status_unknown
+};
+struct drm_connector { int unused; };
+struct drm_bridge { int unused; };
+struct work_struct { int unused; };
+struct delayed_work { struct work_struct work; };
+struct gpio_desc { int level; };
+struct meson_hdmitx21 {
+    struct drm_bridge bridge;
+    struct gpio_desc *hpd;
+    struct delayed_work hpd_work;
+    enum drm_connector_status hpd_sample, hpd_reported;
+    bool hpd_polling;
+};
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define to_delayed_work(ptr) container_of(ptr, struct delayed_work, work)
+#define bridge_to_hdmitx(ptr) container_of(ptr, struct meson_hdmitx21, bridge)
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x, v) ((x) = (v))
+#define msecs_to_jiffies(x) (x)
+static int queued, cancelled, notifications;
+static enum drm_connector_status notified;
+static int gpiod_get_value_cansleep(struct gpio_desc *gpio) { return gpio->level; }
+static void schedule_delayed_work(struct delayed_work *w, int delay) { queued++; }
+static void cancel_delayed_work_sync(struct delayed_work *w) { cancelled++; }
+static void drm_bridge_hpd_notify(struct drm_bridge *b, enum drm_connector_status s)
+{ notifications++; notified = s; }
+'''
+hpd += functions('static enum drm_connector_status\nmeson_hdmitx21_bridge_detect',
+                 'static const struct drm_edid *')
+hpd += functions('static void meson_hdmitx21_hpd_work',
+                 'static void meson_hdmitx21_monitor_cleanup')
+hpd += r'''
+int main(void)
+{
+    struct gpio_desc gpio = {0};
+    struct meson_hdmitx21 tx = {.hpd = &gpio};
+    meson_hdmitx21_monitor_hpd_enable(&tx.bridge);
+    assert(queued == 1 && tx.hpd_polling);
+    meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    assert(!notifications);
+    meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    assert(notifications == 1 && notified == connector_status_disconnected);
+    gpio.level = 1; meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    gpio.level = 0; meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    gpio.level = 1; meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    assert(notifications == 1); /* bouncing does not produce a plug event */
+    meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    assert(notifications == 2 && notified == connector_status_connected);
+    gpio.level = -5;
+    meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    assert(notifications == 2); /* GPIO read failures are not unplug events */
+    gpio.level = 0;
+    meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    meson_hdmitx21_hpd_work(&tx.hpd_work.work);
+    assert(notifications == 3 && notified == connector_status_disconnected);
+    meson_hdmitx21_monitor_hpd_disable(&tx.bridge);
+    assert(cancelled == 1 && !tx.hpd_polling);
+    puts("HPD: cold unplug, bounce, plug, read error, unplug and synchronous stop passed");
+}
+'''
+run_test('hpd', hpd)

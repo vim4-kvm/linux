@@ -13,6 +13,7 @@
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -22,6 +23,7 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
+#include <linux/workqueue.h>
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
@@ -179,6 +181,11 @@ struct meson_hdmitx21 {
 	bool audio_enabled;
 	struct hdmi_codec_params audio_params;
 	int pixel_khz;
+	struct gpio_desc *hpd;
+	struct delayed_work hpd_work;
+	enum drm_connector_status hpd_sample, hpd_reported;
+	bool hpd_polling;
+	bool boot_monitor;
 };
 
 static inline struct meson_hdmitx21 *bridge_to_hdmitx(struct drm_bridge *bridge)
@@ -440,6 +447,17 @@ static const struct i2c_algorithm meson_hdmitx21_i2c_algo = {
 	.functionality = meson_hdmitx21_i2c_func,
 };
 
+static int meson_hdmitx21_add_ddc(struct meson_hdmitx21 *tx)
+{
+	mutex_init(&tx->ddc_lock);
+	tx->ddc.owner = THIS_MODULE;
+	tx->ddc.algo = &meson_hdmitx21_i2c_algo;
+	tx->ddc.dev.parent = tx->dev;
+	strscpy(tx->ddc.name, "meson-hdmitx21-ddc", sizeof(tx->ddc.name));
+	i2c_set_adapdata(&tx->ddc, tx);
+	return devm_i2c_add_adapter(tx->dev, &tx->ddc);
+}
+
 /* Controller */
 
 static void meson_hdmitx21_phy_bandgap(struct meson_hdmitx21 *tx)
@@ -457,8 +475,8 @@ static void meson_hdmitx21_hw_init(struct meson_hdmitx21 *tx)
 	top_write(tx, TOP_INTR_STAT_CLR, 0x1ff);
 	/* audio mclk select, i2s, tmds and pixel clocks on */
 	top_write(tx, TOP_CLK_CNTL, 0x0000200f);
-	top_write(tx, TOP_INTR_MASKN, top_read(tx, TOP_INTR_MASKN) |
-		  TOP_INTR_HPD_RISE | TOP_INTR_HPD_FALL);
+	/* HPD uses the GPIO input; no TOP interrupt consumer is installed. */
+	top_write(tx, TOP_INTR_MASKN, 0);
 	/* DDC internal clock divider */
 	top_write(tx, TOP_INFILTER, 0x01000000);
 	cor_update(tx, AON_CYP_CTL, 0x3, 0x2);
@@ -762,8 +780,11 @@ meson_hdmitx21_bridge_detect(struct drm_bridge *bridge,
 {
 	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
 
-	return top_read(tx, TOP_STAT0) & TOP_STAT0_HPD ?
-		connector_status_connected : connector_status_disconnected;
+	int level = gpiod_get_value_cansleep(tx->hpd);
+
+	if (level < 0)
+		return connector_status_unknown;
+	return level ? connector_status_connected : connector_status_disconnected;
 }
 
 static const struct drm_edid *
@@ -773,9 +794,10 @@ meson_hdmitx21_bridge_edid_read(struct drm_bridge *bridge,
 	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
 	const struct drm_edid *drm_edid;
 
-	meson_hdmitx21_phy_bandgap(tx);
+	if (!tx->boot_monitor)
+		meson_hdmitx21_phy_bandgap(tx);
 	drm_edid = drm_edid_read_ddc(connector, &tx->ddc);
-	if (!drm_edid) {
+	if (!drm_edid && !tx->boot_monitor) {
 		/* retry once after a DDC glitch filter reset */
 		top_pulse(tx, TOP_SW_RESET_GLITCH);
 		drm_edid = drm_edid_read_ddc(connector, &tx->ddc);
@@ -863,21 +885,49 @@ static void meson_hdmitx21_bridge_atomic_disable(struct drm_bridge *bridge,
 	cor_write(tx, TPI_INFO_EN, 0);
 }
 
-static void meson_hdmitx21_bridge_hpd_enable(struct drm_bridge *bridge)
+/* GPIOW15 is the T7 HPD level. TOP_STAT0 bit 0 is not a cable indication.
+ * Polling keeps the firmware pin/IRQ routing out of the handoff experiment.
+ */
+static void meson_hdmitx21_hpd_work(struct work_struct *work)
 {
-	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
+	struct meson_hdmitx21 *tx = container_of(to_delayed_work(work),
+						struct meson_hdmitx21, hpd_work);
+	enum drm_connector_status status;
 
-	top_write(tx, TOP_INTR_STAT_CLR, TOP_INTR_HPD_RISE | TOP_INTR_HPD_FALL);
-	top_write(tx, TOP_INTR_MASKN, top_read(tx, TOP_INTR_MASKN) |
-		  TOP_INTR_HPD_RISE | TOP_INTR_HPD_FALL);
+	status = meson_hdmitx21_bridge_detect(&tx->bridge, NULL);
+	if (status != connector_status_unknown && status == tx->hpd_sample &&
+	    status != tx->hpd_reported) {
+		tx->hpd_reported = status;
+		drm_bridge_hpd_notify(&tx->bridge, status);
+	}
+	tx->hpd_sample = status;
+	if (READ_ONCE(tx->hpd_polling))
+		schedule_delayed_work(&tx->hpd_work, msecs_to_jiffies(100));
 }
 
-static void meson_hdmitx21_bridge_hpd_disable(struct drm_bridge *bridge)
+static void meson_hdmitx21_monitor_hpd_enable(struct drm_bridge *bridge)
 {
 	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
 
-	top_write(tx, TOP_INTR_MASKN, top_read(tx, TOP_INTR_MASKN) &
-		  ~(TOP_INTR_HPD_RISE | TOP_INTR_HPD_FALL));
+	tx->hpd_sample = connector_status_unknown;
+	tx->hpd_reported = connector_status_unknown;
+	WRITE_ONCE(tx->hpd_polling, true);
+	schedule_delayed_work(&tx->hpd_work, 0);
+}
+
+static void meson_hdmitx21_monitor_hpd_disable(struct drm_bridge *bridge)
+{
+	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
+
+	WRITE_ONCE(tx->hpd_polling, false);
+	cancel_delayed_work_sync(&tx->hpd_work);
+}
+
+static void meson_hdmitx21_monitor_cleanup(void *data)
+{
+	struct meson_hdmitx21 *tx = data;
+
+	meson_hdmitx21_monitor_hpd_disable(&tx->bridge);
 }
 
 static const struct drm_bridge_funcs meson_hdmitx21_bridge_funcs = {
@@ -891,47 +941,12 @@ static const struct drm_bridge_funcs meson_hdmitx21_bridge_funcs = {
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
 	.atomic_create_state = drm_atomic_helper_bridge_create_state,
-	.hpd_enable = meson_hdmitx21_bridge_hpd_enable,
-	.hpd_disable = meson_hdmitx21_bridge_hpd_disable,
+	.hpd_enable = meson_hdmitx21_monitor_hpd_enable,
+	.hpd_disable = meson_hdmitx21_monitor_hpd_disable,
 	.hdmi_audio_prepare = meson_hdmitx21_audio_prepare,
 	.hdmi_audio_shutdown = meson_hdmitx21_audio_shutdown,
 	.hdmi_audio_mute_stream = meson_hdmitx21_audio_mute_stream,
 };
-
-static irqreturn_t meson_hdmitx21_irq(int irq, void *dev_id)
-{
-	struct meson_hdmitx21 *tx = dev_id;
-	u32 stat;
-
-	stat = top_read(tx, TOP_INTR_STAT);
-	if (!stat)
-		return IRQ_NONE;
-	top_write(tx, TOP_INTR_STAT_CLR, stat);
-
-	return stat & (TOP_INTR_HPD_RISE | TOP_INTR_HPD_FALL) ?
-		IRQ_WAKE_THREAD : IRQ_HANDLED;
-}
-
-static irqreturn_t meson_hdmitx21_irq_thread(int irq, void *dev_id)
-{
-	struct meson_hdmitx21 *tx = dev_id;
-	u32 hpd, prev;
-	int i;
-
-	/* debounce: wait until two reads 100 ms apart agree */
-	prev = top_read(tx, TOP_STAT0) & TOP_STAT0_HPD;
-	for (i = 0; i < 10; i++) {
-		msleep(100);
-		hpd = top_read(tx, TOP_STAT0) & TOP_STAT0_HPD;
-		if (hpd == prev)
-			break;
-		prev = hpd;
-	}
-	drm_bridge_hpd_notify(&tx->bridge,
-			      meson_hdmitx21_bridge_detect(&tx->bridge, NULL));
-
-	return IRQ_HANDLED;
-}
 
 /*
  * The handoff bridge owns no modesetting state. In particular it must never
@@ -984,12 +999,29 @@ static const struct drm_bridge_funcs meson_hdmitx21_boot_funcs = {
 	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 };
 
+/* Observe DDC/HPD without changing the firmware's video, PHY or PLL.
+ * EDID can enumerate 4K, but mode_valid accepts only the boot timing.
+ */
+static const struct drm_bridge_funcs meson_hdmitx21_monitor_funcs = {
+	.attach = meson_hdmitx21_boot_attach,
+	.detect = meson_hdmitx21_bridge_detect,
+	.edid_read = meson_hdmitx21_bridge_edid_read,
+	.mode_valid = meson_hdmitx21_boot_mode_valid,
+	.hpd_enable = meson_hdmitx21_monitor_hpd_enable,
+	.hpd_disable = meson_hdmitx21_monitor_hpd_disable,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+};
+
 static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct meson_hdmitx21 *tx;
 	struct resource *top, *cor;
+	bool monitor = of_property_present(dev->of_node, "amlogic,boot-monitor");
 	u32 status, active, tpi;
+	int ret;
 
 	top = platform_get_resource_byname(pdev, IORESOURCE_MEM, "top");
 	cor = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cor");
@@ -1000,6 +1032,7 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	    !devm_request_mem_region(dev, cor->start, resource_size(cor), dev_name(dev)))
 		return -EBUSY;
 	tx = devm_drm_bridge_alloc(dev, struct meson_hdmitx21, bridge,
+				   monitor ? &meson_hdmitx21_monitor_funcs :
 				   &meson_hdmitx21_boot_funcs);
 	if (IS_ERR(tx))
 		return PTR_ERR(tx);
@@ -1019,7 +1052,23 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	tx->bridge.of_node = dev->of_node;
 	tx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_MODES;
 	tx->bridge.type = DRM_MODE_CONNECTOR_HDMIA;
-	return devm_drm_bridge_add(dev, &tx->bridge);
+	if (monitor) {
+		tx->boot_monitor = true;
+		tx->hpd = devm_gpiod_get(dev, "hpd", GPIOD_IN);
+		if (IS_ERR(tx->hpd))
+			return dev_err_probe(dev, PTR_ERR(tx->hpd), "No HPD GPIO\n");
+		INIT_DELAYED_WORK(&tx->hpd_work, meson_hdmitx21_hpd_work);
+		ret = meson_hdmitx21_add_ddc(tx);
+		if (ret)
+			return ret;
+		tx->bridge.ddc = &tx->ddc;
+		tx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID | DRM_BRIDGE_OP_HPD;
+	}
+	ret = devm_drm_bridge_add(dev, &tx->bridge);
+	if (ret || !monitor)
+		return ret;
+	/* Stop work before the managed bridge is removed. */
+	return devm_add_action_or_reset(dev, meson_hdmitx21_monitor_cleanup, tx);
 }
 
 static int meson_hdmitx21_probe(struct platform_device *pdev)
@@ -1028,7 +1077,7 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 	struct meson_hdmitx21 *tx;
 	struct reset_control *rst;
 	struct resource *top, *cor;
-	int irq, ret;
+	int ret;
 
 	if (of_property_present(dev->of_node, "amlogic,boot-handoff"))
 		return meson_hdmitx21_boot_probe(pdev);
@@ -1039,8 +1088,11 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 		return PTR_ERR(tx);
 	tx->dev = dev;
 	platform_set_drvdata(pdev, tx);
-	mutex_init(&tx->ddc_lock);
 	mutex_init(&tx->audio_lock);
+	tx->hpd = devm_gpiod_get(dev, "hpd", GPIOD_IN);
+	if (IS_ERR(tx->hpd))
+		return dev_err_probe(dev, PTR_ERR(tx->hpd), "No HPD GPIO\n");
+	INIT_DELAYED_WORK(&tx->hpd_work, meson_hdmitx21_hpd_work);
 
 	top = platform_get_resource_byname(pdev, IORESOURCE_MEM, "top");
 	cor = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cor");
@@ -1071,21 +1123,7 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 		tx->next_bridge = NULL;
 	}
 
-	tx->ddc.owner = THIS_MODULE;
-	tx->ddc.algo = &meson_hdmitx21_i2c_algo;
-	tx->ddc.dev.parent = dev;
-	strscpy(tx->ddc.name, "meson-hdmitx21-ddc", sizeof(tx->ddc.name));
-	i2c_set_adapdata(&tx->ddc, tx);
-	ret = devm_i2c_add_adapter(dev, &tx->ddc);
-	if (ret)
-		return ret;
-
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
-		return irq;
-	ret = devm_request_threaded_irq(dev, irq, meson_hdmitx21_irq,
-					meson_hdmitx21_irq_thread, IRQF_ONESHOT,
-					dev_name(dev), tx);
+	ret = meson_hdmitx21_add_ddc(tx);
 	if (ret)
 		return ret;
 
@@ -1107,7 +1145,7 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	return 0;
+	return devm_add_action_or_reset(dev, meson_hdmitx21_monitor_cleanup, tx);
 }
 
 static const struct of_device_id meson_hdmitx21_of_match[] = {

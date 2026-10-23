@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Sink monitoring experiment. Video timing remains the fixed firmware mode. */
+#include "amlogic-t7-a311d2-khadas-vim4-display-m1.dts"
+
+&hdmi_tx {
+	amlogic,boot-monitor;
+	pinctrl-0 = <&hdmitx_ddc_pins>;
+	pinctrl-names = "default";
+};
