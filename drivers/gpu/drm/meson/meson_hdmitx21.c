@@ -869,6 +869,8 @@ meson_hdmitx21_bridge_mode_valid(struct drm_bridge *bridge,
 	if (status != MODE_OK) {
 		if (status == MODE_NOCLOCK)
 			reason = "pixel clock outside 25.175..594MHz or VCO outside 3..6GHz";
+		else if (status == MODE_VSYNC)
+			reason = "refresh below 23Hz exceeds the buffer-retirement deadline";
 		else if (status == MODE_NO_INTERLACE || status == MODE_NO_DBLESCAN)
 			reason = "only progressive single-scan timing is implemented";
 		else
@@ -890,8 +892,10 @@ meson_hdmitx21_bridge_mode_valid(struct drm_bridge *bridge,
 			    info->max_tmds_clock);
 		return MODE_CLOCK_HIGH;
 	}
-	if (drm_mode_is_420_only(info, mode))
+	if (drm_mode_is_420_only(info, mode)) {
+		drm_dbg_kms(bridge->dev, "Reject 4:2:0-only timing on the RGB888 path\n");
 		return MODE_BAD;
+	}
 
 	return MODE_OK;
 }

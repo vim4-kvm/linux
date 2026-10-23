@@ -114,7 +114,7 @@ static void arm_smccc_smc(u32 fn,u32 op,u32 wr,u32 enc,u32 a,u32 b,u32 c,u32 d,
 #define DRM_MODE_FLAG_INTERLACE 16
 #define DRM_MODE_FLAG_DBLSCAN 32
 enum drm_mode_status {MODE_OK,MODE_NO_INTERLACE,MODE_NO_DBLESCAN,MODE_BAD,
-    MODE_BAD_HVALUE,MODE_BAD_VVALUE,MODE_H_ILLEGAL,MODE_V_ILLEGAL,MODE_NOCLOCK};
+    MODE_BAD_HVALUE,MODE_BAD_VVALUE,MODE_H_ILLEGAL,MODE_V_ILLEGAL,MODE_NOCLOCK,MODE_VSYNC};
 '''
 hw_t7 = (vendor / 'hw_t7.c').read_text()
 venc_source = (vendor / 'enc_cfg_hw.c').read_text()
@@ -187,6 +187,9 @@ for name, vic, pixel, h, hs, he, ht, v, vs, ve, vt in modes:
 body += '''{struct meson_t7_clock clock;
 assert(meson_t7_clock_calculate(0,&clock)==-ERANGE);
 assert(meson_t7_clock_calculate(594001,&clock)==-ERANGE);}
+{struct drm_display_mode mode={25175,640,656,752,800,480,490,492,2000,0};
+assert(meson_t7_mode_valid(&mode)==MODE_VSYNC);
+mode.vtotal=1311;assert(meson_t7_mode_valid(&mode)==MODE_OK);}
 return 0;}
 '''
 with tempfile.TemporaryDirectory(prefix='t7-modeset-') as directory:

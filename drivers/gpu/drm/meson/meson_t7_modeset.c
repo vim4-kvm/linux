@@ -75,6 +75,9 @@ enum drm_mode_status meson_t7_mode_valid(const struct drm_display_mode *mode)
 		return MODE_V_ILLEGAL;
 	if (meson_t7_clock_calculate(mode->clock, &clock))
 		return MODE_NOCLOCK;
+	/* Leave room for two frame boundaries inside the 100ms latch deadline. */
+	if (mode->clock * 1000 < 23 * mode->htotal * mode->vtotal)
+		return MODE_VSYNC;
 	return MODE_OK;
 }
 
