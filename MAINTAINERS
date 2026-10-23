@@ -1446,6 +1446,7 @@ F:	drivers/gpu/drm/meson/test_t7_fb.py
 F:	drivers/gpu/drm/meson/test_t7_handoff.py
 F:	drivers/gpu/drm/meson/test_t7_layers.py
 F:	drivers/gpu/drm/meson/test_t7_osd.py
+F:	drivers/gpu/drm/meson/test_t7_producer_layouts.py
 F:	drivers/gpu/drm/meson/test_t7_scanout.py
 F:	drivers/gpu/drm/meson/test_t7_sram.py
 
