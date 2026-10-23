@@ -62,6 +62,37 @@ int main(void)
     assert(meson_t7_scanout_acquire(&owner, next) == -EIO);
     assert(desktop.refs == 3 && cursor.refs == 2 && video.refs == 3 && decoded.refs == 2);
     assert(owner.active[1] == &cursor && owner.pending[1] == NULL);
+
+    /* Multi-layer tables can cross active fetch: retain one extra generation. */
+    struct meson_t7_scanout pipelined = {0};
+    struct drm_framebuffer a = {1}, b = {1}, c = {1};
+    for (unsigned int i = 0; i < MESON_T7_MAX_LAYERS; i++) next[i] = &a;
+    assert(!meson_t7_scanout_acquire(&pipelined, next));
+    meson_t7_scanout_advance(&pipelined, true, true);
+    for (unsigned int i = 0; i < MESON_T7_MAX_LAYERS; i++) next[i] = &b;
+    assert(!meson_t7_scanout_acquire(&pipelined, next));
+    meson_t7_scanout_advance(&pipelined, true, true);
+    assert(a.refs == 6 && b.refs == 6);
+    for (unsigned int i = 0; i < MESON_T7_MAX_LAYERS; i++) next[i] = &c;
+    assert(!meson_t7_scanout_acquire(&pipelined, next));
+    meson_t7_scanout_advance(&pipelined, true, true);
+    assert(a.refs == 1 && b.refs == 6 && c.refs == 6);
+    for (unsigned int i = 0; i < MESON_T7_MAX_LAYERS; i++) next[i] = &a;
+    assert(!meson_t7_scanout_acquire(&pipelined, next));
+    meson_t7_scanout_advance(&pipelined, false, true);
+    meson_t7_scanout_retire(&pipelined, true);
+    assert(a.refs == 6 && b.refs == 6 && c.refs == 6);
+    assert(meson_t7_scanout_acquire(&pipelined, next) == -EIO);
+
+    struct meson_t7_scanout disabled = {0};
+    assert(!meson_t7_scanout_acquire(&disabled, next));
+    meson_t7_scanout_advance(&disabled, true, true);
+    for (unsigned int i = 0; i < MESON_T7_MAX_LAYERS; i++) next[i] = NULL;
+    assert(!meson_t7_scanout_acquire(&disabled, next));
+    meson_t7_scanout_advance(&disabled, true, true);
+    assert(a.refs == 11); /* Blank latched, but the previous fetch may still run. */
+    meson_t7_scanout_retire(&disabled, true); /* One further vsync drains it. */
+    assert(a.refs == 6);
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

@@ -38,6 +38,7 @@
 #include "meson_t7_handoff.h"
 #include "meson_t7_modeset.h"
 #include "meson_t7_scanout.h"
+#include "meson_t7_layers.h"
 
 #define HANDOFF_WIDTH	1920
 #define HANDOFF_HEIGHT	1080
@@ -53,13 +54,16 @@
 struct meson_t7_handoff {
 	struct drm_device drm;
 	struct drm_plane plane;
+	struct drm_plane extra_planes[2];
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
 	void __iomem *osd;
 	void __iomem *extra_osd[2];
 	void __iomem *venc;
 	void __iomem *rdma;
+	void __iomem *paths;
 	u32 *rdma_table;
+	u32 rdma_bytes;
 	dma_addr_t rdma_dma;
 	u32 armed_vsync;
 	bool rdma_done;
@@ -149,25 +153,28 @@ static void meson_t7_handoff_rdma_arm(struct meson_t7_handoff *display)
 	u32 *table = display->rdma_table;
 
 	/* Vendor T7 channel 1: word-address/value pairs, VIU1 vsync trigger. */
-	table[0] = VIU_OSD1_BLK0_CFG_W0;
-	table[1] = display->pending_format;
-	table[2] = VIU_OSD1_BLK2_CFG_W4;
-	table[3] = display->pending_stride;
-	table[4] = VIU_OSD1_CTRL_STAT2;
-	table[5] = display->pending_ctrl2;
-	table[6] = VIU_OSD1_BLK1_CFG_W4;
-	table[7] = display->pending_addr >> 4;
-	if (display->native_modeset) {
-		table[8] = VIU_OSD1_CTRL_STAT;
-		table[9] = (display->pending_ctrl & ~BIT(0)) |
-			   (display->pending_enable ? BIT(0) : 0);
+	if (!display->managed_sram) {
+		table[0] = VIU_OSD1_BLK0_CFG_W0;
+		table[1] = display->pending_format;
+		table[2] = VIU_OSD1_BLK2_CFG_W4;
+		table[3] = display->pending_stride;
+		table[4] = VIU_OSD1_CTRL_STAT2;
+		table[5] = display->pending_ctrl2;
+		table[6] = VIU_OSD1_BLK1_CFG_W4;
+		table[7] = display->pending_addr >> 4;
+		if (display->native_modeset) {
+			table[8] = VIU_OSD1_CTRL_STAT;
+			table[9] = (display->pending_ctrl & ~BIT(0)) |
+				   (display->pending_enable ? BIT(0) : 0);
+		}
+		display->rdma_bytes = display->native_modeset ? 40 : 32;
 	}
 	display->rdma_done = false;
 	display->armed_vsync = display->vsync_count;
 	dma_wmb();
 	writel(display->rdma_dma, display->rdma + RDMA_REG(RDMA_AHB_START_ADDR_1));
 	writel(0, display->rdma + RDMA_REG(T7_RDMA_START_MSB));
-	writel(display->rdma_dma + (display->native_modeset ? 39 : 31),
+	writel(display->rdma_dma + display->rdma_bytes - 1,
 	       display->rdma + RDMA_REG(RDMA_AHB_END_ADDR_1));
 	writel(0, display->rdma + RDMA_REG(T7_RDMA_END_MSB));
 	writel(1, display->rdma + RDMA_REG(RDMA_AUTO_SRC1_SEL));
@@ -205,6 +212,20 @@ vblank:
 	spin_unlock_irqrestore(&display->lock, flags);
 	wake_up(&display->wait);
 	return IRQ_HANDLED;
+}
+
+static void meson_t7_handoff_finish(struct meson_t7_handoff *display, u32 sequence)
+{
+	if (!wait_event_timeout(display->wait,
+				READ_ONCE(display->applied) == sequence,
+				msecs_to_jiffies(100))) {
+		WRITE_ONCE(display->faulted, true);
+		meson_t7_scanout_retire(&display->buffers, false);
+		drm_err(&display->drm, "OSD latch timeout; DMA buffers pinned until reboot\n");
+		return;
+	}
+	/* A long multi-layer RDMA may straddle the beginning of active fetch. */
+	meson_t7_scanout_advance(&display->buffers, true, display->managed_sram);
 }
 
 /* The caller is the serialized atomic commit worker, never the IRQ handler. */
@@ -259,15 +280,125 @@ static void meson_t7_handoff_scanout(struct meson_t7_handoff *display,
 	 * M2 instead arms hardware RDMA ahead of vsync, and requires its completion
 	 * interrupt AND a vsync before retiring the previous allocation.
 	 */
+	meson_t7_handoff_finish(display, sequence);
+}
+
+static void meson_t7_handoff_layer_state(struct drm_plane_state *state,
+					 struct meson_t7_osd_layer *layer)
+{
+	struct drm_framebuffer *fb = state->fb;
+	struct drm_gem_dma_object *object = drm_fb_dma_get_gem_obj(fb, 0);
+
+	*layer = (struct meson_t7_osd_layer) {
+		.enabled = true,
+		.format = fb->format->format,
+		.pitch = fb->pitches[0],
+		.address = object->dma_addr + fb->offsets[0],
+		.src_x = state->src.x1 >> 16,
+		.src_y = state->src.y1 >> 16,
+		.src_w = drm_rect_width(&state->src) >> 16,
+		.src_h = drm_rect_height(&state->src) >> 16,
+		.x = state->dst.x1,
+		.y = state->dst.y1,
+		.width = drm_rect_width(&state->dst),
+		.height = drm_rect_height(&state->dst),
+		.zpos = state->normalized_zpos,
+		.alpha = state->alpha,
+		.rotation = state->rotation,
+		.blend = state->pixel_blend_mode,
+	};
+}
+
+static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display, bool blank)
+{
+	struct meson_t7_osd_layer layers[MESON_T7_OSD_LAYERS] = {};
+	struct drm_framebuffer *next[MESON_T7_MAX_LAYERS] = {};
+	struct drm_display_mode *mode = &display->crtc.state->adjusted_mode;
+	unsigned int i;
+	unsigned long flags;
+	u32 sequence;
+	int bytes;
+
+	if (READ_ONCE(display->faulted))
+		return;
+	for (i = 0; i < MESON_T7_OSD_LAYERS; i++) {
+		struct drm_plane_state *state = i ? display->extra_planes[i - 1].state :
+						  display->plane.state;
+
+		if (!blank && state && state->visible && state->fb) {
+			meson_t7_handoff_layer_state(state, &layers[i]);
+			next[i] = state->fb;
+		}
+	}
+	if (meson_t7_scanout_acquire(&display->buffers, next))
+		return;
+	bytes = meson_t7_osd_layers_build(display->rdma_table, MESON_T7_RDMA_PAIRS,
+					  layers, mode->hdisplay, mode->vdisplay,
+					  readl(display->paths), readl(display->paths + 4));
+	if (bytes < 0) {
+		WRITE_ONCE(display->faulted, true);
+		meson_t7_scanout_retire(&display->buffers, false);
+		drm_err(&display->drm, "OSD transaction build failed: %d\n", bytes);
+		return;
+	}
+	spin_lock_irqsave(&display->lock, flags);
+	display->rdma_bytes = bytes;
+	sequence = ++display->requested;
+	meson_t7_handoff_rdma_arm(display);
+	spin_unlock_irqrestore(&display->lock, flags);
+	meson_t7_handoff_finish(display, sequence);
+}
+
+static void meson_t7_handoff_drain_layers(struct meson_t7_handoff *display)
+{
+	u32 start = READ_ONCE(display->vsync_count);
+
+	/* Blank has latched; let every old fetch finish before stopping VENC. */
 	if (!wait_event_timeout(display->wait,
-				READ_ONCE(display->applied) == sequence,
+				READ_ONCE(display->vsync_count) != start,
 				msecs_to_jiffies(100))) {
 		WRITE_ONCE(display->faulted, true);
 		meson_t7_scanout_retire(&display->buffers, false);
-		drm_err(&display->drm, "OSD latch timeout; DMA buffers pinned until reboot\n");
 		return;
 	}
 	meson_t7_scanout_retire(&display->buffers, true);
+}
+
+static int meson_t7_handoff_layer_check(struct drm_plane_state *new,
+					struct drm_crtc_state *crtc_state)
+{
+	struct drm_framebuffer *fb = new->fb;
+	struct drm_gem_dma_object *object;
+	dma_addr_t address;
+	int ret;
+
+	ret = drm_atomic_helper_check_plane_state(new, crtc_state, 1 << 14, 4 << 16,
+						  true, false);
+	if (ret || !new->visible)
+		return ret;
+	switch (fb->format->format) {
+	case DRM_FORMAT_RGB888:
+	case DRM_FORMAT_XRGB8888:
+	case DRM_FORMAT_XBGR8888:
+	case DRM_FORMAT_ARGB8888:
+	case DRM_FORMAT_ABGR8888:
+		break;
+	default:
+		return -EINVAL;
+	}
+	if ((new->src.x1 | new->src.y1 | new->src.x2 | new->src.y2) & 0xffff ||
+	    fb->width > 3840 || fb->height > 2160 ||
+	    fb->modifier != DRM_FORMAT_MOD_LINEAR || !IS_ALIGNED(fb->pitches[0], 32) ||
+	    fb->pitches[0] > 0xfff * 16 || fb->pitches[0] < fb->width * fb->format->cpp[0])
+		return -EINVAL;
+	object = drm_fb_dma_get_gem_obj(fb, 0);
+	if (!object)
+		return -EINVAL;
+	address = object->dma_addr + fb->offsets[0];
+	if (address < object->dma_addr || !IS_ALIGNED(address, 16) || address > U32_MAX ||
+	    (u64)fb->pitches[0] * fb->height > (u64)U32_MAX + 1 - address)
+		return -ERANGE;
+	return 0;
 }
 
 static int meson_t7_handoff_plane_check(struct drm_plane *plane,
@@ -284,6 +415,8 @@ static int meson_t7_handoff_plane_check(struct drm_plane *plane,
 		return -EIO;
 	if (new->crtc)
 		crtc_state = drm_atomic_get_new_crtc_state(state, new->crtc);
+	if (display->managed_sram)
+		return meson_t7_handoff_layer_check(new, crtc_state);
 	/* RMFB detaches a copied plane state whose visible flag can still be set. */
 	ret = drm_atomic_helper_check_plane_state(new, crtc_state,
 						  DRM_PLANE_NO_SCALING, DRM_PLANE_NO_SCALING,
@@ -350,9 +483,14 @@ static int meson_t7_plane_properties(struct drm_plane *plane)
 	ret = drm_plane_create_rotation_property(plane, DRM_MODE_ROTATE_0, rotations);
 	if (ret)
 		return ret;
-	ret = drm_plane_create_blend_mode_property(plane, BIT(DRM_MODE_BLEND_PIXEL_NONE));
+	ret = drm_plane_create_blend_mode_property(plane, BIT(DRM_MODE_BLEND_PIXEL_NONE) |
+			(to_handoff(plane->dev)->managed_sram ? BIT(DRM_MODE_BLEND_COVERAGE) : 0));
 	if (ret)
 		return ret;
+	if (to_handoff(plane->dev)->managed_sram)
+		return drm_plane_create_zpos_property(plane, plane->type == DRM_PLANE_TYPE_CURSOR ?
+						     2 : plane->type == DRM_PLANE_TYPE_OVERLAY,
+						     0, 2);
 	return drm_plane_create_zpos_immutable_property(plane, 0);
 }
 
@@ -401,7 +539,9 @@ static void meson_t7_handoff_flush(struct drm_crtc *crtc,
 		/* Keep DRM sequence/timestamps running after the idle off-delay. */
 		if (old->active)
 			vblank_ref = !drm_crtc_vblank_get(crtc);
-		if (plane->visible)
+		if (display->managed_sram)
+			meson_t7_handoff_scanout_layers(display, false);
+		else if (plane->visible)
 			meson_t7_handoff_scanout(display, plane->fb,
 						 drm_fb_dma_get_gem_addr(plane->fb, plane, 0));
 		else
@@ -450,8 +590,12 @@ static void meson_t7_handoff_enable(struct drm_crtc *crtc,
 	}
 	drm_crtc_vblank_on(crtc);
 	if (display->native_modeset) {
-		meson_t7_handoff_scanout(display, plane->visible ? plane->fb : NULL,
-			plane->visible ? drm_fb_dma_get_gem_addr(plane->fb, plane, 0) : 0);
+		if (display->managed_sram)
+			meson_t7_handoff_scanout_layers(display, false);
+		else
+			meson_t7_handoff_scanout(display, plane->visible ? plane->fb : NULL,
+						 plane->visible ?
+						 drm_fb_dma_get_gem_addr(plane->fb, plane, 0) : 0);
 		if (crtc->state->event) {
 			if (display->faulted) {
 				meson_t7_handoff_abort_event(crtc);
@@ -472,7 +616,12 @@ static void meson_t7_handoff_disable(struct drm_crtc *crtc,
 
 	if (display->native_modeset) {
 		/* Blank at vsync and retire before stopping the encoder's interrupts. */
-		meson_t7_handoff_scanout(display, NULL, 0);
+		if (display->managed_sram)
+			meson_t7_handoff_scanout_layers(display, true);
+		else
+			meson_t7_handoff_scanout(display, NULL, 0);
+		if (display->managed_sram && !READ_ONCE(display->faulted))
+			meson_t7_handoff_drain_layers(display);
 		meson_t7_modeset_disable(display->modeset);
 		drm_crtc_vblank_off(crtc);
 		if (crtc->state->event) {
@@ -707,7 +856,7 @@ static int meson_t7_handoff_check_dt(struct device *dev)
 static int meson_t7_handoff_probe(struct platform_device *pdev)
 {
 	static const u32 formats[] = { DRM_FORMAT_RGB888, DRM_FORMAT_XRGB8888,
-				       DRM_FORMAT_XBGR8888 };
+		DRM_FORMAT_XBGR8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_ABGR8888 };
 	static const u64 modifiers[] = { DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID };
 	struct device *dev = &pdev->dev;
 	struct meson_t7_handoff *display;
@@ -751,6 +900,26 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	if (IS_ERR(display->osd))
 		return PTR_ERR(display->osd);
 	if (display->managed_sram) {
+		static const struct {
+			const char *name;
+			resource_size_t base, size;
+		} regions[] = {
+			{ "scaler2", 0xff016900, 0x38 },
+			{ "scaler3", 0xff016a00, 0x38 },
+			{ "osd2-address", 0xff006990, 0xc },
+			{ "osd2-unpack", 0xff006af4, 4 },
+		};
+
+		display->paths = meson_t7_handoff_map(pdev, "osd-paths", 0xff006834, 8);
+		if (IS_ERR(display->paths))
+			return PTR_ERR(display->paths);
+		for (i = 0; i < ARRAY_SIZE(regions); i++) {
+			void __iomem *bank = meson_t7_handoff_map(pdev, regions[i].name,
+							 regions[i].base, regions[i].size);
+
+			if (IS_ERR(bank))
+				return PTR_ERR(bank);
+		}
 		display->extra_osd[0] = meson_t7_handoff_map(pdev, "osd2", 0xff0068c0, 0x80);
 		display->extra_osd[1] = meson_t7_handoff_map(pdev, "osd3", 0xff00f600, 0x80);
 		for (i = 0; i < ARRAY_SIZE(display->extra_osd); i++)
@@ -776,7 +945,8 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		for (i = 0; i < 7; i++)
 			if (readl(display->rdma + RDMA_REG(RDMA_AUTO_SRC1_SEL) + i * 4))
 				return dev_err_probe(dev, -EBUSY, "Firmware RDMA channel active\n");
-		display->rdma_table = dmam_alloc_coherent(dev, 40, &display->rdma_dma,
+		display->rdma_table = dmam_alloc_coherent(dev, display->managed_sram ?
+						MESON_T7_RDMA_PAIRS * 8 : 40, &display->rdma_dma,
 							GFP_KERNEL);
 		if (!display->rdma_table)
 			return -ENOMEM;
@@ -837,12 +1007,14 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		return ret;
 	drm->mode_config.funcs = &meson_t7_handoff_mode_funcs;
 	drm->mode_config.helper_private = &meson_t7_handoff_mode_helpers;
+	drm->mode_config.normalize_zpos = display->managed_sram;
 	drm->mode_config.min_width = display->native_modeset ? 640 : HANDOFF_WIDTH;
 	drm->mode_config.max_width = display->native_modeset ? 3840 : HANDOFF_WIDTH;
 	drm->mode_config.min_height = display->native_modeset ? 480 : HANDOFF_HEIGHT;
 	drm->mode_config.max_height = display->native_modeset ? 2160 : HANDOFF_HEIGHT;
 	ret = drm_universal_plane_init(drm, &display->plane, 1, &meson_t7_handoff_plane_funcs,
-				       formats, display->linear_formats ? ARRAY_SIZE(formats) : 1,
+				       formats, display->managed_sram ? ARRAY_SIZE(formats) :
+				       display->linear_formats ? 3 : 1,
 				       modifiers,
 				       DRM_PLANE_TYPE_PRIMARY, NULL);
 	if (ret)
@@ -853,7 +1025,24 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		if (ret)
 			return ret;
 	}
-	ret = drm_crtc_init_with_planes(drm, &display->crtc, &display->plane, NULL,
+	if (display->managed_sram) {
+		for (i = 0; i < ARRAY_SIZE(display->extra_planes); i++) {
+			struct drm_plane *plane = &display->extra_planes[i];
+
+			ret = drm_universal_plane_init(drm, plane, 1, &meson_t7_handoff_plane_funcs,
+						       formats, ARRAY_SIZE(formats), modifiers,
+						       i ? DRM_PLANE_TYPE_CURSOR :
+						       DRM_PLANE_TYPE_OVERLAY, "OSD%u", i + 2);
+			if (ret)
+				return ret;
+			drm_plane_helper_add(plane, &meson_t7_handoff_plane_helpers);
+			ret = meson_t7_plane_properties(plane);
+			if (ret)
+				return ret;
+		}
+	}
+	ret = drm_crtc_init_with_planes(drm, &display->crtc, &display->plane,
+					display->managed_sram ? &display->extra_planes[1] : NULL,
 					&meson_t7_handoff_crtc_funcs, NULL);
 	if (ret)
 		return ret;

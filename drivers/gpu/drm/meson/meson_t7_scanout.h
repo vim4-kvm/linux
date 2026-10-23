@@ -11,6 +11,7 @@
 struct meson_t7_scanout {
 	struct drm_framebuffer *active[MESON_T7_MAX_LAYERS];
 	struct drm_framebuffer *pending[MESON_T7_MAX_LAYERS];
+	struct drm_framebuffer *retiring[MESON_T7_MAX_LAYERS];
 	bool faulted;
 };
 
@@ -32,10 +33,11 @@ static inline int meson_t7_scanout_acquire(struct meson_t7_scanout *scanout,
 
 /*
  * Every enabled fetch engine must be idle or have crossed its safe boundary.
- * A failed transaction retains BOTH generations, including unchanged layers.
+ * A failed transaction retains all generations, including unchanged layers.
  * Late interrupts never unpin a failed transaction; only reboot can do that.
  */
-static inline void meson_t7_scanout_retire(struct meson_t7_scanout *scanout, bool safe)
+static inline void meson_t7_scanout_advance(struct meson_t7_scanout *scanout,
+					    bool safe, bool defer)
 {
 	unsigned int i;
 
@@ -46,11 +48,21 @@ static inline void meson_t7_scanout_retire(struct meson_t7_scanout *scanout, boo
 		return;
 	}
 	for (i = 0; i < MESON_T7_MAX_LAYERS; i++) {
-		if (scanout->active[i])
+		if (scanout->retiring[i])
+			drm_framebuffer_put(scanout->retiring[i]);
+		scanout->retiring[i] = NULL;
+		if (defer)
+			scanout->retiring[i] = scanout->active[i];
+		else if (scanout->active[i])
 			drm_framebuffer_put(scanout->active[i]);
 		scanout->active[i] = scanout->pending[i];
 		scanout->pending[i] = NULL;
 	}
+}
+
+static inline void meson_t7_scanout_retire(struct meson_t7_scanout *scanout, bool safe)
+{
+	meson_t7_scanout_advance(scanout, safe, false);
 }
 
 #endif

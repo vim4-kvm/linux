@@ -330,12 +330,19 @@ struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev)
 		struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 								   windows[i].name);
 		u32 offset = i ? 0 : 0x800;
+		u32 first = windows[i].first, last = windows[i].last;
 
-		if (!res || res->start != 0xff000000 + (windows[i].first + offset) * 4 ||
-		    resource_size(res) != (windows[i].last - windows[i].first + 1) * 4)
+		if (i == 3 &&
+		    of_property_read_bool(pdev->dev.of_node, "amlogic,managed-osd-sram")) {
+			first = 0x5a00;
+			last = 0x5a0d;
+		}
+
+		if (!res || res->start != 0xff000000 + (first + offset) * 4 ||
+		    resource_size(res) != (last - first + 1) * 4)
 			return ERR_PTR(-EINVAL);
-		hw->vcbus[i].first = windows[i].first;
-		hw->vcbus[i].last = windows[i].last;
+		hw->vcbus[i].first = first;
+		hw->vcbus[i].last = last;
 		/* VENC is already claimed by the display's IRQ/readback path. */
 		if (!i) {
 			hw->vcbus[i].base = devm_ioremap(&pdev->dev, res->start,

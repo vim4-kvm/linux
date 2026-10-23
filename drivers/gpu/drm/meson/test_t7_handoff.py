@@ -73,6 +73,10 @@ types = source[source.index('struct meson_t7_handoff {'):source.index('static st
 retirement = Path(__file__).with_name('meson_t7_scanout.h').read_text()
 types = retirement[retirement.index('#define MESON_T7_MAX_LAYERS'):
                    retirement.rindex('#endif')] + types
+layers_header = Path(__file__).with_name('meson_t7_layers.h').read_text()
+types = layers_header[layers_header.index('#define MESON_T7_OSD_LAYERS'):
+                      layers_header.rindex('#endif')] + types
+layers_source = Path(__file__).with_name('meson_t7_layers.c').read_text()
 functions = source[source.index('static u32 meson_t7_osd_alpha'):
                    source.index('/* Both interrupt orders')]
 functions += source[source.index('static void meson_t7_handoff_rdma_complete'):
@@ -89,6 +93,7 @@ prefix = r'''
 #include <errno.h>
 typedef uint32_t u32;
 typedef uint16_t u16;
+typedef uint64_t u64;
 typedef uint64_t dma_addr_t;
 typedef int spinlock_t;
 typedef int wait_queue_head_t;
@@ -103,9 +108,14 @@ struct drm_pending_event {
 };
 struct drm_pending_vblank_event { struct drm_pending_event base; };
 struct drm_plane_state;
+struct drm_display_mode {int hdisplay, vdisplay;};
+struct drm_rect {int x1,y1,x2,y2;};
+static int drm_rect_width(const struct drm_rect *r) {return r->x2-r->x1;}
+static int drm_rect_height(const struct drm_rect *r) {return r->y2-r->y1;}
+struct drm_gem_dma_object {dma_addr_t dma_addr;};
 struct drm_crtc_state {
     bool active, modeset;
-    struct {int hdisplay,vdisplay;} adjusted_mode;
+    struct drm_display_mode adjusted_mode;
     struct drm_pending_vblank_event *event;
 };
 static bool drm_atomic_crtc_needs_modeset(struct drm_crtc_state *state)
@@ -119,6 +129,7 @@ struct drm_framebuffer {
     const struct drm_format_info *format;
     unsigned int width, height, pitches[1], offsets[1];
     uint64_t modifier;
+    struct drm_gem_dma_object *object;
 };
 struct drm_plane_state {
     bool visible;
@@ -128,6 +139,8 @@ struct drm_plane_state {
     unsigned int rotation;
     u16 alpha;
     int crtc_x, crtc_y, crtc_w, crtc_h;
+    struct drm_rect src,dst;
+    unsigned int normalized_zpos, pixel_blend_mode;
 };
 struct drm_atomic_commit {
     struct drm_plane_state *plane;
@@ -136,6 +149,10 @@ struct drm_atomic_commit {
 #define DRM_FORMAT_RGB888 1
 #define DRM_FORMAT_XRGB8888 2
 #define DRM_FORMAT_XBGR8888 3
+#define DRM_FORMAT_ARGB8888 4
+#define DRM_FORMAT_ABGR8888 5
+#define DRM_MODE_BLEND_PIXEL_NONE 0
+#define DRM_MODE_BLEND_COVERAGE 1
 #define DRM_MODE_REFLECT_X (1 << 4)
 #define DRM_MODE_REFLECT_Y (1 << 5)
 #define DRM_FORMAT_MOD_LINEAR 0
@@ -148,6 +165,10 @@ struct drm_atomic_commit {
 #define IRQ_NONE 0
 #define GENMASK(h, l) ((UINT32_MAX << (l)) & (UINT32_MAX >> (31 - (h))))
 #define dma_wmb() ((void)0)
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#define div_u64(a,b) ((u64)(a)/(b))
+#define swap(a,b) do {__typeof__(a) t=a;a=b;b=t;} while(0)
+#define fallthrough __attribute__((fallthrough))
 #define spin_lock_irqsave(lock, flags) ((void)(lock), (void)((flags) = 0))
 #define spin_unlock_irqrestore(lock, flags) ((void)(lock), (void)(flags))
 #define spin_lock_irq(lock) ((void)(lock))
@@ -161,7 +182,7 @@ static bool native_writes;
 static bool rdma_first;
 static unsigned int timeout_part;
 static u32 osd[32], venc[66];
-static u32 rdma[64], table[10];
+static u32 rdma[64], table[1024], pipeline[0x6000], paths[2];
 static unsigned int writes, vblanks;
 static bool fail_modeset;
 static unsigned int timing_stops;
@@ -191,7 +212,18 @@ static int drm_atomic_helper_check_plane_state(struct drm_plane_state *plane,
 {
     /* DRM's helper clears copied visibility when the new framebuffer is NULL. */
     plane->visible = plane->fb != NULL;
+    plane->src=(struct drm_rect){plane->src_x,plane->src_y,
+        plane->src_x+plane->src_w,plane->src_y+plane->src_h};
+    plane->dst=(struct drm_rect){plane->crtc_x,plane->crtc_y,
+        plane->crtc_x+plane->crtc_w,plane->crtc_y+plane->crtc_h};
     return 0;
+}
+static struct drm_gem_dma_object *drm_fb_dma_get_gem_obj(struct drm_framebuffer *fb,
+                                                      unsigned int index)
+{
+    static struct drm_gem_dma_object default_object={0x20000000};
+    assert(fb);
+    return fb->object ? fb->object : &default_object;
 }
 static dma_addr_t drm_fb_dma_get_gem_addr(struct drm_framebuffer *fb,
     struct drm_plane_state *plane, unsigned int index)
@@ -238,11 +270,15 @@ static void drm_framebuffer_put(struct drm_framebuffer *fb)
 #define wait_event_timeout(wait, condition, timeout) ({ \
     assert((timeout) == 100); \
     assert(!(condition)); \
-    if (display->rdma) { \
+    if (display->managed_sram && !rdma[0x23]) { \
+        if (!inject_timeout) meson_t7_handoff_irq(0, display); \
+    } else if (display->rdma) { \
         assert(!meson_t7_handoff_rdma_irq(0, display)); \
         if (!inject_timeout || timeout_part == 2) { \
-            for (unsigned int i = 0; i < (display->native_modeset ? 10U : 8U); i += 2) \
-                writel(table[i + 1], osd + table[i] - VIU_OSD1_CTRL_STAT); \
+            for (unsigned int i = 0; i < display->rdma_bytes / 4; i += 2) { \
+                if (display->managed_sram) pipeline[table[i]]=table[i+1]; \
+                else writel(table[i + 1], osd + table[i] - VIU_OSD1_CTRL_STAT); \
+            } \
             rdma[0x15] = RDMA_IRQ_STAT_CHAN1; \
             if (inject_timeout) meson_t7_handoff_rdma_irq(0, display); \
             else { \
@@ -424,6 +460,65 @@ int main(void)
     meson_t7_handoff_enable(&display.crtc,&rmfb);
     assert(display.faulted && !running.event && sent==previously_sent && uhd.references==1);
     puts("Native atomic modeset: deferred initial flip, 4K geometry, blank/drain/stop and PLL failure passed");
+
+    struct meson_t7_handoff multi={.osd=osd,.rdma=rdma,.rdma_table=table,.paths=paths,
+        .native_modeset=true,.managed_sram=true,.linear_formats=true};
+    struct drm_crtc_state output={.active=true,.adjusted_mode={1920,1080}};
+    multi.crtc.dev=&multi.drm; multi.crtc.state=&output;
+    struct drm_framebuffer desktop_a={.references=1,.format=&xrgb,
+        .width=1920,.height=1080,.pitches={7680}}, desktop_b=desktop_a;
+    struct drm_framebuffer overlay=desktop_a, cursor=desktop_a;
+    struct drm_plane_state states[3];
+    for (unsigned int i=0;i<3;i++) {
+        states[i]=(struct drm_plane_state){.fb=i==0 ? &desktop_a :
+            i==1 ? &overlay : &cursor,.crtc=&multi.crtc,
+            .src_w=1920<<16,.src_h=1080<<16,.crtc_w=1920,.crtc_h=1080,
+            .alpha=65535,.normalized_zpos=i};
+        struct drm_plane *p=i ? &multi.extra_planes[i-1] : &multi.plane;
+        p->dev=&multi.drm; p->state=&states[i]; rmfb.plane=&states[i];
+        rmfb.new_crtc=&output;
+        assert(!meson_t7_handoff_plane_check(p,&rmfb));
+    }
+    fail_modeset=false; inject_timeout=false;
+    unsigned int frame_start=vblanks;
+    for (unsigned int frame=0;frame<60;frame++) {
+        states[0].fb=frame&1 ? &desktop_b : &desktop_a;
+        meson_t7_handoff_scanout_layers(&multi,false);
+        assert(!multi.faulted && multi.buffers.active[0]==states[0].fb);
+        assert(multi.buffers.active[1]==&overlay && multi.buffers.active[2]==&cursor);
+        /* Shared unchanged layers retain active and retiring references. */
+        assert(overlay.references==(frame ? 3U : 2U));
+        assert(cursor.references==(frame ? 3U : 2U));
+    }
+    assert(vblanks-frame_start==60);
+    /* RMFB's stale visible bit must not pass a NULL FB into GEM or the builder. */
+    states[2].fb=NULL; states[2].crtc=NULL; states[2].visible=true;
+    rmfb.plane=&states[2];
+    assert(!meson_t7_handoff_plane_check(&multi.extra_planes[1],&rmfb));
+    assert(!states[2].visible);
+    meson_t7_handoff_scanout_layers(&multi,false);
+    assert(cursor.references==2 && !multi.buffers.active[2]);
+    meson_t7_handoff_scanout_layers(&multi,true);
+    assert(cursor.references==1 && overlay.references==2);
+    assert(!(pipeline[0x1a10]&1) && !(pipeline[0x1a30]&1) && !(pipeline[0x3d80]&1));
+    meson_t7_handoff_drain_layers(&multi);
+    assert(desktop_a.references==1 && desktop_b.references==1 && overlay.references==1);
+    for (unsigned int i=0;i<3;i++)
+        assert(!multi.buffers.active[i] && !multi.buffers.retiring[i]);
+
+    states[0].fb=&desktop_a;
+    meson_t7_handoff_scanout_layers(&multi,false);
+    states[0].fb=&desktop_b;
+    meson_t7_handoff_scanout_layers(&multi,false);
+    inject_timeout=true;
+    meson_t7_handoff_scanout_layers(&multi,true);
+    assert(multi.faulted && multi.buffers.faulted);
+    assert(desktop_a.references==2 && desktop_b.references==2 && overlay.references==3);
+    rdma[0x15]=RDMA_IRQ_STAT_CHAN1;
+    meson_t7_handoff_rdma_irq(0,&multi); meson_t7_handoff_irq(0,&multi);
+    meson_t7_handoff_scanout_layers(&multi,false);
+    assert(desktop_a.references==2 && desktop_b.references==2 && overlay.references==3);
+    puts("Three OSD engines: 60 flips/60 vsyncs, RMFB, deferred retirement, blank/drain and fault pinning passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
@@ -431,7 +526,9 @@ with tempfile.TemporaryDirectory() as directory:
     executable = Path(directory) / 'handoff'
     code.write_text(prefix + registers + '\n' + defines + '\n' +
                     types + '\nstatic struct meson_t7_handoff *to_handoff(struct drm_device *drm) '
-                    '{ return (struct meson_t7_handoff *)drm; }\n' + functions + checks)
+                    '{ return (struct meson_t7_handoff *)drm; }\n' +
+                    layers_source[layers_source.index('/* Vendor meson_osd_scaler.c:'):] +
+                    functions + checks)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-I', str(Path(__file__).parent),
                     str(code), '-o', str(executable)], check=True)
