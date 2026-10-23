@@ -144,6 +144,8 @@ struct drm_plane_state {
 };
 struct drm_atomic_commit {
     struct drm_plane_state *plane;
+    struct drm_plane *planes[3];
+    struct drm_plane_state *states[3];
     struct drm_crtc_state *old_crtc, *new_crtc;
 };
 #define DRM_FORMAT_RGB888 1
@@ -201,7 +203,11 @@ static void drm_crtc_vblank_on(struct drm_crtc *crtc) {}
 static void drm_crtc_vblank_off(struct drm_crtc *crtc) {}
 static struct meson_t7_handoff *to_handoff(struct drm_device *drm);
 static struct drm_plane_state *drm_atomic_get_new_plane_state(
-    struct drm_atomic_commit *state, struct drm_plane *plane) { return state->plane; }
+    struct drm_atomic_commit *state, struct drm_plane *plane)
+{
+    for (unsigned int i=0;i<3;i++) if (state->planes[i]==plane) return state->states[i];
+    return state->plane;
+}
 static struct drm_crtc_state *drm_atomic_get_new_crtc_state(
     struct drm_atomic_commit *state, struct drm_crtc *crtc) { return state->new_crtc; }
 static struct drm_crtc_state *drm_atomic_get_old_crtc_state(
@@ -234,7 +240,9 @@ static dma_addr_t drm_fb_dma_get_gem_addr(struct drm_framebuffer *fb,
 static int drm_crtc_vblank_get(struct drm_crtc *crtc) { return 0; }
 static void drm_crtc_vblank_put(struct drm_crtc *crtc) { }
 static unsigned int sent, cancelled;
-static void drm_crtc_send_vblank_event(struct drm_crtc *crtc, void *event) { sent++; }
+static void *last_sent;
+static void drm_crtc_send_vblank_event(struct drm_crtc *crtc, void *event)
+{ sent++; last_sent=event; }
 static void dma_fence_set_error(struct dma_fence *fence, int error) { fence->error=error; }
 static void dma_fence_signal(struct dma_fence *fence) { fence->signaled=true; }
 static void complete_all(struct completion *completion) { completion->completed++; }
@@ -325,9 +333,9 @@ int main(void)
 
     meson_t7_handoff_irq(0, &display);
     assert(!writes);
-    meson_t7_handoff_scanout(&display, &first, 0x20000000);
+    meson_t7_handoff_scanout(&display, &first, 0x20000000, NULL);
     assert(writes == 1 && first.references == 2 && osd[4] == 0x02000000);
-    meson_t7_handoff_scanout(&display, &second, 0x21000000);
+    meson_t7_handoff_scanout(&display, &second, 0x21000000, NULL);
     assert(writes == 2 && first.references == 1 && second.references == 2);
     /* RMFB/file close detaches fb and crtc from a copied, visible plane state. */
     assert(!meson_t7_handoff_plane_check(&display.plane, &rmfb));
@@ -337,15 +345,15 @@ int main(void)
     assert(osd[4] == HANDOFF_BOOT_ADDR >> 4);
     /* Counter wrap must not retire the buffer before two real interrupts. */
     display.requested = display.written = display.applied = UINT32_MAX;
-    meson_t7_handoff_scanout(&display, &first, 0x20000000);
+    meson_t7_handoff_scanout(&display, &first, 0x20000000, NULL);
     assert(!display.applied && first.references == 2);
     inject_timeout = true;
-    meson_t7_handoff_scanout(&display, &second, 0x21000000);
+    meson_t7_handoff_scanout(&display, &second, 0x21000000, NULL);
     assert(display.faulted && display.buffers.active[0] == &first &&
            display.buffers.pending[0] == &second);
     assert(first.references == 2 && second.references == 2);
     unsigned int stopped_at = writes;
-    meson_t7_handoff_scanout(&display, &third, 0x22000000);
+    meson_t7_handoff_scanout(&display, &third, 0x22000000, NULL);
     assert(writes == stopped_at && third.references == 1);
     /* A delayed IRQ cannot make the failed path drop either DMA reference. */
     meson_t7_handoff_irq(0, &display);
@@ -376,13 +384,13 @@ int main(void)
     display.boot_format = 0x8700; display.boot_stride = 360; display.boot_ctrl2 = 0x12;
     inject_timeout = false;
     unsigned int before = writes;
-    meson_t7_handoff_scanout(&display, &gpu, 0x22000000);
+    meson_t7_handoff_scanout(&display, &gpu, 0x22000000, NULL);
     assert(writes == before + 4 && osd[11] == 0x8504 && osd[5] == 512);
     assert(osd[29] == (0x12 | (1 << 14)) && gpu.references == 2);
     gpu.format = &xbgr;
-    meson_t7_handoff_scanout(&display, &gpu, 0x23000000);
+    meson_t7_handoff_scanout(&display, &gpu, 0x23000000, NULL);
     assert(osd[11] == 0x8508 && gpu.references == 2);
-    meson_t7_handoff_scanout(&display, NULL, HANDOFF_BOOT_ADDR);
+    meson_t7_handoff_scanout(&display, NULL, HANDOFF_BOOT_ADDR, NULL);
     assert(osd[11] == 0x8700 && osd[5] == 360 && osd[29] == 0x12);
     assert(gpu.references == 1);
     puts("Linear OSD: RGB32 layout, padding/modifier rejection, vsync programming and boot restore passed");
@@ -395,12 +403,12 @@ int main(void)
         if (i == 30) display.requested = display.written = display.applied = UINT32_MAX;
         struct drm_framebuffer *next = i & 1 ? &gpu : &first;
         if (next == &first) first.format = &xrgb;
-        meson_t7_handoff_scanout(&display, next, 0x22000000);
+        meson_t7_handoff_scanout(&display, next, 0x22000000, NULL);
         assert(!display.faulted && display.buffers.active[0] == next);
         assert(!rdma[0x23] && !rdma[0x15]);
     }
     assert(vblanks - start_vblank == 60);
-    meson_t7_handoff_scanout(&display, NULL, HANDOFF_BOOT_ADDR);
+    meson_t7_handoff_scanout(&display, NULL, HANDOFF_BOOT_ADDR, NULL);
     assert(first.references == 2); /* The earlier M1 fault intentionally pins one. */
     assert(gpu.references == 1);
     for (timeout_part = 1; timeout_part <= 2; timeout_part++) {
@@ -408,7 +416,7 @@ int main(void)
         struct drm_framebuffer old = {.references=2}, next = {.references=1};
         failed.buffers.active[0] = &old;
         inject_timeout = true;
-        meson_t7_handoff_scanout(&failed, &next, 0x22000000);
+        meson_t7_handoff_scanout(&failed, &next, 0x22000000, NULL);
         assert(failed.faulted && old.references == 2 && next.references == 2);
         /* A late missing interrupt cannot release a failed transaction's buffers. */
         rdma[0x15] = RDMA_IRQ_STAT_CHAN1;
@@ -443,6 +451,7 @@ int main(void)
     display.plane.state->fb=&uhd; display.plane.state->visible=true;
     display.plane.state->alpha=32768;
     display.plane.state->rotation=DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y;
+    rmfb.plane=display.plane.state;
     previously_sent=sent; running.event=&event;
     meson_t7_handoff_flush(&display.crtc,&rmfb);
     assert(sent==previously_sent && running.event==&event);
@@ -464,6 +473,7 @@ int main(void)
     struct meson_t7_handoff multi={.osd=osd,.rdma=rdma,.rdma_table=table,.paths=paths,
         .native_modeset=true,.managed_sram=true,.linear_formats=true};
     struct drm_crtc_state output={.active=true,.adjusted_mode={1920,1080}};
+    struct drm_atomic_commit multi_commit={.old_crtc=&output,.new_crtc=&output};
     multi.crtc.dev=&multi.drm; multi.crtc.state=&output;
     struct drm_framebuffer desktop_a={.references=1,.format=&xrgb,
         .width=1920,.height=1080,.pitches={7680}}, desktop_b=desktop_a;
@@ -476,6 +486,7 @@ int main(void)
             .alpha=65535,.normalized_zpos=i};
         struct drm_plane *p=i ? &multi.extra_planes[i-1] : &multi.plane;
         p->dev=&multi.drm; p->state=&states[i]; rmfb.plane=&states[i];
+        multi_commit.planes[i]=p; multi_commit.states[i]=&states[i];
         rmfb.new_crtc=&output;
         assert(!meson_t7_handoff_plane_check(p,&rmfb));
     }
@@ -483,7 +494,7 @@ int main(void)
     unsigned int frame_start=vblanks;
     for (unsigned int frame=0;frame<60;frame++) {
         states[0].fb=frame&1 ? &desktop_b : &desktop_a;
-        meson_t7_handoff_scanout_layers(&multi,false);
+        meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
         assert(!multi.faulted && multi.buffers.active[0]==states[0].fb);
         assert(multi.buffers.active[1]==&overlay && multi.buffers.active[2]==&cursor);
         /* Shared unchanged layers retain active and retiring references. */
@@ -496,9 +507,9 @@ int main(void)
     rmfb.plane=&states[2];
     assert(!meson_t7_handoff_plane_check(&multi.extra_planes[1],&rmfb));
     assert(!states[2].visible);
-    meson_t7_handoff_scanout_layers(&multi,false);
+    meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
     assert(cursor.references==2 && !multi.buffers.active[2]);
-    meson_t7_handoff_scanout_layers(&multi,true);
+    meson_t7_handoff_scanout_layers(&multi,&multi_commit,true);
     assert(cursor.references==1 && overlay.references==2);
     assert(!(pipeline[0x1a10]&1) && !(pipeline[0x1a30]&1) && !(pipeline[0x3d80]&1));
     meson_t7_handoff_drain_layers(&multi);
@@ -506,17 +517,34 @@ int main(void)
     for (unsigned int i=0;i<3;i++)
         assert(!multi.buffers.active[i] && !multi.buffers.retiring[i]);
 
+    /* A later nonblocking commit may have swapped every global state already. */
+    struct drm_framebuffer future_fb=desktop_a;
+    struct drm_plane_state future_plane=states[0]; future_plane.fb=&future_fb;
+    struct drm_pending_vblank_event future_event={0};
+    struct drm_crtc_state future_crtc={.active=false,.event=&future_event};
+    multi.plane.state=&future_plane;
+    multi.extra_planes[0].state=multi.extra_planes[1].state=&future_plane;
+    multi.crtc.state=&future_crtc;
+    output.event=&event; states[0].fb=&desktop_a;
+    previously_sent=sent;
+    meson_t7_handoff_flush(&multi.crtc,&multi_commit);
+    assert(sent==previously_sent+1 && last_sent==&event && !output.event);
+    assert(future_crtc.event==&future_event && future_fb.references==1);
+    assert(multi.buffers.active[0]==&desktop_a && multi.buffers.active[1]==&overlay);
+    assert(!multi.buffers.active[2]);
+    puts("Queued atomic states: scanout and event belong to the submitted commit, not global state");
+
     states[0].fb=&desktop_a;
-    meson_t7_handoff_scanout_layers(&multi,false);
+    meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
     states[0].fb=&desktop_b;
-    meson_t7_handoff_scanout_layers(&multi,false);
+    meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
     inject_timeout=true;
-    meson_t7_handoff_scanout_layers(&multi,true);
+    meson_t7_handoff_scanout_layers(&multi,&multi_commit,true);
     assert(multi.faulted && multi.buffers.faulted);
     assert(desktop_a.references==2 && desktop_b.references==2 && overlay.references==3);
     rdma[0x15]=RDMA_IRQ_STAT_CHAN1;
     meson_t7_handoff_rdma_irq(0,&multi); meson_t7_handoff_irq(0,&multi);
-    meson_t7_handoff_scanout_layers(&multi,false);
+    meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
     assert(desktop_a.references==2 && desktop_b.references==2 && overlay.references==3);
     puts("Three OSD engines: 60 flips/60 vsyncs, RMFB, deferred retirement, blank/drain and fault pinning passed");
 }

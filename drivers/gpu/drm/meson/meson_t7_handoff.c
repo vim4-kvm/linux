@@ -230,7 +230,8 @@ static void meson_t7_handoff_finish(struct meson_t7_handoff *display, u32 sequen
 
 /* The caller is the serialized atomic commit worker, never the IRQ handler. */
 static void meson_t7_handoff_scanout(struct meson_t7_handoff *display,
-				     struct drm_framebuffer *fb, dma_addr_t addr)
+				     struct drm_framebuffer *fb, dma_addr_t addr,
+				     const struct drm_plane_state *plane)
 {
 	struct drm_framebuffer *next[MESON_T7_MAX_LAYERS] = { fb };
 	unsigned long flags;
@@ -258,8 +259,6 @@ static void meson_t7_handoff_scanout(struct meson_t7_handoff *display,
 		display->pending_ctrl2 = fb ? display->boot_ctrl2 | BIT(14) : display->boot_ctrl2;
 	}
 	if (display->native_modeset) {
-		struct drm_plane_state *plane = display->plane.state;
-
 		display->pending_ctrl = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
 		if (fb && plane) {
 			display->pending_ctrl =
@@ -309,11 +308,13 @@ static void meson_t7_handoff_layer_state(struct drm_plane_state *state,
 	};
 }
 
-static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display, bool blank)
+static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
+					    struct drm_atomic_commit *commit, bool blank)
 {
 	struct meson_t7_osd_layer layers[MESON_T7_OSD_LAYERS] = {};
 	struct drm_framebuffer *next[MESON_T7_MAX_LAYERS] = {};
-	struct drm_display_mode *mode = &display->crtc.state->adjusted_mode;
+	struct drm_crtc_state *crtc = drm_atomic_get_new_crtc_state(commit, &display->crtc);
+	struct drm_display_mode *mode = &crtc->adjusted_mode;
 	unsigned int i;
 	unsigned long flags;
 	u32 sequence;
@@ -322,8 +323,8 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display, bo
 	if (READ_ONCE(display->faulted))
 		return;
 	for (i = 0; i < MESON_T7_OSD_LAYERS; i++) {
-		struct drm_plane_state *state = i ? display->extra_planes[i - 1].state :
-						  display->plane.state;
+		struct drm_plane *plane = i ? &display->extra_planes[i - 1] : &display->plane;
+		struct drm_plane_state *state = drm_atomic_get_new_plane_state(commit, plane);
 
 		if (!blank && state && state->visible && state->fb) {
 			meson_t7_handoff_layer_state(state, &layers[i]);
@@ -506,9 +507,9 @@ static int meson_t7_handoff_crtc_check(struct drm_crtc *crtc,
 	return drm_atomic_add_affected_planes(state, crtc);
 }
 
-static void meson_t7_handoff_abort_event(struct drm_crtc *crtc)
+static void meson_t7_handoff_abort_event(struct drm_crtc *crtc, struct drm_crtc_state *new)
 {
-	struct drm_pending_event *event = &crtc->state->event->base;
+	struct drm_pending_event *event = &new->event->base;
 
 	/* Unblock atomic dependencies, without claiming a successful DMA latch. */
 	if (event->fence) {
@@ -520,7 +521,7 @@ static void meson_t7_handoff_abort_event(struct drm_crtc *crtc)
 		event->completion_release(event->completion);
 		event->completion = NULL;
 	}
-	crtc->state->event = NULL;
+	new->event = NULL;
 	drm_event_cancel_free(crtc->dev, event);
 }
 
@@ -528,32 +529,33 @@ static void meson_t7_handoff_flush(struct drm_crtc *crtc,
 				   struct drm_atomic_commit *state)
 {
 	struct meson_t7_handoff *display = to_handoff(crtc->dev);
-	struct drm_plane_state *plane = display->plane.state;
+	struct drm_plane_state *plane = drm_atomic_get_new_plane_state(state, &display->plane);
+	struct drm_crtc_state *new = drm_atomic_get_new_crtc_state(state, crtc);
 	struct drm_crtc_state *old = drm_atomic_get_old_crtc_state(state, crtc);
 	bool vblank_ref = false;
 
 	/* Native enable programs the stopped pipe and completes the initial flip. */
-	if (display->native_modeset && drm_atomic_crtc_needs_modeset(crtc->state))
+	if (display->native_modeset && drm_atomic_crtc_needs_modeset(new))
 		return;
-	if (crtc->state->active) {
+	if (new->active) {
 		/* Keep DRM sequence/timestamps running after the idle off-delay. */
 		if (old->active)
 			vblank_ref = !drm_crtc_vblank_get(crtc);
 		if (display->managed_sram)
-			meson_t7_handoff_scanout_layers(display, false);
+			meson_t7_handoff_scanout_layers(display, state, false);
 		else if (plane->visible)
 			meson_t7_handoff_scanout(display, plane->fb,
-						 drm_fb_dma_get_gem_addr(plane->fb, plane, 0));
+					 drm_fb_dma_get_gem_addr(plane->fb, plane, 0), plane);
 		else
 			meson_t7_handoff_scanout(display, NULL,
-					 display->native_modeset ? 0 : HANDOFF_BOOT_ADDR);
+					 display->native_modeset ? 0 : HANDOFF_BOOT_ADDR, NULL);
 	}
-	if (crtc->state->event && READ_ONCE(display->faulted))
-		meson_t7_handoff_abort_event(crtc);
-	if (crtc->state->event) {
+	if (new->event && READ_ONCE(display->faulted))
+		meson_t7_handoff_abort_event(crtc, new);
+	if (new->event) {
 		spin_lock_irq(&crtc->dev->event_lock);
-		drm_crtc_send_vblank_event(crtc, crtc->state->event);
-		crtc->state->event = NULL;
+		drm_crtc_send_vblank_event(crtc, new->event);
+		new->event = NULL;
 		spin_unlock_irq(&crtc->dev->event_lock);
 	}
 	if (vblank_ref)
@@ -564,45 +566,46 @@ static void meson_t7_handoff_enable(struct drm_crtc *crtc,
 				    struct drm_atomic_commit *state)
 {
 	struct meson_t7_handoff *display = to_handoff(crtc->dev);
-	struct drm_plane_state *plane = display->plane.state;
+	struct drm_plane_state *plane = drm_atomic_get_new_plane_state(state, &display->plane);
+	struct drm_crtc_state *new = drm_atomic_get_new_crtc_state(state, crtc);
 	int ret;
 
 	if (display->native_modeset) {
 		/* Gate fetch before changing geometry; no stale boot-frame DMA at 4K. */
 		writel(readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT)) & ~BIT(0),
 		       display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
-		ret = meson_t7_modeset_enable(display->modeset, &crtc->state->adjusted_mode);
+		ret = meson_t7_modeset_enable(display->modeset, &new->adjusted_mode);
 		if (ret) {
 			WRITE_ONCE(display->faulted, true);
 			drm_err(crtc->dev, "ENC2 modeset failed: %d; restart required\n", ret);
-			if (crtc->state->event)
-				meson_t7_handoff_abort_event(crtc);
+			if (new->event)
+				meson_t7_handoff_abort_event(crtc, new);
 			return;
 		}
-		writel((crtc->state->adjusted_mode.hdisplay - 1) << 16,
+		writel((new->adjusted_mode.hdisplay - 1) << 16,
 		       display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W1));
-		writel((crtc->state->adjusted_mode.vdisplay - 1) << 16,
+		writel((new->adjusted_mode.vdisplay - 1) << 16,
 		       display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W2));
-		writel((crtc->state->adjusted_mode.hdisplay - 1) << 16,
+		writel((new->adjusted_mode.hdisplay - 1) << 16,
 		       display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W3));
-		writel((crtc->state->adjusted_mode.vdisplay - 1) << 16,
+		writel((new->adjusted_mode.vdisplay - 1) << 16,
 		       display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W4));
 	}
 	drm_crtc_vblank_on(crtc);
 	if (display->native_modeset) {
 		if (display->managed_sram)
-			meson_t7_handoff_scanout_layers(display, false);
+			meson_t7_handoff_scanout_layers(display, state, false);
 		else
 			meson_t7_handoff_scanout(display, plane->visible ? plane->fb : NULL,
-						 plane->visible ?
-						 drm_fb_dma_get_gem_addr(plane->fb, plane, 0) : 0);
-		if (crtc->state->event) {
+					 plane->visible ?
+					 drm_fb_dma_get_gem_addr(plane->fb, plane, 0) : 0, plane);
+		if (new->event) {
 			if (display->faulted) {
-				meson_t7_handoff_abort_event(crtc);
+				meson_t7_handoff_abort_event(crtc, new);
 			} else {
 				spin_lock_irq(&crtc->dev->event_lock);
-				drm_crtc_send_vblank_event(crtc, crtc->state->event);
-				crtc->state->event = NULL;
+				drm_crtc_send_vblank_event(crtc, new->event);
+				new->event = NULL;
 				spin_unlock_irq(&crtc->dev->event_lock);
 			}
 		}
@@ -613,31 +616,32 @@ static void meson_t7_handoff_disable(struct drm_crtc *crtc,
 				     struct drm_atomic_commit *state)
 {
 	struct meson_t7_handoff *display = to_handoff(crtc->dev);
+	struct drm_crtc_state *new = drm_atomic_get_new_crtc_state(state, crtc);
 
 	if (display->native_modeset) {
 		/* Blank at vsync and retire before stopping the encoder's interrupts. */
 		if (display->managed_sram)
-			meson_t7_handoff_scanout_layers(display, true);
+			meson_t7_handoff_scanout_layers(display, state, true);
 		else
-			meson_t7_handoff_scanout(display, NULL, 0);
+			meson_t7_handoff_scanout(display, NULL, 0, NULL);
 		if (display->managed_sram && !READ_ONCE(display->faulted))
 			meson_t7_handoff_drain_layers(display);
 		meson_t7_modeset_disable(display->modeset);
 		drm_crtc_vblank_off(crtc);
-		if (crtc->state->event) {
+		if (new->event) {
 			if (display->faulted) {
-				meson_t7_handoff_abort_event(crtc);
-			} else if (!crtc->state->active) {
+				meson_t7_handoff_abort_event(crtc, new);
+			} else if (!new->active) {
 				spin_lock_irq(&crtc->dev->event_lock);
-				drm_crtc_send_vblank_event(crtc, crtc->state->event);
-				crtc->state->event = NULL;
+				drm_crtc_send_vblank_event(crtc, new->event);
+				new->event = NULL;
 				spin_unlock_irq(&crtc->dev->event_lock);
 			}
 		}
 		return;
 	}
 	/* The reserved boot frame is never returned to the DMA allocator. */
-	meson_t7_handoff_scanout(to_handoff(crtc->dev), NULL, HANDOFF_BOOT_ADDR);
+	meson_t7_handoff_scanout(to_handoff(crtc->dev), NULL, HANDOFF_BOOT_ADDR, NULL);
 	drm_crtc_vblank_off(crtc);
 	meson_t7_handoff_flush(crtc, state);
 }
