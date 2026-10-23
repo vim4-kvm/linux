@@ -168,8 +168,6 @@ struct meson_hdmitx21 {
 	struct device *dev;
 	struct drm_bridge bridge;
 	struct drm_bridge *next_bridge;
-	void __iomem *top;
-	void __iomem *cor;
 	resource_size_t boot_top, boot_cor;
 	struct regmap *hhi;	/* analog control block with the PHY, from meson DRM */
 	struct clk *pclk;
@@ -188,24 +186,41 @@ static inline struct meson_hdmitx21 *bridge_to_hdmitx(struct drm_bridge *bridge)
 	return container_of(bridge, struct meson_hdmitx21, bridge);
 }
 
+/* T7 TOP/COR are secure: reg_ops.c uses width-specific firmware calls. */
+static u32 meson_hdmitx21_smc_read(resource_size_t address, unsigned int width)
+{
+	struct arm_smccc_res result;
+
+	arm_smccc_smc(0x82000018, address, width, 0, 0, 0, 0, 0, &result);
+	return result.a0;
+}
+
+static void meson_hdmitx21_smc_write(resource_size_t address, u32 value,
+				    unsigned int width)
+{
+	struct arm_smccc_res result;
+
+	arm_smccc_smc(0x82000019, address, value, width, 0, 0, 0, 0, &result);
+}
+
 static u32 top_read(struct meson_hdmitx21 *tx, u32 reg)
 {
-	return readl(tx->top + reg);
+	return meson_hdmitx21_smc_read(tx->boot_top + reg, 32);
 }
 
 static void top_write(struct meson_hdmitx21 *tx, u32 reg, u32 val)
 {
-	writel(val, tx->top + reg);
+	meson_hdmitx21_smc_write(tx->boot_top + reg, val, 32);
 }
 
 static u8 cor_read(struct meson_hdmitx21 *tx, u32 reg)
 {
-	return readb(tx->cor + reg);
+	return meson_hdmitx21_smc_read(tx->boot_cor + reg, 8);
 }
 
 static void cor_write(struct meson_hdmitx21 *tx, u32 reg, u8 val)
 {
-	writeb(val, tx->cor + reg);
+	meson_hdmitx21_smc_write(tx->boot_cor + reg, val, 8);
 }
 
 static u32 phy_read(struct meson_hdmitx21 *tx, u32 reg)
@@ -365,8 +380,8 @@ static int meson_hdmitx21_ddc_write(struct meson_hdmitx21 *tx, u8 addr,
 	cor_write(tx, DDC_DIN_CNT2, 0);
 	meson_hdmitx21_ddc_cmd(tx, DDC_CMD_SEQ_WRITE);
 
-	ret = readb_poll_timeout(tx->cor + DDC_STATUS, st,
-				 !(st & DDC_STATUS_BUSY), 1000, 20000);
+	ret = read_poll_timeout(cor_read, st, !(st & DDC_STATUS_BUSY),
+				1000, 20000, false, tx, DDC_STATUS);
 	if (!ret && (st & (DDC_STATUS_NACK | DDC_STATUS_BUS_LOW))) {
 		cor_write(tx, DDC_STATUS, 0);
 		ret = -ENXIO;
@@ -923,14 +938,6 @@ static irqreturn_t meson_hdmitx21_irq_thread(int irq, void *dev_id)
  * enter the normal attach/enable callbacks, which change PHY and TX registers.
  * Use the vendor TOP/COR SMC read ABI, including its byte-width argument.
  */
-static u32 meson_hdmitx21_boot_read(resource_size_t address, unsigned int width)
-{
-	struct arm_smccc_res result;
-
-	arm_smccc_smc(0x82000018, address, width, 0, 0, 0, 0, 0, &result);
-	return result.a0;
-}
-
 static int meson_hdmitx21_boot_attach(struct drm_bridge *bridge,
 				      struct drm_encoder *encoder,
 				      enum drm_bridge_attach_flags flags)
@@ -1002,9 +1009,9 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	tx->pclk = devm_clk_get_enabled(dev, "pclk");
 	if (IS_ERR(tx->pclk))
 		return PTR_ERR(tx->pclk);
-	status = meson_hdmitx21_boot_read(tx->boot_top + TOP_STAT0, 32);
-	active = meson_hdmitx21_boot_read(tx->boot_top + TOP_HV_ACTIVE, 32);
-	tpi = meson_hdmitx21_boot_read(tx->boot_cor + TPI_SC, 8);
+	status = top_read(tx, TOP_STAT0);
+	active = top_read(tx, TOP_HV_ACTIVE);
+	tpi = cor_read(tx, TPI_SC);
 	dev_info(dev, "boot TX TOP_STAT0=%#x active=%#x TPI_SC=%#x (SMC read-only, fixed sink)\n",
 		 status, active, tpi);
 	if (active != (1080 << 16 | 1920))
@@ -1020,6 +1027,7 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct meson_hdmitx21 *tx;
 	struct reset_control *rst;
+	struct resource *top, *cor;
 	int irq, ret;
 
 	if (of_property_present(dev->of_node, "amlogic,boot-handoff"))
@@ -1034,12 +1042,16 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 	mutex_init(&tx->ddc_lock);
 	mutex_init(&tx->audio_lock);
 
-	tx->top = devm_platform_ioremap_resource_byname(pdev, "top");
-	if (IS_ERR(tx->top))
-		return PTR_ERR(tx->top);
-	tx->cor = devm_platform_ioremap_resource_byname(pdev, "cor");
-	if (IS_ERR(tx->cor))
-		return PTR_ERR(tx->cor);
+	top = platform_get_resource_byname(pdev, IORESOURCE_MEM, "top");
+	cor = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cor");
+	if (!top || !cor || top->start != 0xfe300000 || cor->start != 0xfe380000 ||
+	    resource_size(top) != 0x10000 || resource_size(cor) != 0x10000)
+		return -EINVAL;
+	if (!devm_request_mem_region(dev, top->start, resource_size(top), dev_name(dev)) ||
+	    !devm_request_mem_region(dev, cor->start, resource_size(cor), dev_name(dev)))
+		return -EBUSY;
+	tx->boot_top = top->start;
+	tx->boot_cor = cor->start;
 
 	tx->pclk = devm_clk_get_enabled(dev, "pclk");
 	if (IS_ERR(tx->pclk))
