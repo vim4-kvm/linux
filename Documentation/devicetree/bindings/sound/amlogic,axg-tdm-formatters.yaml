@@ -18,6 +18,7 @@ properties:
       - amlogic,g12a-tdmin
       - amlogic,sm1-tdmin
       - amlogic,axg-tdmin
+      - amlogic,t7-tdmin
 
   clocks:
     items:
@@ -59,6 +60,7 @@ allOf:
               - amlogic,sm1-tdmin
               - amlogic,g12a-tdmout
               - amlogic,sm1-tdmout
+              - amlogic,t7-tdmin
     then:
       required:
         - resets
