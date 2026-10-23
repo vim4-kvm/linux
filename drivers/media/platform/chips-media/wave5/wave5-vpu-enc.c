@@ -933,6 +933,7 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	struct vpu_instance *inst = wave5_ctrl_to_vpu_inst(ctrl);
 	struct enc_wave_param *param = &inst->enc_param;
 	u32 mask = wave5_enc_change_mask(ctrl->id);
+	u32 gop_size;
 	int ret;
 
 	if ((ctrl->id >= V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP &&
@@ -969,11 +970,19 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		if (duration < MIN_VBV_BUFFER_SIZE || duration > MAX_VBV_BUFFER_SIZE)
 			return -ERANGE;
 	}
+	gop_size = inst->b_frames + 1;
+	if (inst->state == VPU_INST_STATE_PIC_RUN) {
+		const struct enc_wave_param *active = inst->std == W_HEVC_ENC ?
+			&inst->hevc_param : &inst->enc_param;
+
+		if (active->hier_enabled && active->hier_p)
+			gop_size = BIT(active->hier_layers - 1);
+	}
 	if (inst->state == VPU_INST_STATE_PIC_RUN &&
 	    (ctrl->id == V4L2_CID_MPEG_VIDEO_GOP_SIZE ||
 	     ctrl->id == V4L2_CID_MPEG_VIDEO_H264_I_PERIOD ||
 	     ctrl->id == V4L2_CID_MPEG_VIDEO_HEVC_REFRESH_PERIOD) &&
-	    ctrl->val % (inst->b_frames + 1))
+	    ctrl->val % gop_size)
 		return -EINVAL;
 
 	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
@@ -984,6 +993,7 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_TYPE:
 	case V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_TYPE:
+		param->hier_p = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER:
 		param->hier_layers = ctrl->val;
@@ -1543,11 +1553,15 @@ static int wave5_set_enc_gop(struct enc_open_param *open, struct vpu_instance *i
 	u32 size = inst->b_frames + 1;
 	unsigned int index = 0, layer, step, poc;
 
-	if (size > MAX_GOP_NUM)
+	if (input->hier_enabled && (!input->hier_layers || input->hier_layers > 4))
 		return -EINVAL;
-	if (input->hier_enabled &&
-	    (!input->hier_layers || input->hier_layers > 4 ||
-	     size != BIT(input->hier_layers - 1)))
+	if (input->hier_enabled && input->hier_p) {
+		if (inst->b_frames || inst->ltr_count)
+			return -EINVAL;
+		size = BIT(input->hier_layers - 1);
+	}
+	if (size > MAX_GOP_NUM ||
+	    (input->hier_enabled && size != BIT(input->hier_layers - 1)))
 		return -EINVAL;
 	if ((param->intra_period && param->intra_period % size) ||
 	    (param->avc_idr_period && param->avc_idr_period % size))
@@ -1560,25 +1574,37 @@ static int wave5_set_enc_gop(struct enc_open_param *open, struct vpu_instance *i
 	}
 	param->gop_preset_idx = PRESET_IDX_CUSTOM_GOP;
 	open->custom_gop_size = size;
-	open->custom_gop[index++] = (struct custom_gop_pic_param) {
-		.pic_type = PIC_TYPE_P, .poc_offset = size,
-		.pic_qp = input->hier_enabled && input->hier_qp_enable ?
-			input->hier_qp[0] : param->fixed_qp_p,
-	};
-	/* Breadth-first subdivision emits references before their dependent B pictures. */
-	for (layer = 1, step = size / 2; index < size; layer++, step /= 2) {
-		for (poc = input->hier_enabled ? step : 1; poc < size;
-		     poc += input->hier_enabled ? step * 2 : 1) {
-			struct custom_gop_pic_param *pic = &open->custom_gop[index++];
-
-			*pic = (struct custom_gop_pic_param) {
-				.pic_type = PIC_TYPE_B, .poc_offset = poc,
-				.pic_qp = input->hier_enabled && input->hier_qp_enable ?
-					input->hier_qp[layer] : param->fixed_qp_b,
-				.temporal_id = input->hier_enabled ? layer : 0,
-				.ref_poc_l0 = input->hier_enabled ? poc - step : 0,
-				.ref_poc_l1 = input->hier_enabled ? poc + step : size,
+	if (input->hier_enabled && input->hier_p) {
+		for (poc = 1; poc <= size; poc++) {
+			layer = input->hier_layers - 1 - __ffs(poc);
+			open->custom_gop[index++] = (struct custom_gop_pic_param) {
+				.pic_type = PIC_TYPE_P, .poc_offset = poc,
+				.pic_qp = input->hier_qp_enable ?
+					input->hier_qp[layer] : param->fixed_qp_p,
+				.ref_poc_l0 = poc - BIT(__ffs(poc)), .temporal_id = layer,
 			};
+		}
+	} else {
+		open->custom_gop[index++] = (struct custom_gop_pic_param) {
+			.pic_type = PIC_TYPE_P, .poc_offset = size,
+			.pic_qp = input->hier_enabled && input->hier_qp_enable ?
+				input->hier_qp[0] : param->fixed_qp_p,
+		};
+		/* Subdivision emits references before their dependent B pictures. */
+		for (layer = 1, step = size / 2; index < size; layer++, step /= 2) {
+			for (poc = input->hier_enabled ? step : 1; poc < size;
+			     poc += input->hier_enabled ? step * 2 : 1) {
+				struct custom_gop_pic_param *pic = &open->custom_gop[index++];
+
+				*pic = (struct custom_gop_pic_param) {
+					.pic_type = PIC_TYPE_B, .poc_offset = poc,
+					.pic_qp = input->hier_enabled && input->hier_qp_enable ?
+						input->hier_qp[layer] : param->fixed_qp_b,
+					.temporal_id = input->hier_enabled ? layer : 0,
+					.ref_poc_l0 = input->hier_enabled ? poc - step : 0,
+					.ref_poc_l1 = input->hier_enabled ? poc + step : size,
+				};
+			}
 		}
 	}
 	for (index = 0; index < size; index++) {
@@ -2363,7 +2389,7 @@ static int wave5_vpu_open_enc(struct file *filp)
 			  V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 0, 1, 1, 0);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_TYPE,
-			       V4L2_MPEG_VIDEO_H264_HIERARCHICAL_CODING_B, 0,
+			       V4L2_MPEG_VIDEO_H264_HIERARCHICAL_CODING_P, 0,
 			       V4L2_MPEG_VIDEO_H264_HIERARCHICAL_CODING_B);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER, 1, 4, 1, 1);
@@ -2372,7 +2398,7 @@ static int wave5_vpu_open_enc(struct file *filp)
 			  0, (3 << 16) | 51, 1, 30);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_TYPE,
-			       V4L2_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_B, 0,
+			       V4L2_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_P, 0,
 			       V4L2_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_B);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER, 0, 3, 1, 0);

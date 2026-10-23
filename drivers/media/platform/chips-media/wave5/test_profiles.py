@@ -305,6 +305,7 @@ typedef uint64_t u64;
 #define PRESET_IDX_IPP_SINGLE 9
 #define PIC_TYPE_P 1
 #define PIC_TYPE_B 2
+#define __ffs(value) __builtin_ctz(value)
 #define dev_dbg(...) ((void)0)
 #ifndef V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE
 #define V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE 0x00990b00
@@ -537,6 +538,22 @@ int main(void)
             assert(!wave5_set_enc_gop(&open,&a));
         }
         input->hier_layers=0;
+        assert(wave5_set_enc_gop(&open,&a)==-EINVAL);
+        input->hier_p=true; a.b_frames=0; a.ltr_count=0;
+        for(unsigned layers=1;layers<=4;layers++) {
+            input->hier_layers=layers;
+            open=(struct enc_open_param){.wave_param={.max_qp_p=51,.max_qp_b=51}};
+            assert(!wave5_set_enc_gop(&open,&a));
+            for(unsigned i=0;i<open.custom_gop_size;i++) {
+                struct custom_gop_pic_param *pic=&open.custom_gop[i];
+                assert(pic->pic_type==PIC_TYPE_P && pic->poc_offset==i+1);
+                assert(pic->ref_poc_l0<pic->poc_offset);
+                if(pic->ref_poc_l0) assert(open.custom_gop[pic->ref_poc_l0-1].temporal_id
+                                         <pic->temporal_id);
+                assert(pic->pic_qp==24+(unsigned)pic->temporal_id);
+            }
+        }
+        a.b_frames=1;
         assert(wave5_set_enc_gop(&open,&a)==-EINVAL);
     }
     puts("Wave5 codec control isolation, busy setters, flip reversal and two instances passed");

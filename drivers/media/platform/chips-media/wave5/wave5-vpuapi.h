@@ -487,6 +487,7 @@ struct custom_gop_pic_param {
 struct enc_wave_param {
 	bool use_long_term;
 	bool hier_enabled;
+	bool hier_p;
 	bool hier_qp_enable;
 	u32 hier_layers;
 	u32 hier_qp[4];
