@@ -1476,6 +1476,28 @@ F:	arch/arm64/boot/dts/amlogic/amlogic-t7-a311d2-khadas-vim4-display-m1.dts
 F:	drivers/gpu/drm/meson/meson_t7_handoff.*
 F:	drivers/gpu/drm/meson/test_t7_handoff.py
 
+AMLOGIC T7 CRG USB DEVICE CONTROLLER
+M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+L:	linux-usb@vger.kernel.org
+S:	Odd Fixes
+F:	Documentation/devicetree/bindings/usb/amlogic,t7-crg-udc.yaml
+F:	drivers/usb/gadget/udc/crg/
+
+AMLOGIC T7 HDMI RECEIVER AND CAPTURE EXPERIMENT
+M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+L:	linux-media@vger.kernel.org
+S:	Odd Fixes
+F:	Documentation/devicetree/bindings/media/amlogic,t7-hdmirx.yaml
+F:	Documentation/devicetree/bindings/media/amlogic,t7-vdin-test.yaml
+F:	drivers/media/platform/amlogic/t7-hdmirx/
+
+AMLOGIC T7 JPEG ENCODER
+M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+L:	linux-media@vger.kernel.org
+S:	Odd Fixes
+F:	Documentation/devicetree/bindings/media/amlogic,t7-jpeg-encoder.yaml
+F:	drivers/media/platform/amlogic/t7-jpeg/
+
 AMLOGIC VDEC DRIVER
 M:	Zhentao Guo <zhentao.guo@amlogic.com>
 L:	linux-media@vger.kernel.org
