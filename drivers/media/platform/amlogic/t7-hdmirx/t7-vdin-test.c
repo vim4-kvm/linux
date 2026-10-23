@@ -167,6 +167,7 @@ struct t7_vdin {
 	u64 copied_bytes;
 	/* Last failed worker remains visible across close and the next STREAMON. */
 	u32 stream_stops, last_stop_sequence;
+	u64 invalid_frames;
 	int last_stop_error;
 	const char *last_stop_reason;
 	u32 hdr_gain[149], hdr_oetf[149];
@@ -794,6 +795,8 @@ static int t7_vdin_thread(void *data)
 		/* A torn RX measurement invalidates this frame, not the stream.
 		 * Persistent instability is bounded by the receiver recovery worker.
 		 */
+		if (ret == -EAGAIN)
+			vdin->invalid_frames++;
 		if (ret && ret != -EAGAIN) {
 			unsigned long flags;
 
@@ -1359,6 +1362,7 @@ static int t7_vdin_status(struct seq_file *s, void *unused)
 	seq_printf(s, "stream_pauses: %u\n", vdin->ring_pauses);
 	seq_printf(s, "stream_error: %d\n", vdin->ring_error);
 	seq_printf(s, "stream_stops: %u\n", READ_ONCE(vdin->stream_stops));
+	seq_printf(s, "invalid_frames: %llu\n", READ_ONCE(vdin->invalid_frames));
 	seq_printf(s, "last_stop_error: %d\n", READ_ONCE(vdin->last_stop_error));
 	seq_printf(s, "last_stop_reason: %s\n", vdin->last_stop_reason ?: "none");
 	seq_printf(s, "last_stop_sequence: %u\n", READ_ONCE(vdin->last_stop_sequence));
