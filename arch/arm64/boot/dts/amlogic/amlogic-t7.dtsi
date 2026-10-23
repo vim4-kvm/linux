@@ -2003,8 +2003,9 @@
 			 <&clkc_periphs CLKID_VDEC>;
 		clock-names = "vdec", "clk_vdec_mux";
 		/* Secure firmware owns VDEC RAM/isolation/reset; NIC3 is its parent. */
-		power-domains = <&pwrc PWRC_T7_DOS_VDEC_ID>;
-		power-domain-names = "vdec";
+		power-domains = <&pwrc PWRC_T7_DOS_VDEC_ID>,
+				<&pwrc PWRC_T7_NIC3_ID>;
+		power-domain-names = "vdec", "nic3";
 		amlogic,canvas = <&canvas>;
 		status = "disabled";
 	};

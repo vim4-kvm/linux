@@ -119,6 +119,14 @@ struct pm_pd_s {
  * @mdec_test_passed: Explicit MDEC read and subsequent power-off succeeded.
  * @mdec_test_value: Cached MDEC_PIC_DC_CTRL sample.
  * @secure_swap: Scratch G supplied by the secure microcode loader.
+ * @nic3_dev: Parent domain held explicitly for DOS-top access before VDEC on.
+ * @nic3_held: An explicit parent runtime PM reference is owned.
+ * @clocks_held: Both DOS bus and VDEC functional clocks are owned.
+ * @probe_step: Last completed single-register diagnostic step, zero if idle.
+ * @probe_value: Cached value of the last diagnostic read.
+ * @probe_en0: DOS-top gate sample, including the shared HCODEC bits.
+ * @probe_failed: A failed diagnostic prohibits another attempt in this probe.
+ * @probe_pinned: Module reference held across diagnostic sysfs writes.
  */
 struct aml_vdec_hw {
 	struct platform_device *pdev;
@@ -139,6 +147,14 @@ struct aml_vdec_hw {
 	bool mdec_test_passed;
 	u32 mdec_test_value;
 	u32 secure_swap;
+	struct device *nic3_dev;
+	bool nic3_held;
+	bool clocks_held;
+	u32 probe_step;
+	u32 probe_value;
+	u32 probe_en0;
+	bool probe_failed;
+	bool probe_pinned;
 };
 
 /**
@@ -168,6 +184,7 @@ int vdec_disable(struct aml_vdec_hw *hw);
 int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3);
 int aml_vdec_t7_power_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw);
+int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
 int aml_stop_vdec_hw(struct aml_vdec_hw *hw);
