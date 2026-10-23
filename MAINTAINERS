@@ -1450,6 +1450,7 @@ F:	sound/soc/meson/test-data/t7-audio-routes.dts
 F:	sound/soc/meson/test_t7_aed.py
 F:	sound/soc/meson/test_t7_asrc.py
 F:	sound/soc/meson/test_t7_audio_routes.py
+F:	sound/soc/meson/test_t7_card.py
 F:	sound/soc/meson/test_t7_frddr.py
 F:	sound/soc/meson/test_t7_loopback.py
 F:	sound/soc/meson/test_t7_spdifin.py

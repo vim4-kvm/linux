@@ -5,6 +5,7 @@
 
 #include <linux/module.h>
 #include <linux/of_platform.h>
+#include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/soc-dai.h>
 
@@ -17,6 +18,8 @@ struct axg_dai_link_tdm_mask {
 };
 
 struct axg_dai_link_tdm_data {
+	unsigned int convert_rate;
+	unsigned int convert_channels;
 	unsigned int mclk_fs;
 	unsigned int slots;
 	unsigned int slot_width;
@@ -136,6 +139,7 @@ static int axg_card_add_tdm_loopback(struct snd_soc_card *card,
 	lb->cpus->dai_name = "TDM Loopback";
 	lb->capture_only = 1;
 	lb->no_pcm = 1;
+	lb->be_hw_params_fixup = pad->be_hw_params_fixup;
 	lb->ops = &axg_card_tdm_be_ops;
 	lb->init = axg_card_tdm_dai_lb_init;
 
@@ -251,15 +255,9 @@ static int axg_card_parse_tdm(struct snd_soc_card *card,
 {
 	struct meson_card *priv = snd_soc_card_get_drvdata(card);
 	struct snd_soc_dai_link *link = &card->dai_link[*index];
-	struct axg_dai_link_tdm_data *be;
+	struct axg_dai_link_tdm_data *be = priv->link_data[*index];
 	struct device *dev = card->dev;
 	int ret;
-
-	/* Allocate tdm link parameters */
-	be = devm_kzalloc(dev, sizeof(*be), GFP_KERNEL);
-	if (!be)
-		return -ENOMEM;
-	priv->link_data[*index] = be;
 
 	/* Setup tdm link */
 	link->ops = &axg_card_tdm_be_ops;
@@ -311,10 +309,54 @@ static int axg_card_cpu_is_codec(struct device_node *np)
 		of_device_is_compatible(np, DT_PREFIX "g12a-toacodec");
 }
 
+static int axg_card_be_fixup(struct snd_soc_pcm_runtime *rtd,
+			     struct snd_pcm_hw_params *params)
+{
+	struct meson_card *priv = snd_soc_card_get_drvdata(rtd->card);
+	struct axg_dai_link_tdm_data *be = priv->link_data[rtd->id];
+	struct snd_interval *rate = hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
+	struct snd_interval *channels = hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
+
+	if (be->convert_rate) {
+		rate->min = be->convert_rate;
+		rate->max = be->convert_rate;
+	}
+	if (be->convert_channels) {
+		channels->min = be->convert_channels;
+		channels->max = be->convert_channels;
+	}
+	return 0;
+}
+
+static void axg_card_update_frontends(struct snd_soc_card *card)
+{
+	struct meson_card *priv = snd_soc_card_get_drvdata(card);
+	bool rate = true, channels = true;
+	unsigned int i;
+
+	/* Converter pipelines have different parameters on each side. */
+	for (i = 0; i < card->num_links; i++) {
+		struct axg_dai_link_tdm_data *be = priv->link_data[i];
+
+		if (be) {
+			rate &= !be->convert_rate;
+			channels &= !be->convert_channels;
+		}
+	}
+	for (i = 0; i < card->num_links; i++) {
+		if (card->dai_link[i].dynamic) {
+			card->dai_link[i].dpcm_merged_rate = rate;
+			card->dai_link[i].dpcm_merged_chan = channels;
+		}
+	}
+}
+
 static int axg_card_add_link(struct snd_soc_card *card, struct device_node *np,
 			     int *index)
 {
 	struct snd_soc_dai_link *dai_link = &card->dai_link[*index];
+	struct meson_card *priv = snd_soc_card_get_drvdata(card);
+	struct axg_dai_link_tdm_data *be;
 	struct snd_soc_dai_link_component *cpu;
 	struct device *dev = card->dev;
 	int ret;
@@ -331,15 +373,30 @@ static int axg_card_add_link(struct snd_soc_card *card, struct device_node *np,
 	if (ret)
 		return ret;
 
-	if (axg_card_cpu_is_playback_fe(dai_link->cpus->of_node))
-		return meson_card_set_fe_link(card, dai_link, np, true);
-	else if (axg_card_cpu_is_capture_fe(dai_link->cpus->of_node))
-		return meson_card_set_fe_link(card, dai_link, np, false);
-
+	if (axg_card_cpu_is_playback_fe(dai_link->cpus->of_node)) {
+		ret = meson_card_set_fe_link(card, dai_link, np, true);
+		if (of_device_is_compatible(dai_link->cpus->of_node, DT_PREFIX "t7-frddr"))
+			dai_link->trigger[SNDRV_PCM_STREAM_PLAYBACK] = SND_SOC_DPCM_TRIGGER_POST;
+		goto update_frontends;
+	} else if (axg_card_cpu_is_capture_fe(dai_link->cpus->of_node)) {
+		ret = meson_card_set_fe_link(card, dai_link, np, false);
+		goto update_frontends;
+	}
 
 	ret = meson_card_set_be_link(card, dai_link, np);
 	if (ret)
 		return ret;
+	be = devm_kzalloc(dev, sizeof(*be), GFP_KERNEL);
+	if (!be)
+		return -ENOMEM;
+	priv->link_data[*index] = be;
+	of_property_read_u32(np, "convert-rate", &be->convert_rate);
+	of_property_read_u32(np, "convert-channels", &be->convert_channels);
+	if ((be->convert_rate && (be->convert_rate < 8000 || be->convert_rate > 192000)) ||
+	    be->convert_channels > AXG_TDM_CHANNEL_MAX)
+		return -EINVAL;
+	if (be->convert_rate || be->convert_channels)
+		dai_link->be_hw_params_fixup = axg_card_be_fixup;
 
 	if (axg_card_cpu_is_codec(dai_link->cpus->of_node)) {
 		dai_link->c2c_params = &codec_params;
@@ -350,6 +407,9 @@ static int axg_card_add_link(struct snd_soc_card *card, struct device_node *np,
 			ret = axg_card_parse_tdm(card, np, index);
 	}
 
+update_frontends:
+	if (!ret)
+		axg_card_update_frontends(card);
 	return ret;
 }
 
