@@ -11,6 +11,7 @@
 #include <linux/atomic.h>
 #include <linux/kfifo.h>
 #include <linux/idr.h>
+#include <linux/notifier.h>
 #include <linux/genalloc.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-mem2mem.h>
@@ -778,8 +779,16 @@ struct vpu_device {
 	struct semaphore irq_sem; /* signal to irq_thread when interrupt happens*/
 	struct reset_control *resets;
 	spinlock_t irq_spinlock; /* protect instances list */
-	/* 0: normal, 1: claimed, 2: metadata published; irreversible until boot. */
+	/* 0: running, 1: claimed, 2: isolated, 3: recovering. */
 	unsigned int isolated;
+	struct task_struct *recovery_owner;
+	bool recovery_failed;
+	bool shutting_down;
+	bool power_off_seen;
+	bool power_on_seen;
+	struct notifier_block power_notifier;
+	const struct firmware *firmware;
+	struct list_head retained_planes;
 	u32 isolation_command;
 	u32 last_command;
 	const char *isolation_reason;
@@ -797,6 +806,8 @@ struct vpu_instance_ops {
 };
 
 struct vpu_instance {
+	bool recovery_error;
+	bool released;
 	struct list_head list;
 	struct v4l2_fh v4l2_fh;
 	struct v4l2_m2m_dev *v4l2_m2m_dev;

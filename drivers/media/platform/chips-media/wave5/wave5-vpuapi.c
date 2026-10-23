@@ -740,9 +740,25 @@ int wave5_vpu_enc_open(struct vpu_instance *inst, struct enc_open_param *open_pa
 	return ret;
 }
 
+void wave5_vpu_enc_free_buffers(struct vpu_instance *inst)
+{
+	struct enc_info *info;
+
+	if (!inst->codec_info)
+		return;
+	info = &inst->codec_info->enc_info;
+	wave5_vdi_free_dma_memory(inst->dev, &info->vb_work);
+	if (inst->std == W_HEVC_ENC || inst->std == W_AVC_ENC) {
+		wave5_vdi_free_dma_memory(inst->dev, &info->vb_sub_sam_buf);
+		wave5_vdi_free_dma_memory(inst->dev, &info->vb_mv);
+		wave5_vdi_free_dma_memory(inst->dev, &info->vb_fbc_y_tbl);
+		wave5_vdi_free_dma_memory(inst->dev, &info->vb_fbc_c_tbl);
+	}
+	wave5_vdi_free_dma_memory(inst->dev, &info->vb_task);
+}
+
 int wave5_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res)
 {
-	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
 	int ret;
 	int retry = 0;
 	struct vpu_device *vpu_dev = inst->dev;
@@ -751,11 +767,13 @@ int wave5_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res)
 	if (!inst->codec_info)
 		return -EINVAL;
 
-	pm_runtime_resume_and_get(inst->dev->dev);
+	ret = pm_runtime_resume_and_get(inst->dev->dev);
+	if (ret < 0)
+		return ret;
 
 	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
 	if (ret) {
-		pm_runtime_resume_and_get(inst->dev->dev);
+		pm_runtime_put_autosuspend(inst->dev->dev);
 		return ret;
 	}
 
@@ -763,7 +781,7 @@ int wave5_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res)
 		ret = wave5_vpu_enc_finish_seq(inst, fail_res);
 		if (ret < 0 && *fail_res != WAVE5_SYSERR_VPU_STILL_RUNNING) {
 			dev_warn(inst->dev->dev, "enc_finish_seq timed out\n");
-			pm_runtime_resume_and_get(inst->dev->dev);
+			pm_runtime_put_autosuspend(inst->dev->dev);
 			mutex_unlock(&vpu_dev->hw_lock);
 			return ret;
 		}
@@ -778,7 +796,7 @@ int wave5_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res)
 
 		if (*fail_res == WAVE5_SYSERR_VPU_STILL_RUNNING &&
 		    retry++ >= MAX_FIRMWARE_CALL_RETRY) {
-			pm_runtime_resume_and_get(inst->dev->dev);
+			pm_runtime_put_autosuspend(inst->dev->dev);
 			mutex_unlock(&vpu_dev->hw_lock);
 			return -ETIMEDOUT;
 		}
@@ -786,16 +804,7 @@ int wave5_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res)
 
 	dev_dbg(inst->dev->dev, "%s: enc_finish_seq complete\n", __func__);
 
-	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_work);
-
-	if (inst->std == W_HEVC_ENC || inst->std == W_AVC_ENC) {
-		wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_sub_sam_buf);
-		wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_mv);
-		wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_fbc_y_tbl);
-		wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_fbc_c_tbl);
-	}
-
-	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_task);
+	wave5_vpu_enc_free_buffers(inst);
 	mutex_unlock(&vpu_dev->hw_lock);
 	pm_runtime_put_sync(inst->dev->dev);
 

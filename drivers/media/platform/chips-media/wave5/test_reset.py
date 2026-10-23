@@ -79,7 +79,7 @@ static bool ktime_before(ktime_t a, ktime_t b) { return a < b; }
 static void usleep_range(unsigned a, unsigned b) { (void)b; hw.now += a; }
 static void *dev_get_drvdata(struct device *dev) { return dev->data; }
 /* Runtime isolation is disabled during initial probe/reset. */
-static bool wave5_vpu_isolated(struct vpu_device *dev) { (void)dev; return false; }
+static bool wave5_vpu_hw_blocked(struct vpu_device *dev) { (void)dev; return false; }
 static bool wave5_vpu_inject_timeout(struct vpu_device *dev, u32 command)
 { (void)dev; (void)command; return false; }
 static void wave5_vpu_isolate(struct vpu_device *dev, const char *reason, u32 command)

@@ -3,25 +3,40 @@ Date:           October 2026
 Contact:        linux-media@vger.kernel.org
 Description:
                 Read-only quarantine state for the Amlogic T7 encoder. 0 is
-                usable, 1 means that command/frame completion or cancellation
-                failed. All open encoder queues report errors and new opens
+                not quarantined (also check recovering), 1 means that recovery
+                from a command/frame/cancellation failure failed. All old queues
+                report errors and new opens
                 and hardware jobs are rejected. DMA memory and mappings are
                 retained because stopping DMA has not been established. The
                 module cannot be unloaded and userspace unbind is disabled.
-                Only a board reboot clears this state. No runtime reset or
-                firmware reload is attempted. A KOBJ_CHANGE uevent carries
+                Only a board reboot clears a failed recovery. A KOBJ_CHANGE
+                uevent carries
                 WAVE5_ISOLATED=1 when quarantine is published.
+
+What:           /sys/bus/platform/drivers/vdec/.../recovering
+Date:           October 2026
+Contact:        linux-media@vger.kernel.org
+Description:
+                Read-only recovery state for the Amlogic T7 encoder. 1 means
+                new opens and hardware jobs are blocked while all old queues
+                are failed and the driver attempts a drained power cycle of
+                the dedicated domain followed by a cold firmware reload.
+                Success clears recovering and emits WAVE5_RECOVERED=1 in a
+                KOBJ_CHANGE uevent; old file handles remain failed and must be
+                closed and reopened. Failure sets isolated to 1, keeps DMA
+                storage pinned and emits WAVE5_ISOLATED=1 instead.
 
 What:           /sys/bus/platform/drivers/vdec/.../isolation_reason
 Date:           October 2026
 Contact:        linux-media@vger.kernel.org
 Description:
-                Read-only human-readable first failure, or "none" before a
-                failure. Later failures do not replace the original cause.
+                Read-only human-readable initiating failure, or "none" before
+                a failure. Retained after successful recovery; updated on the
+                next recovery attempt. Nested failures do not replace it.
 
 What:           /sys/bus/platform/drivers/vdec/.../isolation_time_ns
 Date:           October 2026
 Contact:        linux-media@vger.kernel.org
 Description:
-                Read-only decimal CLOCK_BOOTTIME nanoseconds at the first
+                Read-only decimal CLOCK_BOOTTIME nanoseconds at the initiating
                 failure, or 0 before failure. This is not wall-clock time.

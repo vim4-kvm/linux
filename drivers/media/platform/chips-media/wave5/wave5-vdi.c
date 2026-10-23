@@ -78,7 +78,7 @@ int wave5_vdi_release(struct device *dev)
 
 void wave5_vdi_write_register(struct vpu_device *vpu_dev, u32 addr, u32 data)
 {
-	if (wave5_vpu_isolated(vpu_dev))
+	if (wave5_vpu_hw_blocked(vpu_dev))
 		return;
 	if (addr == W5_COMMAND)
 		WRITE_ONCE(vpu_dev->last_command, data);

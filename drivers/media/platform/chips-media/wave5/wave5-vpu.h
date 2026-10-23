@@ -69,6 +69,10 @@ static inline struct vpu_dst_buffer *wave5_to_vpu_dst_buf(struct vb2_v4l2_buffer
 int wave5_vpu_wait_interrupt(struct vpu_instance *inst, unsigned int timeout);
 
 bool wave5_vpu_isolated(struct vpu_device *dev);
+bool wave5_vpu_hw_blocked(struct vpu_device *dev);
+int wave5_vpu_recover_hardware(struct vpu_device *dev);
+void wave5_vpu_enc_free_buffers(struct vpu_instance *inst);
+void wave5_vpu_release_retained(struct vpu_instance *inst);
 void wave5_vpu_isolate(struct vpu_device *dev, const char *reason, u32 command);
 bool wave5_vpu_inject_timeout(struct vpu_device *dev, u32 command);
 void wave5_vpu_job_finish(struct vpu_instance *inst);
