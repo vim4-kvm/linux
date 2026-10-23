@@ -114,7 +114,7 @@ struct vpu_instance {
     struct enc_wave_param enc_param, hevc_param;
     unsigned state, encode_aud, mirror_direction, rot_angle, vbv_buf_size;
     unsigned rc_mode, bit_rate, intra_refresh_period, rc_enable, force_keyframe;
-    unsigned h264_cpb_size, std;
+    unsigned h264_cpb_size, std, b_frames;
 };
 struct enc_open_param { unsigned vbv_buffer_size; };
 struct v4l2_ctrl { unsigned id; int val; struct vpu_instance *owner; struct v4l2_ctrl **cluster; };

@@ -49,6 +49,7 @@ struct enc_open_param {
     struct { u32 internal_bit_depth; } wave_param;
 };
 struct enc_info {
+	bool destroyed;
     struct enc_open_param open_param;
     u32 stride, rotation_angle, mirror_direction, vlc_buf_size, param_buf_size;
     struct vpu_buf vb_work, vb_mv, vb_fbc_y_tbl, vb_fbc_c_tbl, vb_sub_sam_buf, vb_task;
@@ -153,6 +154,10 @@ int main(void)
         assert(!wave5_vpu_enc_close(&inst, &reason));
         assert(!pm_refs);
         assert(!live);
+        unsigned completed=commands;
+        assert(info.enc_info.destroyed);
+        assert(!wave5_vpu_enc_close(&inst, &reason));
+        assert(commands==completed && !pm_refs && !live);
     }
     puts("Wave5 allocation rollback, firmware ownership and close passed (32 cases)");
 }

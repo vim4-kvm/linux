@@ -220,7 +220,6 @@ int wave5_vpu_dec_close(struct vpu_instance *inst, u32 *fail_res)
 	*fail_res = 0;
 	if (!inst->codec_info)
 		return -EINVAL;
-
 	pm_runtime_resume_and_get(inst->dev->dev);
 
 	ret_mutex = mutex_lock_interruptible(&vpu_dev->hw_lock);
@@ -732,6 +731,7 @@ int wave5_vpu_enc_open(struct vpu_instance *inst, struct enc_open_param *open_pa
 	}
 
 	p_enc_info = &inst->codec_info->enc_info;
+	p_enc_info->destroyed = false;
 	p_enc_info->open_param = *open_param;
 
 	ret = wave5_vpu_build_up_enc_param(vpu_dev->dev, inst, open_param);
@@ -766,6 +766,8 @@ int wave5_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res)
 	*fail_res = 0;
 	if (!inst->codec_info)
 		return -EINVAL;
+	if (inst->codec_info->enc_info.destroyed)
+		return 0;
 
 	ret = pm_runtime_resume_and_get(inst->dev->dev);
 	if (ret < 0)
@@ -803,6 +805,7 @@ int wave5_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res)
 	} while (ret != 0);
 
 	dev_dbg(inst->dev->dev, "%s: enc_finish_seq complete\n", __func__);
+	inst->codec_info->enc_info.destroyed = true;
 
 	wave5_vpu_enc_free_buffers(inst);
 	mutex_unlock(&vpu_dev->hw_lock);

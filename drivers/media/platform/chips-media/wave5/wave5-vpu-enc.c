@@ -153,6 +153,23 @@ invalid_state_switch:
 	return -EINVAL;
 }
 
+static struct vb2_v4l2_buffer *wave5_find_src(struct v4l2_m2m_ctx *ctx, bool submitted)
+{
+	struct v4l2_m2m_buffer *buf;
+	struct vb2_v4l2_buffer *next = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ctx->out_q_ctx.rdy_spinlock, flags);
+	v4l2_m2m_for_each_src_buf(ctx, buf) {
+		if (READ_ONCE(wave5_to_vpu_src_buf(&buf->vb)->consumed) == submitted) {
+			next = &buf->vb;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&ctx->out_q_ctx.rdy_spinlock, flags);
+	return next;
+}
+
 static dma_addr_t wave5_vpu_enc_source_addr(struct vb2_buffer *vb, unsigned int plane)
 {
 	return vb2_dma_contig_plane_dma_addr(vb, plane) + vb->planes[plane].data_offset;
@@ -197,7 +214,7 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 	pic_param.pic_stream_buffer_size =
 		vb2_plane_size(&dst_buf->vb2_buf, 0);
 
-	src_buf = v4l2_m2m_next_src_buf(m2m_ctx);
+	src_buf = wave5_find_src(m2m_ctx, false);
 	if (!src_buf) {
 		dev_dbg(inst->dev->dev, "%s: No source buffer found\n", __func__);
 		if (m2m_ctx->is_draining)
@@ -254,7 +271,8 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 
 		dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame fail: %d\n",
 			__func__, ret);
-		src_buf = v4l2_m2m_src_buf_remove(m2m_ctx);
+		if (src_buf)
+			src_buf = v4l2_m2m_src_buf_remove_by_idx(m2m_ctx, src_buf->vb2_buf.index);
 		if (!src_buf) {
 			dev_dbg(inst->dev->dev,
 				"%s: Removing src buf failed, the queue is empty\n",
@@ -274,6 +292,8 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
 		return ret;
 	} else {
+		if (src_buf)
+			WRITE_ONCE(wave5_to_vpu_src_buf(src_buf)->consumed, true);
 		dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame success\n",
 			__func__);
 	}
@@ -310,6 +330,13 @@ static void wave5_vpu_enc_finish_encode(struct vpu_instance *inst)
 		__func__,  enc_output_info.pic_type, enc_output_info.recon_frame_index,
 		enc_output_info.enc_src_idx, enc_output_info.enc_pic_byte, enc_output_info.pts);
 
+	/* Lookahead accepted input, but did not write a coded picture yet. Keep
+	 * both queues owned by the driver and let another instance run meanwhile.
+	 */
+	if (enc_output_info.recon_frame_index == RECON_IDX_FLAG_ENC_DELAY) {
+		wave5_vpu_job_finish(inst);
+		return;
+	}
 	if (enc_output_info.enc_src_idx >= 0) {
 		src_buf = v4l2_m2m_src_buf_remove_by_idx(m2m_ctx, enc_output_info.enc_src_idx);
 		if (!src_buf) {
@@ -904,6 +931,9 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
 		param->avc_idr_period = ctrl->val;
 		break;
+	case V4L2_CID_MPEG_VIDEO_B_FRAMES:
+		inst->b_frames = ctrl->val;
+		break;
 	case V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD:
 		inst->intra_refresh_period = ctrl->val;
 		break;
@@ -1285,10 +1315,12 @@ static void wave5_vpu_enc_buf_queue(struct vb2_buffer *vb)
 		__func__, vb->type, vb->index, vb2_plane_size(&vbuf->vb2_buf, 0),
 		vb2_plane_size(&vbuf->vb2_buf, 1), vb2_plane_size(&vbuf->vb2_buf, 2));
 
-	if (vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+	if (vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+		WRITE_ONCE(wave5_to_vpu_src_buf(vbuf)->consumed, false);
 		vbuf->sequence = inst->queued_src_buf_num++;
-	else
+	} else {
 		vbuf->sequence = inst->queued_dst_buf_num++;
+	}
 
 	v4l2_m2m_buf_queue(m2m_ctx, vbuf);
 }
@@ -1383,7 +1415,13 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	default:
 		break;
 	}
-	open_param->wave_param.gop_preset_idx = PRESET_IDX_IPP_SINGLE;
+	/* The fixed IBPBP preset has one reordered B picture between P pictures. */
+	open_param->wave_param.gop_preset_idx = inst->b_frames ?
+		PRESET_IDX_IBPBP : PRESET_IDX_IPP_SINGLE;
+	if (inst->b_frames &&
+	    ((inst->std == W_AVC_ENC && input.profile == H264_PROFILE_BP) ||
+	     (inst->std == W_HEVC_ENC && input.en_still_picture)))
+		return -EINVAL;
 	open_param->wave_param.hvs_qp_scale = 2;
 	open_param->wave_param.hvs_max_delta_qp = 10;
 	open_param->wave_param.skip_intra_trans = 1;
@@ -1560,7 +1598,8 @@ static int wave5_vpu_enc_start_streaming(struct vb2_queue *q, unsigned int count
 	pm_runtime_resume_and_get(inst->dev->dev);
 	v4l2_m2m_update_start_streaming_state(m2m_ctx, q);
 
-	if (inst->state == VPU_INST_STATE_NONE && q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+	if (inst->state == VPU_INST_STATE_NONE &&
+	    (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE || m2m_ctx->out_q_ctx.q.streaming)) {
 		struct enc_open_param open_param;
 
 		memset(&open_param, 0, sizeof(struct enc_open_param));
@@ -1623,6 +1662,42 @@ static int wave5_vpu_enc_start_streaming(struct vb2_queue *q, unsigned int count
 return_buffers:
 	wave5_return_bufs(q, VB2_BUF_STATE_QUEUED);
 	pm_runtime_put_autosuspend(inst->dev->dev);
+	return ret;
+}
+
+static int wave5_stop_retained_sources(struct vpu_instance *inst)
+{
+	struct v4l2_m2m_ctx *ctx = inst->v4l2_fh.m2m_ctx;
+	struct v4l2_m2m_buffer *buf;
+	unsigned long flags;
+	unsigned int i;
+	u32 fail_res;
+	int ret;
+
+	if (wave5_vpu_isolated(inst->dev) || inst->recovery_error ||
+	    !wave5_find_src(inst->v4l2_fh.m2m_ctx, true))
+		return 0;
+	/* An idle command queue does not release lookahead DMA references.
+	 * Destroy the firmware context before either queue returns its buffers.
+	 */
+	ret = wave5_vpu_enc_close(inst, &fail_res);
+	if (ret) {
+		wave5_vpu_isolate(inst->dev, "retained source destroy failed", 0);
+		return ret;
+	}
+	for (i = 0; i < inst->fbc_buf_count; i++)
+		wave5_vpu_dec_reset_framebuffer(inst, i);
+	inst->fbc_buf_count = 0;
+	memset(&inst->codec_info->enc_info, 0, sizeof(inst->codec_info->enc_info));
+	inst->codec_info->enc_info.destroyed = true;
+	/* A later STREAMON may rebuild the context on this same file. Sources
+	 * retained on a still-streaming OUTPUT queue can then be submitted anew.
+	 */
+	spin_lock_irqsave(&ctx->out_q_ctx.rdy_spinlock, flags);
+	v4l2_m2m_for_each_src_buf(ctx, buf)
+		WRITE_ONCE(wave5_to_vpu_src_buf(&buf->vb)->consumed, false);
+	spin_unlock_irqrestore(&ctx->out_q_ctx.rdy_spinlock, flags);
+	inst->state = VPU_INST_STATE_NONE;
 	return ret;
 }
 
@@ -1690,6 +1765,7 @@ static void wave5_vpu_enc_stop_streaming(struct vb2_queue *q)
 			dev_dbg(inst->dev->dev, "Getting encoding results from fw, fail\n");
 	}
 
+	wave5_stop_retained_sources(inst);
 	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 		streamoff_output(inst, q);
 	else
@@ -1791,7 +1867,7 @@ static int wave5_vpu_enc_job_ready(void *priv)
 		dev_dbg(inst->dev->dev, "Encoder must be open to start queueing M2M jobs!\n");
 		return false;
 	case VPU_INST_STATE_PIC_RUN:
-		if (m2m_ctx->is_draining || v4l2_m2m_num_src_bufs_ready(m2m_ctx)) {
+		if (m2m_ctx->is_draining || wave5_find_src(m2m_ctx, false)) {
 			dev_dbg(inst->dev->dev, "Encoder ready for a job, state: %s\n",
 				state_to_str(inst->state));
 			return true;
@@ -2032,6 +2108,8 @@ static int wave5_vpu_open_enc(struct file *filp)
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_GOP_SIZE,
 			  0, 2047, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, 1, 1, 0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, 0, 4096, 1, 0);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,

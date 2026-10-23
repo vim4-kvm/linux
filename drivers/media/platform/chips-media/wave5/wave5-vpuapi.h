@@ -716,6 +716,7 @@ struct dec_info {
 };
 
 struct enc_info {
+	bool destroyed;
 	struct enc_open_param open_param;
 	struct enc_initial_info initial_info;
 	u32 stream_rd_ptr;
@@ -871,6 +872,7 @@ struct vpu_instance {
 	unsigned int frame_rate;
 	unsigned int vbv_buf_size;
 	unsigned int h264_cpb_size;
+	unsigned int b_frames;
 	unsigned int intra_refresh_period;
 	unsigned int rc_mode;
 	unsigned int rc_enable;
