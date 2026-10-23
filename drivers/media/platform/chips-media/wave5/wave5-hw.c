@@ -216,11 +216,11 @@ static int wave5_wait_vpu_busy(struct vpu_device *vpu_dev, unsigned int addr)
 	ret = read_poll_timeout(wave5_vdi_read_register, data, data == 0,
 				10, VPU_BUSY_CHECK_TIMEOUT, false, vpu_dev, addr);
 	if (!ret && addr == W5_VPU_BUSY_STATUS &&
-	    wave5_vpu_inject_timeout(vpu_dev, vpu_read_reg(vpu_dev, W5_COMMAND)))
+	    wave5_vpu_inject_timeout(vpu_dev, READ_ONCE(vpu_dev->last_command)))
 		ret = -ETIMEDOUT;
 	if (ret)
 		wave5_vpu_isolate(vpu_dev, "command acknowledgment timeout",
-				  vpu_read_reg(vpu_dev, W5_COMMAND));
+				  READ_ONCE(vpu_dev->last_command));
 	return ret;
 }
 

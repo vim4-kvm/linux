@@ -781,6 +781,7 @@ struct vpu_device {
 	/* Quarantine is irreversible until the next boot. */
 	unsigned int isolated;
 	u32 isolation_command;
+	u32 last_command;
 	const char *isolation_reason;
 	u64 isolation_time_ns;
 	bool isolation_ready;
