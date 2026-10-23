@@ -3,6 +3,7 @@
 """Check visible encoder geometry against the actual block crop calculation."""
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -32,21 +33,79 @@ class Bits:
         return (1 << zeroes) - 1 + self.read(zeroes)
 
 
-def hevc_sps_geometry(nal):
-    """Read SPS dimensions/crop; accept a complete NAL without a start code."""
-    if len(nal) < 3 or nal[0] & 0x80 or (nal[0] >> 1) & 63 != 33 or not nal[1] & 7:
-        raise ValueError('invalid SPS NAL header')
+def nal_rbsp(data):
+    """Remove emulation prevention, rejecting malformed escape sequences."""
     rbsp = bytearray()
     zeroes = 0
-    for index, byte in enumerate(nal[2:]):
+    for index, byte in enumerate(data):
         if zeroes == 2 and byte == 3:
-            if index + 3 >= len(nal) or nal[index + 3] > 3:
+            if index + 1 >= len(data) or data[index + 1] > 3:
                 raise ValueError('invalid emulation prevention')
             zeroes = 0
             continue
         rbsp.append(byte)
         zeroes = min(2, zeroes + 1) if byte == 0 else 0
-    bits = Bits(rbsp)
+    return rbsp
+
+
+def sei_messages(nal, hevc=True):
+    """Decode Annex D HDR SEI payloads without trusting payload sizes.
+
+    The caller supplies a complete AVC/HEVC NAL without its Annex-B start code.
+    Unknown SEI messages are retained; their presence is not a parsing failure.
+    """
+    if not nal or nal[0] & 0x80:
+        raise ValueError('invalid SEI NAL header')
+    if hevc:
+        if len(nal) < 3 or (nal[0] >> 1) & 63 not in (39, 40) or not nal[1] & 7:
+            raise ValueError('invalid HEVC SEI NAL header')
+    elif nal[0] & 31 != 6:
+        raise ValueError('invalid AVC SEI NAL header')
+    rbsp = nal_rbsp(nal[2 if hevc else 1:])
+    offset = 0
+    messages = []
+    while offset < len(rbsp):
+        if rbsp[offset:] == b'\x80':
+            return messages
+        values = []
+        for _ in range(2):
+            value = 0
+            while offset < len(rbsp) and rbsp[offset] == 255:
+                value += 255
+                offset += 1
+            if offset == len(rbsp):
+                raise ValueError('truncated SEI type/size')
+            value += rbsp[offset]
+            offset += 1
+            values.append(value)
+        kind, size = values
+        if offset + size >= len(rbsp):
+            raise ValueError('truncated SEI payload or trailing bits')
+        payload = rbsp[offset:offset + size]
+        offset += size
+        if kind == 137:
+            if size != 24:
+                raise ValueError('invalid mastering display SEI size')
+            xy = struct.unpack('>8H2I', payload)
+            decoded = {'primaries': tuple(zip(xy[:6:2], xy[1:6:2])),
+                       'white_point': xy[6:8], 'max_luminance': xy[8],
+                       'min_luminance': xy[9]}
+        elif kind == 144:
+            if size != 4:
+                raise ValueError('invalid content light SEI size')
+            cll, fall = struct.unpack('>2H', payload)
+            decoded = {'max_content_light_level': cll, 'max_pic_average_light_level': fall}
+        else:
+            decoded = bytes(payload).hex()
+        messages.append((kind, decoded))
+    raise ValueError('missing SEI trailing bits')
+
+
+def hevc_sps_geometry(nal):
+    """Read SPS dimensions/crop; accept a complete NAL without a start code."""
+    if len(nal) < 3 or nal[0] & 0x80 or (nal[0] >> 1) & 63 != 33 or not nal[1] & 7:
+        raise ValueError('invalid SPS NAL header')
+    bits = Bits(nal_rbsp(nal[2:]))
     bits.read(4)  # sps_video_parameter_set_id
     layers = bits.read(3)
     if layers > 6:
@@ -79,6 +138,13 @@ def hevc_sps_geometry(nal):
     return (width, height), pixels, visible
 
 
+if len(sys.argv) == 3 and sys.argv[1] in ('--hevc-sei', '--avc-sei'):
+    hevc = sys.argv[1] == '--hevc-sei'
+    for nal in re.split(b'\x00\x00\x00?\x01', Path(sys.argv[2]).read_bytes()):
+        if nal and ((nal[0] >> 1) & 63 in (39, 40) if hevc else nal[0] & 31 == 6):
+            print(sei_messages(nal, hevc))
+    raise SystemExit(0)
+
 if len(sys.argv) == 2:
     # Offline inspection of a future hardware-produced Annex-B stream.
     nals = re.split(b'\x00\x00\x00?\x01', Path(sys.argv[1]).read_bytes())
@@ -106,6 +172,46 @@ for encoded, dimensions in (
         else:
             raise AssertionError('truncated SPS accepted')
 print('Historical Wave521C SPS dimensions and truncated headers passed')
+
+# Independent syntax vectors. These are not a claim that Wave521 emits HDR SEI.
+mastering = struct.pack('>8H2I', 13250, 34500, 7500, 3000, 34000, 16000,
+                        15635, 16450, 10000000, 50)
+light = struct.pack('>2H', 1000, 400)
+payload = bytes((137, 24)) + mastering + bytes((144, 4)) + light + b'\x80'
+escaped = bytearray()
+zeroes = 0
+for byte in payload:
+    if zeroes == 2 and byte <= 3:
+        escaped.append(3)
+        zeroes = 0
+    escaped.append(byte)
+    zeroes = min(2, zeroes + 1) if byte == 0 else 0
+for header, hevc in ((b'\x4e\x01', True), (b'\x50\x01', True), (b'\x06', False)):
+    nal = header + escaped
+    messages = sei_messages(nal, hevc)
+    assert messages[0][1]['white_point'] == (15635, 16450)
+    assert messages[0][1]['min_luminance'] == 50
+    assert messages[1] == (144, {'max_content_light_level': 1000,
+                                 'max_pic_average_light_level': 400})
+    for length in range(len(nal)):
+        try:
+            sei_messages(nal[:length], hevc)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('truncated SEI accepted')
+    # Payload type/size extension, unknown messages, and embedded 00 00 01.
+    assert sei_messages(header + b'\xff\x01\x03\x00\x00\x03\x01\x80', hevc) == [
+        (256, '000001')]
+    for invalid in (b'\x89\x17' + mastering + b'\x80', b'\x90\x03abc\x80',
+                    b'\x00\x00\x03\x04\x80', b'\xff', b'\x00\xff', b'\x80\x00'):
+        try:
+            sei_messages(header + invalid, hevc)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('malformed SEI accepted')
+print('AVC/HEVC HDR SEI sizes, values, escaping and truncation passed')
 
 hardware = Path(__file__).with_name('wave5-hw.c').read_text()
 encoder = Path(__file__).with_name('wave5-vpu-enc.c').read_text()
