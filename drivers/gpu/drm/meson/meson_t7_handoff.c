@@ -15,6 +15,7 @@
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
@@ -25,7 +26,6 @@
 #include <drm/drm_of.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_print.h>
-#include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_vblank.h>
 
 #include "meson_registers.h"
@@ -165,7 +165,7 @@ static const struct drm_plane_funcs meson_t7_handoff_plane_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
 	.destroy = drm_plane_cleanup,
-	.reset = drm_atomic_helper_plane_reset,
+	.atomic_create_state = drm_atomic_helper_plane_create_state,
 	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_plane_destroy_state,
 };
@@ -237,7 +237,7 @@ static const struct drm_crtc_funcs meson_t7_handoff_crtc_funcs = {
 	.set_config = drm_atomic_helper_set_config,
 	.page_flip = drm_atomic_helper_page_flip,
 	.destroy = drm_crtc_cleanup,
-	.reset = drm_atomic_helper_crtc_reset,
+	.atomic_create_state = drm_atomic_helper_crtc_create_state,
 	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
 	.enable_vblank = meson_t7_handoff_enable_vblank,
@@ -249,6 +249,10 @@ static const struct drm_crtc_helper_funcs meson_t7_handoff_crtc_helpers = {
 	.atomic_flush = meson_t7_handoff_flush,
 	.atomic_enable = meson_t7_handoff_enable,
 	.atomic_disable = meson_t7_handoff_disable,
+};
+
+static const struct drm_encoder_funcs meson_t7_handoff_encoder_funcs = {
+	.destroy = drm_encoder_cleanup,
 };
 
 static int meson_t7_handoff_dumb_create(struct drm_file *file, struct drm_device *drm,
@@ -430,7 +434,9 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	ret = drm_vblank_init(drm, 1);
 	if (ret)
 		return ret;
-	ret = drm_simple_encoder_init(drm, &display->encoder, DRM_MODE_ENCODER_TMDS);
+	ret = drm_encoder_init(drm, &display->encoder,
+			       &meson_t7_handoff_encoder_funcs,
+			       DRM_MODE_ENCODER_TMDS, NULL);
 	if (ret)
 		return ret;
 	display->encoder.possible_crtcs = 1;

@@ -1492,6 +1492,14 @@ F:	Documentation/devicetree/bindings/media/amlogic,t7-vdin-test.yaml
 F:	drivers/media/platform/amlogic/t7-hdmirx/
 F:	scripts/vim4/
 
+AMLOGIC T7 HDMI TRANSMITTER
+M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+L:	dri-devel@lists.freedesktop.org
+S:	Odd Fixes
+F:	Documentation/devicetree/bindings/display/amlogic,meson-t7-hdmi-tx.yaml
+F:	drivers/gpu/drm/meson/meson_hdmitx21.c
+F:	drivers/gpu/drm/meson/test_hdmitx21_bridge.py
+
 AMLOGIC T7 JPEG ENCODER
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 L:	linux-media@vger.kernel.org

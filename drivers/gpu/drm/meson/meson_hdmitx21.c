@@ -1015,6 +1015,11 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	return devm_drm_bridge_add(dev, &tx->bridge);
 }
 
+static void meson_hdmitx21_put_bridge(void *data)
+{
+	drm_bridge_put(data);
+}
+
 static int meson_hdmitx21_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1052,11 +1057,16 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 
 	meson_hdmitx21_hw_init(tx);
 
-	tx->next_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 1, 0);
+	tx->next_bridge = of_drm_get_bridge_by_endpoint(dev->of_node, 1, 0);
 	if (IS_ERR(tx->next_bridge)) {
-		if (PTR_ERR(tx->next_bridge) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
+		if (PTR_ERR(tx->next_bridge) != -ENODEV)
+			return PTR_ERR(tx->next_bridge);
 		tx->next_bridge = NULL;
+	} else {
+		ret = devm_add_action_or_reset(dev, meson_hdmitx21_put_bridge,
+					       tx->next_bridge);
+		if (ret)
+			return ret;
 	}
 
 	tx->ddc.owner = THIS_MODULE;
