@@ -56,6 +56,10 @@ if args.dtb:
     assert property_value('/vpu@ff000000', 'status') == 'disabled'
     assert property_value('/video-capture@ff000000', 'amlogic,split-vcbus') == ''
     assert property_value('/soc/bus@fe000000/clock-controller@81c0', 'compatible').endswith('-ro')
+    tx_properties = subprocess.check_output(
+        ['fdtget', '-p', str(args.dtb), '/soc/bus@fe000000/hdmi-tx@300000'], text=True).split()
+    assert not any(name.startswith('pinctrl-') or name in
+                   ('resets', 'reset-names', '#sound-dai-cells') for name in tx_properties)
     print('Compiled M1 DT: disjoint capture/display claims, exclusive KMS and read-only PLL')
 
 source = Path(__file__).with_name('meson_t7_handoff.c').read_text()

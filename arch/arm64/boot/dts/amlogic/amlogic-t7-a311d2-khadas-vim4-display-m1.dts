@@ -40,6 +40,8 @@
 	/delete-property/ resets;
 	/delete-property/ reset-names;
 	/delete-property/ #sound-dai-cells;
+	/delete-property/ pinctrl-0;
+	/delete-property/ pinctrl-names;
 };
 
 &hdmi {
