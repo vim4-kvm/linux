@@ -135,4 +135,13 @@ config SND_SOC_MESON_T9015
 	help
 	  Say Y or M if you want to add support for the internal DAC found
 	  on GXL, G12 and SM1 SoC family.
+config SND_MESON_T7_ASRC
+	tristate "Amlogic T7 asynchronous sample rate converter"
+	select REGMAP
+	help
+	  Enable the T7 audio ASRC A and loopback ASRC B components.
+	  These convert digital audio between independent sample clocks.
+	  ASRC A feeds capture DMA and ASRC B supplies the reference input
+	  of the microphone loopback combiner at a fixed 16 kHz output rate.
+
 endmenu

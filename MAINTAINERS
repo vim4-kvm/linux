@@ -1436,10 +1436,13 @@ M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Maintained
 F:	Documentation/devicetree/bindings/sound/amlogic,t7-asrc.yaml
 
+F:	sound/soc/meson/t7-asrc*
+
 AMLOGIC T7 AUDIO OFFLINE TESTS
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Maintained
 F:	sound/soc/meson/test-data/t7-audio-routes.dts
+F:	sound/soc/meson/test_t7_asrc.py
 F:	sound/soc/meson/test_t7_audio_routes.py
 F:	sound/soc/meson/test_t7_frddr.py
 F:	sound/soc/meson/test_t7_spdifin.py
