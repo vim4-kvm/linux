@@ -1431,11 +1431,11 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/spi/amlogic,a4-spisg.yaml
 F:	drivers/spi/spi-amlogic-spisg.c
 
-AMLOGIC T7 ASYNCHRONOUS SAMPLE RATE CONVERTER
+AMLOGIC T7 AUDIO PROCESSING COMPONENTS
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Maintained
 F:	Documentation/devicetree/bindings/sound/amlogic,t7-asrc.yaml
-
+F:	Documentation/devicetree/bindings/sound/amlogic,t7-loopback.yaml
 F:	sound/soc/meson/t7-asrc*
 
 AMLOGIC T7 AUDIO OFFLINE TESTS
