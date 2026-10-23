@@ -4,6 +4,12 @@
 
 &{/display@ff006840} {
 	compatible = "amlogic,t7-display-linear";
+	reg = <0x0 0xff006840 0x0 0x80>,
+	      <0x0 0xff008db8 0x0 0x108>,
+	      <0x0 0xff004400 0x0 0x100>;
+	reg-names = "osd1", "venc", "rdma";
+	interrupts = <GIC_SPI 197 IRQ_TYPE_EDGE_RISING>,
+		     <GIC_SPI 215 IRQ_TYPE_EDGE_RISING>;
 };
 
 &hdmi_tx {

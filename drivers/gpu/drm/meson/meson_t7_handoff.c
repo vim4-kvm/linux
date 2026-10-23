@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Fixed T7 OSD1 handoff. The normal meson initialization is deliberately absent. */
 #include <linux/clk.h>
+#include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -39,6 +40,9 @@
 #define HANDOFF_FORMAT_MASK	0x0f3c
 #define OSD_REG(reg)	(((reg) - VIU_OSD1_CTRL_STAT) * 4)
 #define VENC_REG(reg)	(((reg) - VENC_INTCTRL) * 4)
+#define RDMA_REG(reg)	(((reg) - RDMA_AHB_START_ADDR_MAN) * 4)
+#define T7_RDMA_START_MSB	0x1132
+#define T7_RDMA_END_MSB	0x1133
 
 struct meson_t7_handoff {
 	struct drm_device drm;
@@ -47,6 +51,11 @@ struct meson_t7_handoff {
 	struct drm_encoder encoder;
 	void __iomem *osd;
 	void __iomem *venc;
+	void __iomem *rdma;
+	u32 *rdma_table;
+	dma_addr_t rdma_dma;
+	u32 armed_vsync;
+	bool rdma_done;
 	spinlock_t lock; /* Address publication and IRQ acknowledgment. */
 	wait_queue_head_t wait;
 	u32 pending_addr;
@@ -66,14 +75,74 @@ static struct meson_t7_handoff *to_handoff(struct drm_device *drm)
 	return container_of(drm, struct meson_t7_handoff, drm);
 }
 
+/* Both interrupt orders are possible: do not complete until both have arrived. */
+static void meson_t7_handoff_rdma_complete(struct meson_t7_handoff *display)
+{
+	if (display->rdma_done && display->vsync_count != display->armed_vsync)
+		WRITE_ONCE(display->applied, display->written);
+}
+
+static irqreturn_t meson_t7_handoff_rdma_irq(int irq, void *data)
+{
+	struct meson_t7_handoff *display = data;
+	unsigned long flags;
+	u32 status;
+
+	spin_lock_irqsave(&display->lock, flags);
+	status = readl(display->rdma + RDMA_REG(RDMA_STATUS));
+	if (!(status & RDMA_IRQ_STAT_CHAN1)) {
+		spin_unlock_irqrestore(&display->lock, flags);
+		return IRQ_NONE;
+	}
+	/* Stop replay before the worker can reuse the coherent descriptor table. */
+	writel(0, display->rdma + RDMA_REG(RDMA_AUTO_SRC1_SEL));
+	writel((readl(display->rdma + RDMA_REG(RDMA_CTRL)) & 0x00ffffff) |
+	       RDMA_IRQ_CLEAR_CHAN1, display->rdma + RDMA_REG(RDMA_CTRL));
+	readl(display->rdma + RDMA_REG(RDMA_CTRL));
+	display->rdma_done = true;
+	display->written = display->requested;
+	meson_t7_handoff_rdma_complete(display);
+	spin_unlock_irqrestore(&display->lock, flags);
+	wake_up(&display->wait);
+	return IRQ_HANDLED;
+}
+
+static void meson_t7_handoff_rdma_arm(struct meson_t7_handoff *display)
+{
+	u32 *table = display->rdma_table;
+
+	/* Vendor T7 channel 1: word-address/value pairs, VIU1 vsync trigger. */
+	table[0] = VIU_OSD1_BLK0_CFG_W0;
+	table[1] = display->pending_format;
+	table[2] = VIU_OSD1_BLK2_CFG_W4;
+	table[3] = display->pending_stride;
+	table[4] = VIU_OSD1_CTRL_STAT2;
+	table[5] = display->pending_ctrl2;
+	table[6] = VIU_OSD1_BLK1_CFG_W4;
+	table[7] = display->pending_addr >> 4;
+	display->rdma_done = false;
+	display->armed_vsync = display->vsync_count;
+	dma_wmb();
+	writel(display->rdma_dma, display->rdma + RDMA_REG(RDMA_AHB_START_ADDR_1));
+	writel(0, display->rdma + RDMA_REG(T7_RDMA_START_MSB));
+	writel(display->rdma_dma + 31, display->rdma + RDMA_REG(RDMA_AHB_END_ADDR_1));
+	writel(0, display->rdma + RDMA_REG(T7_RDMA_END_MSB));
+	writel(1, display->rdma + RDMA_REG(RDMA_AUTO_SRC1_SEL));
+}
+
 static irqreturn_t meson_t7_handoff_irq(int irq, void *data)
 {
 	struct meson_t7_handoff *display = data;
 	unsigned long flags;
 
 	/* T7 VIU1 uses an edge IRQ; the vendor handler has no VENC acknowledgment. */
+	drm_crtc_handle_vblank(&display->crtc);
 	spin_lock_irqsave(&display->lock, flags);
 	WRITE_ONCE(display->vsync_count, display->vsync_count + 1);
+	if (display->rdma) {
+		meson_t7_handoff_rdma_complete(display);
+		goto vblank;
+	}
 	WRITE_ONCE(display->applied, display->written);
 	if (display->written != display->requested) {
 		if (display->linear_formats) {
@@ -89,8 +158,8 @@ static irqreturn_t meson_t7_handoff_irq(int irq, void *data)
 		readl(display->osd + OSD_REG(VIU_OSD1_BLK1_CFG_W4));
 		display->written = display->requested;
 	}
+vblank:
 	spin_unlock_irqrestore(&display->lock, flags);
-	drm_crtc_handle_vblank(&display->crtc);
 	wake_up(&display->wait);
 	return IRQ_HANDLED;
 }
@@ -125,10 +194,14 @@ static void meson_t7_handoff_scanout(struct meson_t7_handoff *display,
 	}
 	display->pending_addr = addr;
 	sequence = ++display->requested;
+	if (display->rdma)
+		meson_t7_handoff_rdma_arm(display);
 	spin_unlock_irqrestore(&display->lock, flags);
 	/*
 	 * The vendor OSD path writes the linear address at vsync. Wait for the
 	 * following vsync as well before releasing the previous DMA allocation.
+	 * M2 instead arms hardware RDMA ahead of vsync, and requires its completion
+	 * interrupt AND a vsync before retiring the previous allocation.
 	 */
 	if (!wait_event_timeout(display->wait,
 				READ_ONCE(display->applied) == sequence,
@@ -318,6 +391,24 @@ static const struct drm_mode_config_funcs meson_t7_handoff_mode_funcs = {
 	.atomic_commit = drm_atomic_helper_commit,
 };
 
+static void meson_t7_handoff_commit_tail(struct drm_atomic_commit *state)
+{
+	struct drm_device *drm = state->dev;
+
+	drm_atomic_helper_commit_modeset_disables(drm, state);
+	drm_atomic_helper_commit_planes(drm, state, 0);
+	drm_atomic_helper_commit_modeset_enables(drm, state);
+	drm_atomic_helper_fake_vblank(state);
+	drm_atomic_helper_commit_hw_done(state);
+	/* Flush already waited for safe latch; a second vblank halves throughput. */
+	drm_atomic_helper_wait_for_flip_done(drm, state);
+	drm_atomic_helper_cleanup_planes(drm, state);
+}
+
+static const struct drm_mode_config_helper_funcs meson_t7_handoff_mode_helpers = {
+	.atomic_commit_tail = meson_t7_handoff_commit_tail,
+};
+
 static void meson_t7_handoff_domain_put(void *data)
 {
 	struct device *domain = data;
@@ -426,6 +517,37 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	display->venc = meson_t7_handoff_map(pdev, "venc", 0xff008db8, 0x108);
 	if (IS_ERR(display->venc))
 		return PTR_ERR(display->venc);
+	if (display->linear_formats) {
+		u32 control;
+
+		display->rdma = meson_t7_handoff_map(pdev, "rdma", 0xff004400, 0x100);
+		if (IS_ERR(display->rdma))
+			return PTR_ERR(display->rdma);
+		/* Never reset a running channel belonging to another firmware user. */
+		for (i = 0; i < 7; i++)
+			if (readl(display->rdma + RDMA_REG(RDMA_AUTO_SRC1_SEL) + i * 4))
+				return dev_err_probe(dev, -EBUSY, "Firmware RDMA channel active\n");
+		display->rdma_table = dmam_alloc_coherent(dev, 32, &display->rdma_dma,
+							GFP_KERNEL);
+		if (!display->rdma_table)
+			return -ENOMEM;
+		control = readl(display->rdma + RDMA_REG(RDMA_CTRL)) & 0x00ffffff;
+		control &= ~(RDMA_CTRL_AHB_WR_BURST | RDMA_CTRL_AHB_RD_BURST |
+			     RDMA_CTRL_SW_RESET);
+		writel(control | RDMA_DEFAULT_CONFIG | (3 << 4) | RDMA_IRQ_CLEAR_CHAN1,
+		       display->rdma + RDMA_REG(RDMA_CTRL));
+		control = readl(display->rdma + RDMA_REG(RDMA_ACCESS_AUTO));
+		control &= ~RDMA_ACCESS_ADDR_INC_CHAN1;
+		writel(control | RDMA_ACCESS_RW_FLAG_CHAN1,
+		       display->rdma + RDMA_REG(RDMA_ACCESS_AUTO));
+		irq = platform_get_irq(pdev, 1);
+		if (irq < 0)
+			return irq;
+		ret = devm_request_irq(dev, irq, meson_t7_handoff_rdma_irq, 0,
+				       "meson-t7-osd-rdma", display);
+		if (ret)
+			return ret;
+	}
 	ctrl = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
 	format = readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W0));
 	display->boot_format = format;
@@ -458,6 +580,7 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	drm->mode_config.funcs = &meson_t7_handoff_mode_funcs;
+	drm->mode_config.helper_private = &meson_t7_handoff_mode_helpers;
 	drm->mode_config.min_width = HANDOFF_WIDTH;
 	drm->mode_config.max_width = HANDOFF_WIDTH;
 	drm->mode_config.min_height = HANDOFF_HEIGHT;

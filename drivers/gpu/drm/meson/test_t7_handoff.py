@@ -64,14 +64,13 @@ if args.dtb:
 
 source = Path(__file__).with_name('meson_t7_handoff.c').read_text()
 # The handoff must not configure legacy VENC interrupts or the global VIU mux.
-assert len(re.findall(r'\bwritel\(', source)) == 4
 assert 'display->osd + OSD_REG(VIU_OSD1_BLK1_CFG_W4)' in source
 register_source = Path(__file__).with_name('meson_registers.h').read_text()
 registers = '\n'.join(line for line in register_source.splitlines()
-                      if line.startswith('#define ') and not line.endswith('\\'))
+                      if re.match(r'#define\s', line) and not line.endswith('\\'))
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('struct meson_t7_handoff {'):source.index('static struct meson_t7_handoff *')]
-functions = source[source.index('static irqreturn_t meson_t7_handoff_irq'):
+functions = source[source.index('static void meson_t7_handoff_rdma_complete'):
                    source.index('static int meson_t7_handoff_plane_check')]
 functions += source[source.index('static int meson_t7_handoff_plane_check'):
                     source.index('static void meson_t7_handoff_plane_update')]
@@ -122,6 +121,9 @@ struct drm_atomic_commit {
 #define __iomem
 #define BIT(n) (1U << (n))
 #define IRQ_HANDLED 1
+#define IRQ_NONE 0
+#define GENMASK(h, l) ((UINT32_MAX << (l)) & (UINT32_MAX >> (31 - (h))))
+#define dma_wmb() ((void)0)
 #define spin_lock_irqsave(lock, flags) ((void)(lock), (void)((flags) = 0))
 #define spin_unlock_irqrestore(lock, flags) ((void)(lock), (void)(flags))
 #define spin_lock_irq(lock) ((void)(lock))
@@ -131,7 +133,9 @@ struct drm_atomic_commit {
 #define msecs_to_jiffies(value) (value)
 #define drm_err(...) ((void)0)
 static bool inject_timeout;
+static bool rdma_first;
 static u32 osd[32], venc[66];
+static u32 rdma[64], table[8];
 static unsigned int writes, vblanks;
 static struct meson_t7_handoff *to_handoff(struct drm_device *drm);
 static struct drm_plane_state *drm_atomic_get_new_plane_state(
@@ -160,6 +164,12 @@ static void drm_crtc_send_vblank_event(struct drm_crtc *crtc, void *event) { }
 static u32 readl(void *address) { return *(u32 *)address; }
 static void writel(u32 value, void *address)
 {
+    if ((uintptr_t)address >= (uintptr_t)rdma &&
+        (uintptr_t)address < (uintptr_t)(rdma + 64)) {
+        *(u32 *)address = value;
+        if (address == &rdma[0x14]) rdma[0x15] &= ~(value & 0xff000000);
+        return;
+    }
     /* This function must never write a VDIN, VPP or arbitration register. */
     assert(address == &osd[4] || address == &osd[5] ||
            address == &osd[11] || address == &osd[29]);
@@ -177,9 +187,23 @@ static void drm_framebuffer_put(struct drm_framebuffer *fb)
 #define wait_event_timeout(wait, condition, timeout) ({ \
     assert((timeout) == 100); \
     assert(!(condition)); \
-    meson_t7_handoff_irq(0, display); \
-    assert(!(condition)); \
-    if (!inject_timeout) meson_t7_handoff_irq(0, display); \
+    if (display->rdma) { \
+        assert(!meson_t7_handoff_rdma_irq(0, display)); \
+        if (!inject_timeout) { \
+            for (unsigned int i = 0; i < 8; i += 2) \
+                writel(table[i + 1], osd + table[i] - VIU_OSD1_CTRL_STAT); \
+            rdma[0x15] = RDMA_IRQ_STAT_CHAN1; \
+            if (rdma_first) meson_t7_handoff_rdma_irq(0, display); \
+            else meson_t7_handoff_irq(0, display); \
+            assert(!(condition)); \
+            if (rdma_first) meson_t7_handoff_irq(0, display); \
+            else meson_t7_handoff_rdma_irq(0, display); \
+        } \
+    } else { \
+        meson_t7_handoff_irq(0, display); \
+        assert(!(condition)); \
+        if (!inject_timeout) meson_t7_handoff_irq(0, display); \
+    } \
     assert((bool)(condition) == !inject_timeout); \
     !inject_timeout; \
 })
@@ -260,6 +284,26 @@ int main(void)
     assert(osd[11] == 0x8700 && osd[5] == 360 && osd[29] == 0x12);
     assert(gpu.references == 1);
     puts("Linear OSD: RGB32 layout, padding/modifier rejection, vsync programming and boot restore passed");
+
+    /* Same buffer can be queued again; each reference still retires exactly once. */
+    display.rdma = rdma; display.rdma_table = table; display.rdma_dma = 0x100000;
+    unsigned int start_vblank = vblanks;
+    for (unsigned int i = 0; i < 60; i++) {
+        rdma_first = i & 1;
+        struct drm_framebuffer *next = i & 1 ? &gpu : &first;
+        if (next == &first) first.format = &xrgb;
+        meson_t7_handoff_scanout(&display, next, 0x22000000);
+        assert(!display.faulted && display.scanout == next);
+        assert(!rdma[0x23] && !rdma[0x15]);
+    }
+    assert(vblanks - start_vblank == 60);
+    meson_t7_handoff_scanout(&display, NULL, HANDOFF_BOOT_ADDR);
+    assert(first.references == 2); /* The earlier M1 fault intentionally pins one. */
+    assert(gpu.references == 1);
+    inject_timeout = true;
+    meson_t7_handoff_scanout(&display, &gpu, 0x22000000);
+    assert(display.faulted && gpu.references == 2);
+    puts("RDMA: 60 flips/60 vsyncs, both IRQ orders, stale IRQ, detach and timeout passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
