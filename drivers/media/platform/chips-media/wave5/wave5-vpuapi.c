@@ -9,6 +9,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/delay.h>
 #include "wave5-vpuapi.h"
+#include "wave5-vpu.h"
 #include "wave5-regdefine.h"
 #include "wave5.h"
 
