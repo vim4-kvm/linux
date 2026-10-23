@@ -19,6 +19,7 @@ ioctls = vdin[vdin.index('static int t7_vdin_query_dv_timings'):
 prefix = r'''
 #include <assert.h>
 #define dev_info_ratelimited(...) ((void)0)
+#define pr_info_ratelimited(...) ((void)0)
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>

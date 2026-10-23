@@ -16,6 +16,7 @@ status_api = vdin[vdin.index('static int t7_vdin_enum_input'):
 prefix = r'''
 #include <assert.h>
 #define dev_info_ratelimited(...) ((void)0)
+#define pr_info_ratelimited(...) ((void)0)
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
