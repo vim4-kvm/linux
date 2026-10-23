@@ -14,6 +14,10 @@ maintainers:
 description: |+
   Secure Power Domains used in Meson A1/C1/S4 & C3/T7 SoCs, and should be the child node
   of secure-monitor.
+  T7 additionally exposes display SRAM domains using firmware IDs 52 plus the
+  vendor VPU module number, as listed in amlogic,t7-pwrc.h. They are children of
+  VPU_HDMI and use the secure SET operation. They are acquired on demand;
+  registering the provider does not switch boot SRAM or VDIN memory off.
 
 properties:
   compatible:

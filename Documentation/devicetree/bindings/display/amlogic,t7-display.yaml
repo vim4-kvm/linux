@@ -18,11 +18,15 @@ description: |
   Register DMA channel 1 and both interrupt sources are exclusive to display.
   The clock-controller regmap serializes masked display clock updates with CCF;
   RX clocks, VPU frequency, resets and power islands must not be changed.
+  The optional managed SRAM profile drains all boot OSD fetches before taking
+  VPU SRAM domains through the secure power controller. It holds them until
+  reboot, including after a DMA fault. These SRAM IDs are disjoint from VDIN.
 
 properties:
   compatible:
     const: amlogic,t7-display
   reg:
+    minItems: 12
     items:
       - description: OSD1, ff006840/80
       - description: ENC2 timing, ff008db8/608
@@ -36,7 +40,10 @@ properties:
       - description: VPP postblend size, ff007484/4
       - description: VPP output size, ff007694/4
       - description: HDMI mapping and sync polarity, ff009c6c/4
+      - description: OSD2 control and MIF, ff0068c0/80
+      - description: OSD3 control and MIF, ff00f600/80
   reg-names:
+    minItems: 12
     items:
       - const: osd1
       - const: venc
@@ -50,6 +57,13 @@ properties:
       - const: post-size
       - const: out-size
       - const: hdmi-setting
+      - const: osd2
+      - const: osd3
+  amlogic,managed-osd-sram:
+    type: boolean
+    description: |
+      Enable exclusive OSD SRAM ownership after draining the boot scanout.
+      Firmware OSD2 and OSD3 must be disabled. Default M1/M2 profiles omit it.
   amlogic,clock-controller:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: T7 peripheral clock controller providing the shared MMIO regmap
@@ -65,10 +79,18 @@ properties:
       - description: TX APB gate
       - description: HDMI PLL oscillator, 24MHz
   power-domains:
+    minItems: 3
     items:
       - description: VPU HDMI
       - description: VI CLK1
       - description: VI CLK2
+      - description: OSD1 SRAM
+      - description: OSD2 SRAM
+      - description: OSD3 SRAM
+      - description: OSD1 scaler SRAM
+      - description: OSD2 scaler SRAM
+      - description: OSD blend34 SRAM
+      - description: RDMA SRAM
   memory-region:
     maxItems: 1
     description: Reserved firmware logo frames
@@ -87,3 +109,24 @@ required:
   - port
 
 additionalProperties: false
+
+allOf:
+  - if:
+      required:
+        - amlogic,managed-osd-sram
+    then:
+      properties:
+        reg:
+          minItems: 14
+        reg-names:
+          minItems: 14
+        power-domains:
+          minItems: 10
+    else:
+      properties:
+        reg:
+          maxItems: 12
+        reg-names:
+          maxItems: 12
+        power-domains:
+          maxItems: 3
