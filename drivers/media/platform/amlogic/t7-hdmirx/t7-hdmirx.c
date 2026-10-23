@@ -288,6 +288,7 @@ struct t7_hdmirx {
 	struct clk_bulk_data audio_clocks[3];
 	bool audio_active;
 	bool audio_invalid;
+	unsigned int audio_rate;
 	struct delayed_work audio_work;
 	struct snd_soc_component *audio_component;
 	struct snd_pcm_substream *audio_substream;
@@ -1421,9 +1422,7 @@ static void t7_hdmirx_audio_stop(void *data)
 	mutex_unlock(&rx->audio_lock);
 }
 
-static int t7_hdmirx_audio_hw_params_locked(struct snd_pcm_substream *substream,
-				    struct snd_pcm_hw_params *params,
-				    struct snd_soc_dai *dai)
+static int t7_hdmirx_audio_prepare_locked(struct snd_soc_dai *dai)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dai->dev);
 	struct t7_hdmirx_audio_format format = { 0 };
@@ -1431,21 +1430,14 @@ static int t7_hdmirx_audio_hw_params_locked(struct snd_pcm_substream *substream,
 	unsigned int i;
 	int ret;
 
-	if (!rx->core_active || params_channels(params) != 2 ||
-	    params_format(params) != SNDRV_PCM_FORMAT_S16_LE)
-		return -EINVAL;
+	if (rx->audio_invalid)
+		return 0;
 	ret = t7_hdmirx_read_audio(rx, &format);
-	if (ret)
-		return ret;
-	if (!format.pcm)
-		return -EINVAL;
-	if (format.rate != params_rate(params))
-		return -ERANGE;
-	/* Qualification must have observed the same format twice. */
-	if (!t7_hdmirx_audio_same(&format, &rx->audio_format))
-		return -ENOLINK;
+	if (ret || !format.pcm || format.rate != rx->audio_rate ||
+	    !t7_hdmirx_audio_same(&format, &rx->audio_format))
+		goto invalid;
 	if (rx->audio_active)
-		return -EBUSY;
+		return 0;
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(rx->audio_clocks), rx->audio_clocks);
 	if (ret)
 		return ret;
@@ -1491,6 +1483,9 @@ static int t7_hdmirx_audio_hw_params_locked(struct snd_pcm_substream *substream,
 				status & BIT(31), 10, 100000);
 	if (ret) {
 		t7_hdmirx_audio_stop_locked(rx);
+		if (t7_hdmirx_read_audio(rx, &format) ||
+		    !t7_hdmirx_audio_same(&format, &rx->audio_format))
+			goto invalid;
 		return ret;
 	}
 	value = readb(rx->cor + T7_RX_COR_POWER_RESET);
@@ -1503,8 +1498,15 @@ static int t7_hdmirx_audio_hw_params_locked(struct snd_pcm_substream *substream,
 	writel(value | BIT(29), rx->frhdmirx);
 	writel(value | BIT(29) | BIT(28), rx->frhdmirx);
 	writel(value | BIT(29) | BIT(28) | BIT(31), rx->frhdmirx);
-	rx->audio_invalid = false;
-	rx->audio_substream = substream;
+	return 0;
+invalid:
+	/* Source loss is a runtime discontinuity, not an invalid PCM setup.
+	 * Keep the FIFO gated. The monitor reports XRUN once ALSA is running;
+	 * it retries if its first observation preceded the PCM START transition.
+	 */
+	rx->audio_invalid = true;
+	if (rx->audio_active)
+		writel(readl(rx->frhdmirx) & ~BIT(31), rx->frhdmirx);
 	return 0;
 }
 
@@ -1513,10 +1515,19 @@ static int t7_hdmirx_audio_hw_params(struct snd_pcm_substream *substream,
 				    struct snd_soc_dai *dai)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dai->dev);
-	int ret;
+	int ret = 0;
 
+	if (params_channels(params) != 2 ||
+	    params_format(params) != SNDRV_PCM_FORMAT_S16_LE)
+		return -EINVAL;
 	mutex_lock(&rx->audio_lock);
-	ret = t7_hdmirx_audio_hw_params_locked(substream, params, dai);
+	if (rx->audio_active) {
+		ret = -EBUSY;
+	} else {
+		rx->audio_rate = params_rate(params);
+		rx->audio_substream = substream;
+		rx->audio_invalid = false;
+	}
 	mutex_unlock(&rx->audio_lock);
 	return ret;
 }
@@ -1552,8 +1563,8 @@ static int t7_hdmirx_audio_startup(struct snd_pcm_substream *substream,
 	mutex_lock(&rx->audio_lock);
 	rate = rx->audio_format.pcm ? rx->audio_format.rate : 0;
 	mutex_unlock(&rx->audio_lock);
-	/* Keep enumeration available without a source. hw_params still validates
-	 * the live input; when qualified, ALSA plug can choose the native rate.
+	/* Keep enumeration available without a source. When qualified, ALSA plug
+	 * can choose the native rate. A later source change is reported as XRUN.
 	 */
 	if (rate)
 		return snd_pcm_hw_constraint_minmax(substream->runtime,
@@ -1568,8 +1579,7 @@ static int t7_hdmirx_audio_prepare(struct snd_pcm_substream *substream,
 	int ret;
 
 	mutex_lock(&rx->audio_lock);
-	/* An old PCM must close and renegotiate after loss or a format change. */
-	ret = rx->audio_invalid || !rx->audio_active ? -ENOLINK : 0;
+	ret = t7_hdmirx_audio_prepare_locked(dai);
 	mutex_unlock(&rx->audio_lock);
 	return ret;
 }
@@ -1638,10 +1648,10 @@ static void t7_hdmirx_audio_work(struct work_struct *work)
 	if (!t7_hdmirx_audio_same(&format, &rx->audio_format)) {
 		rx->audio_format = format;
 		rx->audio_generation = (rx->audio_generation + 1) & INT_MAX;
-		if (rx->audio_active) {
+		if (rx->audio_substream) {
 			rx->audio_invalid = true;
-			writel(readl(rx->frhdmirx) & ~BIT(31), rx->frhdmirx);
-			stop = rx->audio_substream;
+			if (rx->audio_active)
+				writel(readl(rx->frhdmirx) & ~BIT(31), rx->frhdmirx);
 		}
 		for (i = 0; i < ARRAY_SIZE(t7_hdmirx_audio_control_names); i++) {
 			snd_soc_component_notify_control(rx->audio_component,
@@ -1649,6 +1659,8 @@ static void t7_hdmirx_audio_work(struct work_struct *work)
 		}
 	}
 out:
+	if (rx->audio_invalid)
+		stop = rx->audio_substream;
 	mutex_unlock(&rx->audio_lock);
 	/* ALSA takes the stream lock here. Do not invert it with hw_free's
 	 * audio mutex; component removal joins this worker before freeing PCMs.

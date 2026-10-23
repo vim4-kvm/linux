@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Actual audio callbacks: reject unsupported sources and unwind clock/PLL failures."""
+# SPDX-License-Identifier: GPL-2.0-only
+"""Actual audio callbacks: source races become XRUN; hardware failures unwind."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -39,7 +40,7 @@ struct device { void *data; };
 struct snd_soc_card { void *snd_card; };
 struct snd_soc_component { struct snd_soc_card *card; };
 struct snd_soc_dai { struct device *dev; };
-struct snd_pcm_substream { void *runtime; };
+struct snd_pcm_substream { void *runtime; bool running; };
 #define SNDRV_PCM_HW_PARAM_RATE 0
 #define SNDRV_PCM_HW_PARAM_PERIODS 1
 static bool fail_period_constraint;
@@ -109,13 +110,15 @@ struct snd_ctl_elem_id { int iface; char name[44]; };
 #define to_delayed_work(work) ((struct delayed_work *)(work))
 #define msecs_to_jiffies(ms) (ms)
 #define strscpy(dst,src,size) snprintf(dst,size,"%s",src)
-static unsigned int notifications, xruns;
+static unsigned int notifications, xruns, xrun_attempts;
 static struct t7_hdmirx *watched;
 static int snd_soc_component_notify_control(struct snd_soc_component *component, const char *name) {
     assert(component && !strncmp(name,"HDMI RX Audio ",14)); notifications++; return 0;
 }
 static void snd_pcm_stop_xrun(struct snd_pcm_substream *stream) {
-    assert(stream && watched && !watched->audio_lock.held); xruns++;
+    assert(stream && watched && !watched->audio_lock.held);
+    xrun_attempts++;
+    if (stream->running) { xruns++; stream->running=false; }
 }
 static void schedule_delayed_work(struct delayed_work *work, unsigned int delay) {
     assert(delay==100);
@@ -138,7 +141,9 @@ int main(void) {
     for (unsigned int i=0;i<ARRAY_SIZE(t7_hdmirx_audio_core_settings);i++)
         core[t7_hdmirx_audio_core_settings[i][0]]=0x80+i;
     core[T7_RX_COR_AUDIO_INFO]=1;
-    assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-ENOLINK);
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai) && rx.audio_invalid);
+    assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
     assert(!writes && !enables);
     acr(T7_RX_COR_N,6144); acr(T7_RX_COR_CTS,594000);
     aif(3,2);
@@ -151,7 +156,6 @@ int main(void) {
     assert(t7_hdmirx_audio_startup(&stream,&dai)==-EINVAL && !writes && !enables);
     fail_period_constraint=false;
     assert(!t7_hdmirx_audio_startup(&stream,&dai) && constraint_rate==48000);
-    assert(t7_hdmirx_audio_prepare(&stream,&dai)==-ENOLINK);
     const unsigned int rates[]={32000,44100,48000,88200,96000,176400,192000};
     const unsigned int ns[]={4096,6272,6144,12544,12288,25088,24576};
     for (unsigned int i=0;i<ARRAY_SIZE(rates);i++) {
@@ -179,24 +183,28 @@ int main(void) {
     assert(!t7_hdmirx_validate_audio(594000000,6272,660000,1,0,0,44100));
     assert(t7_hdmirx_validate_audio(594000000,6144,594000,0x21,0,0,48000)==-EINVAL);
     core[T7_RX_COR_AUDIO_PACKET]=BIT(6);
-    assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-EINVAL);
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai) && rx.audio_invalid);
     core[T7_RX_COR_AUDIO_PACKET]=0;
     core[T7_RX_COR_AUDIO_CHSTATUS]=BIT(1);
-    assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-EINVAL);
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai) && rx.audio_invalid);
     core[T7_RX_COR_AUDIO_CHSTATUS]=0;
     params.rate=44100;
-    assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-ERANGE);
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai) && rx.audio_invalid);
     params.rate=48000;
     assert(!writes && !enables);
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
     fail_clocks=true;
-    assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-EIO);
+    assert(t7_hdmirx_audio_prepare(&stream,&dai)==-EIO);
     assert(!writes && !clocks && !rx.audio_active);
     fail_clocks=false;
     u32 busy=BIT(31); memcpy(fifo,&busy,4);
-    assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-EBUSY);
+    assert(t7_hdmirx_audio_prepare(&stream,&dai)==-EBUSY);
     assert(!writes && readl(fifo)==busy && !clocks);
     memset(fifo,0,sizeof(fifo));
-    assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-ETIMEDOUT);
+    assert(t7_hdmirx_audio_prepare(&stream,&dai)==-ETIMEDOUT);
     assert(!clocks && !rx.audio_active && !memcmp(phy+T7_RX_AUD_PLL0,saved,sizeof(saved)));
     assert(core[T7_RX_COR_AUDIO_MCLK]==0x55 && core[T7_RX_COR_AUDIO_TDM1]==0x66 && core[T7_RX_COR_AUDIO_TDM2]==0x77);
     for (unsigned int i=0;i<ARRAY_SIZE(t7_hdmirx_audio_core_settings);i++)
@@ -206,7 +214,7 @@ int main(void) {
     assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
     assert(!t7_hdmirx_audio_prepare(&stream,&dai));
     rx.audio_invalid=true;
-    assert(t7_hdmirx_audio_prepare(&stream,&dai)==-ENOLINK);
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai));
     assert(clocks && rx.audio_active && (readl(fifo)&BIT(31)));
     assert((core[0x1429] & (BIT(6)|BIT(0)))==BIT(0));
     assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-EBUSY);
@@ -227,6 +235,8 @@ int main(void) {
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(rx.audio_format.rate==48000 && notifications==4 && rx.audio_generation==1);
     assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai));
+    stream.running=true;
     before=rx.audio_generation;
     core[T7_RX_COR_AUDIO_AIF+3]++;
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
@@ -237,12 +247,14 @@ int main(void) {
     acr(T7_RX_COR_N,6272); acr(T7_RX_COR_CTS,660000); aif(2,2);
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(!rx.audio_format.rate && xruns==1 && !(readl(fifo)&BIT(31)));
-    assert(t7_hdmirx_audio_prepare(&stream,&dai)==-ENOLINK);
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai));
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(rx.audio_format.rate==44100 && rx.audio_generation==3 && notifications==12);
     assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
     params.rate=44100;
     assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai));
+    stream.running=true;
     link.ready=false;
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(!rx.audio_format.rate && rx.audio_invalid);
@@ -256,6 +268,8 @@ int main(void) {
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(before==notifications); /* no repeated events on a stable source */
     assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai));
+    stream.running=true;
     before=xruns;
     core[T7_RX_COR_AUDIO_AIF+3]++;
     for(unsigned int i=0;i<2;i++) {
@@ -265,7 +279,38 @@ int main(void) {
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(!rx.audio_format.rate && xruns==before+1);
     assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
-    puts("seven ACR/AIF rates, malformed/unsupported packets, native constraints, stale PCM, PLL unwind passed");
+    /* A torn packet between qualification and hw_params cannot leak EAGAIN
+     * into ASoC, or start an unqualified FIFO. Exercise monitor-before-START.
+     */
+    before=writes;
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai) && rx.audio_invalid);
+    assert(!rx.audio_active && writes==before && !clocks);
+    before=xruns;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(xruns==before);
+    stream.running=true;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(xruns==before+1 && !stream.running);
+    assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
+    before=xrun_attempts;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(xrun_attempts==before); /* close cancels pending XRUN */
+    core[T7_RX_COR_AUDIO_AIF+3]--;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(rx.audio_format.rate==44100);
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    link.ready=false; /* unplug strictly after successful parameter setup */
+    before=writes;
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai) && rx.audio_invalid);
+    assert(writes==before && !clocks);
+    stream.running=true;
+    before=xruns;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    assert(xruns==before+1);
+    assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
+    puts("seven rates, packet races, native constraints, XRUN-before/after START, PLL unwind passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

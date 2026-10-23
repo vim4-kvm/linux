@@ -35,11 +35,7 @@ int snd_soc_ret(const struct device *dev, int ret, const char *fmt, ...)
 		vaf.fmt = fmt;
 		vaf.va = &args;
 
-		/* Link loss and an unstable snapshot ask the caller to retry. */
-		if (ret == -ENOLINK || ret == -EAGAIN)
-			dev_dbg(dev, "ASoC retry required (%d): %pV", ret, &vaf);
-		else
-			dev_err(dev, "ASoC error (%d): %pV", ret, &vaf);
+		dev_err(dev, "ASoC error (%d): %pV", ret, &vaf);
 		va_end(args);
 	}
 
