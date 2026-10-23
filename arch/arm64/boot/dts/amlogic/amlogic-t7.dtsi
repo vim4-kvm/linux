@@ -1636,6 +1636,17 @@
 		clock-names = "sclk", "lrclk","mclk";
 	};
 
+	tdmif_d: audio-controller-3 {
+		compatible = "amlogic,axg-tdm-iface";
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "TDM_D";
+		clocks = <&clkc_audio AUD_CLKID_MST_D_SCLK>,
+			 <&clkc_audio AUD_CLKID_MST_D_LRCLK>,
+			 <&clkc_audio AUD_CLKID_MST_D_MCLK>;
+		clock-names = "sclk", "lrclk", "mclk";
+		status = "disabled";
+	};
+
 	tdmif_c: audio-controller-2 {
 		compatible = "amlogic,axg-tdm-iface";
 		#sound-dai-cells = <0>;
@@ -1648,9 +1659,89 @@
 };
 
 &apb4 {
+	aed: audio-controller@332000 {
+		compatible = "amlogic,t7-aed";
+		reg = <0x0 0x332000 0x0 0x1000>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "AED";
+		clocks = <&clkc_audio AUD_CLKID_EQDRC>, <&clkc_audio AUD_CLKID_EQDRC_CLK>;
+		clock-names = "pclk", "clk";
+		power-domains = <&pwrc PWRC_T7_AUDIO_ID>;
+		status = "disabled";
+	};
+
+	vad: audio-detector@331800 {
+		compatible = "amlogic,t7-vad";
+		reg = <0x0 0x331800 0x0 0x400>, <0x0 0x330748 0x0 0x4>;
+		reg-names = "core", "feed";
+		sound-name-prefix = "VAD";
+		clocks = <&clkc_audio AUD_CLKID_TOVAD>, <&clkc_audio AUD_CLKID_VAD_CLK>;
+		clock-names = "pclk", "clk";
+		interrupts = <GIC_SPI 39 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "voice";
+		power-domains = <&pwrc PWRC_T7_AUDIO_ID>;
+		status = "disabled";
+	};
+
+	loopback_a: audio-controller@3302c0 {
+		compatible = "amlogic,t7-loopback";
+		reg = <0x0 0x3302c0 0x0 0x3c>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "LOOPBACK_A";
+		clocks = <&clkc_audio AUD_CLKID_LOOPBACK>;
+		clock-names = "pclk";
+		resets = <&clkc_audio AUD_RESET_LOOPBACK>;
+		power-domains = <&pwrc PWRC_T7_AUDIO_ID>;
+		status = "disabled";
+	};
+
+	loopback_b: audio-controller@3308c0 {
+		compatible = "amlogic,t7-loopback";
+		reg = <0x0 0x3308c0 0x0 0x3c>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "LOOPBACK_B";
+		clocks = <&clkc_audio AUD_CLKID_LOOPBACK_B>;
+		clock-names = "pclk";
+		resets = <&clkc_audio AUD_RESET_LOOPBACK_B>;
+		power-domains = <&pwrc PWRC_T7_AUDIO_ID>;
+		status = "disabled";
+	};
+
+	asrc_a: audio-controller@331c00 {
+		compatible = "amlogic,t7-asrc-a";
+		reg = <0x0 0x331c00 0x0 0x108>, <0x0 0x330d7c 0x0 0x4>;
+		reg-names = "engine", "chsync";
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "ASRC_A";
+		clocks = <&clkc_audio AUD_CLKID_RESAMPLE>,
+			 <&clkc_audio AUD_CLKID_MST_E_MCLK>,
+			 <&clkc_audio AUD_CLKID_RESAMPLE_A_CLK>;
+		clock-names = "pclk", "mclk", "clk";
+		assigned-clocks = <&clkc_audio AUD_CLKID_RESAMPLE_A_SEL>;
+		assigned-clock-parents = <&clkc_audio AUD_CLKID_MST_E_MCLK>;
+		power-domains = <&pwrc PWRC_T7_AUDIO_ID>;
+		status = "disabled";
+	};
+
+	asrc_b: audio-controller@334000 {
+		compatible = "amlogic,t7-asrc-b";
+		reg = <0x0 0x334000 0x0 0x108>, <0x0 0x330dbc 0x0 0x4>;
+		reg-names = "engine", "chsync";
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "ASRC_B";
+		clocks = <&clkc_audio AUD_CLKID_RESAMPLE_B>,
+			 <&clkc_audio AUD_CLKID_MST_F_MCLK>,
+			 <&clkc_audio AUD_CLKID_RESAMPLE_B_CLK>;
+		clock-names = "pclk", "mclk", "clk";
+		assigned-clocks = <&clkc_audio AUD_CLKID_RESAMPLE_B_SEL>;
+		assigned-clock-parents = <&clkc_audio AUD_CLKID_MST_F_MCLK>;
+		power-domains = <&pwrc PWRC_T7_AUDIO_ID>;
+		status = "disabled";
+	};
+
 	clkc_audio: clock-controller@330000 {
-		compatible = "amlogic,t7-audio-clkc", "amlogic,s4-audio-clkc";
-		reg = <0x0 0x330000 0x0 0xd8>,
+		compatible = "amlogic,t7-audio-clkc";
+		reg = <0x0 0x330000 0x0 0xf0>,
 			  <0x0 0x330e80 0x0 0x10>;
 		#clock-cells = <1>;
 		#reset-cells = <1>;
@@ -1810,7 +1901,7 @@
 	};
 
 	tdmin_lb: audio-controller@3303c0 {
-		compatible = "amlogic,t7-tdmin";
+		compatible = "amlogic,t7-tdmin-lb";
 		reg = <0x0 0x3303c0 0x0 0x40>;
 		sound-name-prefix = "TDMIN_LB";
 		resets = <&clkc_audio AUD_RESET_TDMIN_LB>;
@@ -1847,8 +1938,9 @@
 	};
 
 	tdmout_a: audio-controller@330500 {
-		compatible = "amlogic,sm1-tdmout";
-		reg = <0x0 0x330500 0x0 0x40>;
+		compatible = "amlogic,t7-tdmout";
+		reg = <0x0 0x330500 0x0 0x40>, <0x0 0x330a80 0x0 0x38>;
+		reg-names = "core", "ext";
 		sound-name-prefix = "TDMOUT_A";
 		resets = <&clkc_audio AUD_RESET_TDMOUT_A>;
 		clocks = <&clkc_audio AUD_CLKID_TDMOUT_A>,
@@ -1861,8 +1953,9 @@
 	};
 
 	tdmout_b: audio-controller@330540 {
-		compatible = "amlogic,sm1-tdmout";
-		reg = <0x0 0x330540 0x0 0x40>;
+		compatible = "amlogic,t7-tdmout";
+		reg = <0x0 0x330540 0x0 0x40>, <0x0 0x330ac0 0x0 0x38>;
+		reg-names = "core", "ext";
 		sound-name-prefix = "TDMOUT_B";
 		resets = <&clkc_audio AUD_RESET_TDMOUT_B>;
 		clocks = <&clkc_audio AUD_CLKID_TDMOUT_B>,
@@ -1875,8 +1968,9 @@
 	};
 
 	tdmout_c: audio-controller@330580 {
-		compatible = "amlogic,sm1-tdmout";
-		reg = <0x0 0x330580 0x0 0x40>;
+		compatible = "amlogic,t7-tdmout";
+		reg = <0x0 0x330580 0x0 0x40>, <0x0 0x330b00 0x0 0x38>;
+		reg-names = "core", "ext";
 		sound-name-prefix = "TDMOUT_C";
 		resets = <&clkc_audio AUD_RESET_TDMOUT_C>;
 		clocks = <&clkc_audio AUD_CLKID_TDMOUT_C>,
@@ -1886,6 +1980,34 @@
 			 <&clkc_audio AUD_CLKID_TDMOUT_C_LRCLK>;
 		clock-names = "pclk", "sclk", "sclk_sel",
 				  "lrclk", "lrclk_sel";
+	};
+
+	tdmin_d: audio-controller@330ec0 {
+		compatible = "amlogic,t7-tdmin-d";
+		reg = <0x0 0x330ec0 0x0 0x40>;
+		sound-name-prefix = "TDMIN_D";
+		clocks = <&clkc_audio AUD_CLKID_TDMOUT_D>,
+			 <&clkc_audio AUD_CLKID_TDMIN_D_SCLK>,
+			 <&clkc_audio AUD_CLKID_TDMIN_D_SCLK_SEL>,
+			 <&clkc_audio AUD_CLKID_TDMIN_D_LRCLK>,
+			 <&clkc_audio AUD_CLKID_TDMIN_D_LRCLK>;
+		clock-names = "pclk", "sclk", "sclk_sel", "lrclk", "lrclk_sel";
+		status = "disabled";
+	};
+
+	tdmout_d: audio-controller@330f40 {
+		compatible = "amlogic,t7-tdmout";
+		reg = <0x0 0x330f40 0x0 0x40>, <0x0 0x330f80 0x0 0x38>;
+		reg-names = "core", "ext";
+		sound-name-prefix = "TDMOUT_D";
+		resets = <&clkc_audio AUD_RESET_TDMOUT_D>;
+		clocks = <&clkc_audio AUD_CLKID_TDMOUT_D>,
+			 <&clkc_audio AUD_CLKID_TDMOUT_D_SCLK>,
+			 <&clkc_audio AUD_CLKID_TDMOUT_D_SCLK_SEL>,
+			 <&clkc_audio AUD_CLKID_TDMOUT_D_LRCLK>,
+			 <&clkc_audio AUD_CLKID_TDMOUT_D_LRCLK>;
+		clock-names = "pclk", "sclk", "sclk_sel", "lrclk", "lrclk_sel";
+		status = "disabled";
 	};
 
 	spdifout_b: audio-controller@330680 {
