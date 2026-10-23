@@ -41,6 +41,8 @@ void wave5_vpu_isolate(struct vpu_device *dev, const char *reason, u32 command)
 	get_device(dev->dev);
 	if (dev->irq >= 0)
 		disable_irq_nosync(dev->irq);
+	/* DMA guards see state 1 immediately; sysfs publishes complete metadata. */
+	smp_store_release(&dev->isolated, 2);
 	schedule_work(&dev->isolation_work);
 }
 
@@ -134,7 +136,10 @@ void wave5_vpu_isolation_init(struct vpu_device *dev)
 
 static ssize_t isolated_show(struct device *device, struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%u\n", wave5_vpu_isolated(dev_get_drvdata(device)));
+	struct vpu_device *dev = dev_get_drvdata(device);
+
+	/* Pair with publication so readers can subsequently fetch reason/time. */
+	return sysfs_emit(buf, "%u\n", smp_load_acquire(&dev->isolated) == 2);
 }
 static DEVICE_ATTR_RO(isolated);
 
