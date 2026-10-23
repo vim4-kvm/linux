@@ -1014,7 +1014,14 @@ static bool t7_hdmirx_same_measurement(const struct t7_hdmirx_measurement *a,
 	return !memcmp(&left, &right, sizeof(left)) && delta <= a->ticks / 2000;
 }
 
-static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
+static int t7_hdmirx_video_error(const char **reason, const char *value, int error)
+{
+	if (reason)
+		*reason = value;
+	return error;
+}
+
+static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reason)
 {
 	struct t7_hdmirx_measurement measured;
 	struct t7_hdmirx_color color;
@@ -1023,41 +1030,41 @@ static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 	int ret;
 
 	if (!rx || !rx->core_active)
-		return -ENOLINK;
+		return t7_hdmirx_video_error(reason, "core-inactive", -ENOLINK);
 	if (rx->dynamic_modes &&
 	    (!!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1)) != READ_ONCE(rx->uhd60)))
-		return -ENOLINK;
+		return t7_hdmirx_video_error(reason, "clock-ratio", -ENOLINK);
 	if (rx->link && !(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK))
-		return -ENOLINK;
+		return t7_hdmirx_video_error(reason, "pll-unlocked", -ENOLINK);
 	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
 	    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
-		return -ENOLINK;
+		return t7_hdmirx_video_error(reason, "5v-or-align", -ENOLINK);
 	if (readb(rx->cor + T7_RX_COR_FRAME_STATUS) & BIT(2))
-		return -ERANGE;
+		return t7_hdmirx_video_error(reason, "interlaced", -ERANGE);
 	hdr = t7_hdmirx_hdr_input(rx);
 	yuv420 = hdr || t7_hdmirx_sdr420_input(rx);
 	yuv = yuv420 || t7_hdmirx_sdr444_input(rx);
 	if (rx->dynamic_modes) {
 		ret = t7_hdmirx_read_color(rx, &color);
 		if (ret)
-			return ret;
+			return t7_hdmirx_video_error(reason, "color-read", ret);
 		yuv420 = color.space == 3;
 		yuv = color.space != 0;
 		if (rx->link && rx->link->users &&
 		    memcmp(&color, &rx->lease_color, sizeof(color)))
-			return -ENOLINK;
+			return t7_hdmirx_video_error(reason, "lease-color", -ENOLINK);
 	} else if (!yuv && (readl(rx->top + T7_RX_TOP_VID_STAT) & GENMASK(23, 20) ||
 	    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4))
 		return -ERANGE;
 	if (rx->link && rx->link->users &&
 	    (hdr != rx->lease_hdr || yuv != rx->lease_yuv || yuv420 != rx->lease_420))
-		return -ENOLINK;
+		return t7_hdmirx_video_error(reason, "lease-encoding", -ENOLINK);
 	if (rx->dynamic_modes) {
 		ret = t7_hdmirx_measure(rx, yuv420, &measured);
 		if (!ret && rx->link && rx->link->users &&
 		    !t7_hdmirx_same_measurement(&measured, &rx->lease_mode))
-			return -ENOLINK;
-		return ret;
+			return t7_hdmirx_video_error(reason, "lease-timing", -ENOLINK);
+		return t7_hdmirx_video_error(reason, "measurement", ret);
 	}
 	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (yuv420 ? 1920 : rx->uhd60 ? 3840 : 1920) ||
 	    t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) != (rx->uhd60 ? 2160 : 1080) ||
@@ -1073,6 +1080,33 @@ static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
 		return -ERANGE;
 	return 0;
 }
+
+static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
+{
+	return t7_hdmirx_video_status_reason(rx, NULL);
+}
+
+int t7_hdmirx_check_capture(struct device *dev, const char **reason)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	int ret;
+
+	*reason = "video-status";
+	if (rx && rx->link && !READ_ONCE(rx->link->ready))
+		return t7_hdmirx_video_error(reason, "link-not-ready", -ENOLINK);
+	ret = t7_hdmirx_video_status_reason(rx, reason);
+	if (ret && ret != -EAGAIN && rx && rx->core_active && rx->phy_active)
+		dev_info_ratelimited(dev, "capture check: %s error=%d width=%u height=%u ticks=%u lease=%ux%u/%u pll=%u align=%u\n",
+			*reason, ret, t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH),
+			t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT),
+			t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
+			(readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16),
+			rx->lease_mode.width, rx->lease_mode.height, rx->lease_mode.ticks,
+			!!(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK),
+			!!(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)));
+	return ret;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_check_capture);
 int t7_hdmirx_check_video_now(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);

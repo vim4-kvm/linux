@@ -165,6 +165,10 @@ struct t7_vdin {
 	u32 ring_sequence;
 	u32 ring_pauses;
 	u64 copied_bytes;
+	/* Last failed worker remains visible across close and the next STREAMON. */
+	u32 stream_stops, last_stop_sequence;
+	int last_stop_error;
+	const char *last_stop_reason;
 	u32 hdr_gain[149], hdr_oetf[149];
 	bool hdr_curve_pending;
 };
@@ -715,6 +719,7 @@ static void t7_vdin_ring_release(struct t7_vdin *vdin, struct t7_vdin_slot *slot
 static int t7_vdin_thread(void *data)
 {
 	struct t7_vdin *vdin = data;
+	const char *reason = "dma-wait";
 	int ret = 0;
 
 	t7_vdin_ring_begin(vdin);
@@ -723,6 +728,7 @@ static int t7_vdin_thread(void *data)
 		struct t7_vdin_slot *slot;
 		long ready;
 
+		reason = "dma-wait";
 		ready = wait_event_interruptible_timeout(vdin->buffer_wait,
 							 kthread_should_stop() ||
 							 READ_ONCE(vdin->ring_error) ||
@@ -764,7 +770,7 @@ static int t7_vdin_thread(void *data)
 		}
 		buffer = vdin->direct_dma ? slot->buffer : t7_vdin_next_buffer(vdin);
 		mutex_lock(&vdin->lock);
-		ret = t7_hdmirx_check_video_now(vdin->receiver);
+		ret = t7_hdmirx_check_capture(vdin->receiver, &reason);
 		if (!vdin->direct_dma)
 			dma_sync_single_for_cpu(vdin->dev, slot->dma, vdin->frame_size, DMA_FROM_DEVICE);
 		if (!ret) {
@@ -778,7 +784,7 @@ static int t7_vdin_thread(void *data)
 			}
 			/* Publish CPU writes to the coherent output before handing it off. */
 			dma_wmb();
-			ret = t7_hdmirx_check_video_now(vdin->receiver);
+			ret = t7_hdmirx_check_capture(vdin->receiver, &reason);
 			buffer->vb.vb2_buf.timestamp = slot->timestamp;
 			buffer->vb.sequence = slot->sequence;
 			buffer->vb.field = V4L2_FIELD_NONE;
@@ -826,6 +832,10 @@ static int t7_vdin_thread(void *data)
 		}
 	}
 	if (ret) {
+		vdin->stream_stops++;
+		vdin->last_stop_error = ret;
+		vdin->last_stop_reason = reason;
+		vdin->last_stop_sequence = vdin->ring_sequence;
 		vb2_queue_error(&vdin->queue);
 		t7_vdin_return_buffers(vdin, VB2_BUF_STATE_ERROR);
 		/* Keep the task alive until STREAMOFF joins it. */
@@ -1348,6 +1358,10 @@ static int t7_vdin_status(struct seq_file *s, void *unused)
 	seq_printf(s, "stream_frames: %u\n", vdin->ring_sequence);
 	seq_printf(s, "stream_pauses: %u\n", vdin->ring_pauses);
 	seq_printf(s, "stream_error: %d\n", vdin->ring_error);
+	seq_printf(s, "stream_stops: %u\n", READ_ONCE(vdin->stream_stops));
+	seq_printf(s, "last_stop_error: %d\n", READ_ONCE(vdin->last_stop_error));
+	seq_printf(s, "last_stop_reason: %s\n", vdin->last_stop_reason ?: "none");
+	seq_printf(s, "last_stop_sequence: %u\n", READ_ONCE(vdin->last_stop_sequence));
 	seq_printf(s, "write_ctrl: %#x\n", t7_vdin_read(vdin, VDIN_WR_CTRL));
 	seq_printf(s, "write_status: %#x\n", t7_vdin_read(vdin, VDIN_WR_STATUS));
 	seq_printf(s, "pixels: %#x\n", t7_vdin_read(vdin, VDIN_ACTIVE_PIXELS));
