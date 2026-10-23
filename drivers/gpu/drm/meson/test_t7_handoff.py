@@ -70,6 +70,9 @@ registers = '\n'.join(line for line in register_source.splitlines()
                       if re.match(r'#define\s', line) and not line.endswith('\\'))
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('struct meson_t7_handoff {'):source.index('static struct meson_t7_handoff *')]
+retirement = Path(__file__).with_name('meson_t7_scanout.h').read_text()
+types = retirement[retirement.index('#define MESON_T7_MAX_LAYERS'):
+                   retirement.rindex('#endif')] + types
 functions = source[source.index('static u32 meson_t7_osd_alpha'):
                    source.index('/* Both interrupt orders')]
 functions += source[source.index('static void meson_t7_handoff_rdma_complete'):
@@ -294,7 +297,7 @@ int main(void)
     assert(!meson_t7_handoff_plane_check(&display.plane, &rmfb));
     assert(!removed.visible);
     meson_t7_handoff_flush(&display.crtc, &rmfb);
-    assert(writes == 3 && second.references == 1 && !display.scanout);
+    assert(writes == 3 && second.references == 1 && !display.buffers.active[0]);
     assert(osd[4] == HANDOFF_BOOT_ADDR >> 4);
     /* Counter wrap must not retire the buffer before two real interrupts. */
     display.requested = display.written = display.applied = UINT32_MAX;
@@ -302,7 +305,8 @@ int main(void)
     assert(!display.applied && first.references == 2);
     inject_timeout = true;
     meson_t7_handoff_scanout(&display, &second, 0x21000000);
-    assert(display.faulted && display.scanout == &first && display.stalled == &second);
+    assert(display.faulted && display.buffers.active[0] == &first &&
+           display.buffers.pending[0] == &second);
     assert(first.references == 2 && second.references == 2);
     unsigned int stopped_at = writes;
     meson_t7_handoff_scanout(&display, &third, 0x22000000);
@@ -321,6 +325,7 @@ int main(void)
         .src_w=1920 << 16, .src_h=1080 << 16, .crtc_w=1920, .crtc_h=1080};
     rmfb.plane = &visible;
     display.faulted = false;
+    display.buffers.faulted = false;
     assert(meson_t7_handoff_plane_check(&display.plane, &rmfb) == -EINVAL);
     display.linear_formats = true;
     assert(!meson_t7_handoff_plane_check(&display.plane, &rmfb));
@@ -331,7 +336,7 @@ int main(void)
     gpu.pitches[0] = 7648;
     assert(meson_t7_handoff_plane_check(&display.plane, &rmfb) == -EINVAL);
     gpu.pitches[0] = 8192;
-    display.scanout = NULL; display.stalled = NULL;
+    display.buffers.active[0] = NULL; display.buffers.pending[0] = NULL;
     display.boot_format = 0x8700; display.boot_stride = 360; display.boot_ctrl2 = 0x12;
     inject_timeout = false;
     unsigned int before = writes;
@@ -355,7 +360,7 @@ int main(void)
         struct drm_framebuffer *next = i & 1 ? &gpu : &first;
         if (next == &first) first.format = &xrgb;
         meson_t7_handoff_scanout(&display, next, 0x22000000);
-        assert(!display.faulted && display.scanout == next);
+        assert(!display.faulted && display.buffers.active[0] == next);
         assert(!rdma[0x23] && !rdma[0x15]);
     }
     assert(vblanks - start_vblank == 60);
@@ -365,7 +370,7 @@ int main(void)
     for (timeout_part = 1; timeout_part <= 2; timeout_part++) {
         struct meson_t7_handoff failed = {.osd=osd, .rdma=rdma, .rdma_table=table};
         struct drm_framebuffer old = {.references=2}, next = {.references=1};
-        failed.scanout = &old;
+        failed.buffers.active[0] = &old;
         inject_timeout = true;
         meson_t7_handoff_scanout(&failed, &next, 0x22000000);
         assert(failed.faulted && old.references == 2 && next.references == 2);
@@ -394,7 +399,7 @@ int main(void)
     puts("Latch failure: no successful page-flip event, error fence and released commit dependency passed");
 
     native_writes=true; inject_timeout=false;
-    display.native_modeset=true; display.faulted=false; display.scanout=NULL;
+    display.native_modeset=true; display.faulted=false; display.buffers.active[0]=NULL;
     running.adjusted_mode.hdisplay=3840; running.adjusted_mode.vdisplay=2160;
     running.modeset=true; running.active=true;
     struct drm_framebuffer uhd={.references=1,.format=&xrgb,.width=3840,.height=2160,
@@ -413,7 +418,7 @@ int main(void)
     assert(osd[VIU_OSD1_BLK0_CFG_W2 - VIU_OSD1_CTRL_STAT]==2159U<<16);
     running.active=false;
     meson_t7_handoff_disable(&display.crtc,&rmfb);
-    assert(timing_stops==1 && uhd.references==1 && !display.scanout && !(osd[0]&1));
+    assert(timing_stops==1 && uhd.references==1 && !display.buffers.active[0] && !(osd[0]&1));
     running.active=true; running.event=&event; fail_modeset=true;
     previously_sent=sent;
     meson_t7_handoff_enable(&display.crtc,&rmfb);

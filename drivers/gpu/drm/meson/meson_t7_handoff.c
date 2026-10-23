@@ -36,6 +36,7 @@
 #include "meson_registers.h"
 #include "meson_t7_handoff.h"
 #include "meson_t7_modeset.h"
+#include "meson_t7_scanout.h"
 
 #define HANDOFF_WIDTH	1920
 #define HANDOFF_HEIGHT	1080
@@ -74,8 +75,7 @@ struct meson_t7_handoff {
 	u32 vsync_count;
 	bool faulted;
 	/* Keep DMA memory alive even if the display interrupt stops. */
-	struct drm_framebuffer *scanout;
-	struct drm_framebuffer *stalled;
+	struct meson_t7_scanout buffers;
 };
 
 static struct meson_t7_handoff *to_handoff(struct drm_device *drm)
@@ -208,13 +208,14 @@ vblank:
 static void meson_t7_handoff_scanout(struct meson_t7_handoff *display,
 				     struct drm_framebuffer *fb, dma_addr_t addr)
 {
+	struct drm_framebuffer *next[MESON_T7_MAX_LAYERS] = { fb };
 	unsigned long flags;
 	u32 sequence;
 
 	if (READ_ONCE(display->faulted))
 		return;
-	if (fb)
-		drm_framebuffer_get(fb);
+	if (meson_t7_scanout_acquire(&display->buffers, next))
+		return;
 	spin_lock_irqsave(&display->lock, flags);
 	if (display->linear_formats) {
 		u32 format = display->boot_format & HANDOFF_FORMAT_MASK;
@@ -259,13 +260,11 @@ static void meson_t7_handoff_scanout(struct meson_t7_handoff *display,
 				READ_ONCE(display->applied) == sequence,
 				msecs_to_jiffies(100))) {
 		WRITE_ONCE(display->faulted, true);
-		display->stalled = fb;
+		meson_t7_scanout_retire(&display->buffers, false);
 		drm_err(&display->drm, "OSD latch timeout; DMA buffers pinned until reboot\n");
 		return;
 	}
-	if (display->scanout)
-		drm_framebuffer_put(display->scanout);
-	display->scanout = fb;
+	meson_t7_scanout_retire(&display->buffers, true);
 }
 
 static int meson_t7_handoff_plane_check(struct drm_plane *plane,
