@@ -8,8 +8,8 @@ import tempfile
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
 source = source.replace('#include "t7-vdin-hdr.h"', Path(__file__).with_name('t7-vdin-hdr.h').read_text())
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
-types = source[source.index('enum t7_vdin_slot_state {'):source.index('static u32 t7_vdin_read')]
-hardware = source[source.index('static u32 t7_vdin_read'):source.index('static int t7_vdin_capture')]
+types = source[source.index('enum t7_vdin_slot_state {'):source.index('static void __iomem *t7_vdin_reg')]
+hardware = source[source.index('static void __iomem *t7_vdin_reg'):source.index('static int t7_vdin_capture')]
 stream = source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)\n{'):
                 source.index('static const struct vb2_ops t7_vdin_queue_ops')]
 prefix = r'''
@@ -32,6 +32,7 @@ typedef int irqreturn_t;
 #define module_param(...)
 #define MODULE_PARM_DESC(...)
 #define __iomem
+#define WARN_ON_ONCE(condition) assert(!(condition))
 #define BIT(n) (1U<<(n))
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define GENMASK(h,l) ((~0U>>(31-(h))) & (~0U<<(l)))

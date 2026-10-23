@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
-/* Exclusive T7 VDIN0 capture experiment; DRM must remain disabled. */
+/* T7 VDIN0 capture; the split-resource profile permits OSD-only handoff. */
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
@@ -124,6 +124,7 @@ struct t7_vdin {
 	struct device *domains[3];
 	unsigned int domain_count;
 	void __iomem *regs;
+	void __iomem *split_regs[4];
 	struct clk_bulk_data clocks[5];
 	struct mutex lock; /* Serializes DMA capture and the immutable copy. */
 	struct completion done;
@@ -168,14 +169,36 @@ struct t7_vdin {
 	bool hdr_curve_pending;
 };
 
+static void __iomem *t7_vdin_reg(struct t7_vdin *vdin, u32 reg)
+{
+	if (vdin->regs)
+		return vdin->regs + reg * 4;
+	if (reg >= 0x1200 && reg <= 0x12ff)
+		return vdin->split_regs[0] + (reg - 0x1200) * 4;
+	if (reg == VPU_SW_RESET)
+		return vdin->split_regs[1];
+	if (reg >= VPU_WRARB_MODE && reg <= VPU_WRARB_REQEN)
+		return vdin->split_regs[2] + (reg - VPU_WRARB_MODE) * 4;
+	if (reg >= VDIN_DOUBLE_CTRL && reg <= VDIN_TOP_MISC)
+		return vdin->split_regs[3] + (reg - VDIN_DOUBLE_CTRL) * 4;
+	/* Do not turn an accidental new register into an out-of-resource access. */
+	WARN_ON_ONCE(1);
+	return NULL;
+}
+
 static u32 t7_vdin_read(struct t7_vdin *vdin, u32 reg)
 {
-	return readl(vdin->regs + reg * 4);
+	void __iomem *address = t7_vdin_reg(vdin, reg);
+
+	return address ? readl(address) : 0;
 }
 
 static void t7_vdin_write(struct t7_vdin *vdin, u32 reg, u32 value)
 {
-	writel(value, vdin->regs + reg * 4);
+	void __iomem *address = t7_vdin_reg(vdin, reg);
+
+	if (address)
+		writel(value, address);
 }
 
 static void t7_vdin_update(struct t7_vdin *vdin, u32 reg, u32 mask, u32 value)
@@ -309,7 +332,7 @@ static int t7_vdin_stop_dma(struct t7_vdin *vdin)
 	 * Source loss may suppress the IRQ: software completion is required to
 	 * publish a frame, but must not veto hardware-confirmed DMA shutdown.
 	 */
-	ret = readl_poll_timeout(vdin->regs + VDIN_WR_STATUS * 4, idle,
+	ret = readl_poll_timeout(t7_vdin_reg(vdin, VDIN_WR_STATUS), idle,
 				 idle & BIT(0),
 				 10, 100000);
 	if (!ret)
@@ -1447,6 +1470,38 @@ static void t7_vdin_put_receiver(void *data)
 	put_device(data);
 }
 
+static int t7_vdin_map_regs(struct platform_device *pdev, struct t7_vdin *vdin)
+{
+	static const struct {
+		resource_size_t start, size;
+	} regions[] = {
+		{ 0xff004800, 0x400 }, /* VDIN0, including its HDR2 core. */
+		{ 0xff009c80, 0x4 },   /* VPU_SW_RESET, only bit 26 is updated. */
+		{ 0xff009e88, 0x8 },   /* VDIN write arbitration. */
+		{ 0xff01042c, 0xc },   /* VDIN double-write and top controls. */
+	};
+	struct resource *window;
+	unsigned int i;
+
+	/* Existing capture-only DTBs retain their exclusive whole-window lease. */
+	if (!of_property_present(pdev->dev.of_node, "amlogic,split-vcbus")) {
+		vdin->regs = devm_platform_ioremap_resource(pdev, 0);
+		return PTR_ERR_OR_ZERO(vdin->regs);
+	}
+	window = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!window || window->start != 0xff000000 || resource_size(window) != 0x40000)
+		return -EINVAL;
+	for (i = 0; i < ARRAY_SIZE(regions); i++) {
+		struct resource resource = DEFINE_RES_MEM(regions[i].start, regions[i].size);
+
+		/* Keep resource reservation: mapping alone would silently allow conflicts. */
+		vdin->split_regs[i] = devm_ioremap_resource(&pdev->dev, &resource);
+		if (IS_ERR(vdin->split_regs[i]))
+			return PTR_ERR(vdin->split_regs[i]);
+	}
+	return 0;
+}
+
 static int t7_vdin_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1507,9 +1562,9 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	/* Keep NV12 tightly packed, with tail room for aligned encoder plane views. */
 	vdin->allocation_size = nv12 ? vdin->stride * ALIGN(vdin->height, 16) * 3 / 2 :
 				       vdin->frame_size;
-	vdin->regs = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(vdin->regs))
-		return PTR_ERR(vdin->regs);
+	ret = t7_vdin_map_regs(pdev, vdin);
+	if (ret)
+		return ret;
 	vdin->clocks[0].id = "pclk";
 	vdin->clocks[1].id = "vpu";
 	vdin->clocks[2].id = "vapb";
@@ -1599,7 +1654,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	ret = t7_vdin_video_register(vdin);
 	if (ret)
 		return ret;
-	dev_info(dev, "exclusive %ux%u %s capture ready at /dev/video%d\n",
+	dev_info(dev, "%ux%u %s capture ready at /dev/video%d\n",
 		 vdin->width, vdin->height, nv12 ? "NV12" : "RGB24", vdin->video.num);
 	return 0;
 }

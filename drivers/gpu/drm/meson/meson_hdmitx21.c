@@ -10,6 +10,7 @@
  * Register sequences follow the Amlogic vendor driver (hdmitx21).
  */
 
+#include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
@@ -35,6 +36,7 @@
 #include <linux/media-bus-format.h>
 
 #include "meson_drv.h"
+#include "meson_t7_handoff.h"
 
 /* TOP registers (32-bit, byte offsets) */
 #define TOP_SW_RESET		0x000
@@ -168,6 +170,7 @@ struct meson_hdmitx21 {
 	struct drm_bridge *next_bridge;
 	void __iomem *top;
 	void __iomem *cor;
+	resource_size_t boot_top, boot_cor;
 	struct regmap *hhi;	/* analog control block with the PHY, from meson DRM */
 	struct clk *pclk;
 	struct i2c_adapter ddc;
@@ -915,12 +918,114 @@ static irqreturn_t meson_hdmitx21_irq_thread(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+/*
+ * The handoff bridge owns no modesetting state. In particular it must never
+ * enter the normal attach/enable callbacks, which change PHY and TX registers.
+ * Use the vendor TOP/COR SMC read ABI, including its byte-width argument.
+ */
+static u32 meson_hdmitx21_boot_read(resource_size_t address, unsigned int width)
+{
+	struct arm_smccc_res result;
+
+	arm_smccc_smc(0x82000018, address, width, 0, 0, 0, 0, 0, &result);
+	return result.a0;
+}
+
+static int meson_hdmitx21_boot_attach(struct drm_bridge *bridge,
+				      struct drm_encoder *encoder,
+				      enum drm_bridge_attach_flags flags)
+{
+	if (!(flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR))
+		return -EINVAL;
+	return 0;
+}
+
+static enum drm_mode_status
+meson_hdmitx21_boot_mode_valid(struct drm_bridge *bridge,
+			       const struct drm_display_info *info,
+			       const struct drm_display_mode *mode)
+{
+	return drm_mode_equal(mode, &meson_t7_handoff_mode) ? MODE_OK : MODE_BAD;
+}
+
+static enum drm_connector_status
+meson_hdmitx21_boot_detect(struct drm_bridge *bridge, struct drm_connector *connector)
+{
+	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
+
+	return meson_hdmitx21_boot_read(tx->boot_top + TOP_STAT0, 32) & TOP_STAT0_HPD ?
+		connector_status_connected : connector_status_disconnected;
+}
+
+static int meson_hdmitx21_boot_get_modes(struct drm_bridge *bridge,
+					 struct drm_connector *connector)
+{
+	struct drm_display_mode *mode;
+
+	mode = drm_mode_duplicate(bridge->dev, &meson_t7_handoff_mode);
+	if (!mode)
+		return -ENOMEM;
+	drm_mode_probed_add(connector, mode);
+	return 1;
+}
+
+static const struct drm_bridge_funcs meson_hdmitx21_boot_funcs = {
+	.attach = meson_hdmitx21_boot_attach,
+	.detect = meson_hdmitx21_boot_detect,
+	.get_modes = meson_hdmitx21_boot_get_modes,
+	.mode_valid = meson_hdmitx21_boot_mode_valid,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+};
+
+static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct meson_hdmitx21 *tx;
+	struct resource *top, *cor;
+	u32 status, active, tmds;
+
+	top = platform_get_resource_byname(pdev, IORESOURCE_MEM, "top");
+	cor = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cor");
+	if (!top || !cor || top->start != 0xfe300000 || cor->start != 0xfe380000 ||
+	    resource_size(top) != 0x10000 || resource_size(cor) != 0x10000)
+		return -EINVAL;
+	if (!devm_request_mem_region(dev, top->start, resource_size(top), dev_name(dev)) ||
+	    !devm_request_mem_region(dev, cor->start, resource_size(cor), dev_name(dev)))
+		return -EBUSY;
+	tx = devm_drm_bridge_alloc(dev, struct meson_hdmitx21, bridge,
+				   &meson_hdmitx21_boot_funcs);
+	if (IS_ERR(tx))
+		return PTR_ERR(tx);
+	tx->dev = dev;
+	tx->boot_top = top->start;
+	tx->boot_cor = cor->start;
+	tx->pclk = devm_clk_get_enabled(dev, "pclk");
+	if (IS_ERR(tx->pclk))
+		return PTR_ERR(tx->pclk);
+	status = meson_hdmitx21_boot_read(tx->boot_top + TOP_STAT0, 32);
+	active = meson_hdmitx21_boot_read(tx->boot_top + TOP_HV_ACTIVE, 32);
+	tmds = meson_hdmitx21_boot_read(tx->boot_cor + TMDS_CTRL, 8);
+	dev_info(dev, "boot TX HPD=%#x active=%#x TMDS=%#x (SMC read-only)\n",
+		 status, active, tmds);
+	if (!(status & TOP_STAT0_HPD) || active != (1080 << 16 | 1920))
+		return dev_err_probe(dev, -ENODEV, "TX boot mode is not connected 1080p\n");
+	tx->bridge.of_node = dev->of_node;
+	tx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_MODES;
+	tx->bridge.type = DRM_MODE_CONNECTOR_HDMIA;
+	return devm_drm_bridge_add(dev, &tx->bridge);
+}
+
 static int meson_hdmitx21_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct meson_hdmitx21 *tx;
 	struct reset_control *rst;
 	int irq, ret;
+
+	if (of_property_present(dev->of_node, "amlogic,boot-handoff"))
+		return meson_hdmitx21_boot_probe(pdev);
 
 	tx = devm_drm_bridge_alloc(dev, struct meson_hdmitx21, bridge,
 				   &meson_hdmitx21_bridge_funcs);
