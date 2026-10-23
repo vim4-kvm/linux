@@ -1438,6 +1438,15 @@ int wave5_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 		return -EINVAL;
 	}
 
+	/*
+	 * The legacy ABI advertises a second VCORE in CONFIG1. This reset
+	 * sequence drains only VCORE0; resetting with VCORE1 still issuing
+	 * transactions would not establish that DMA has stopped.
+	 */
+	if (vpu_dev->legacy_firmware &&
+	    (vpu_read_reg(vpu_dev, W5_VPU_RET_VPU_CONFIG1) & BIT(26)))
+		return -EOPNOTSUPP;
+
 	/* VPU doesn't send response. force to set BUSY flag to 0. */
 	vpu_write_reg(vpu_dev, W5_VPU_BUSY_STATUS, 0);
 
