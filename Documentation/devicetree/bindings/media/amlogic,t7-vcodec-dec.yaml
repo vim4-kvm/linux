@@ -39,10 +39,14 @@ properties:
       - const: clk_vdec_mux
 
   power-domains:
-    maxItems: 1
+    items:
+      - description: VDEC core, with secure memory/isolation/reset control
+      - description: NIC3 parent, held for DOS-top access before core power-on
 
   power-domain-names:
-    const: vdec
+    items:
+      - const: vdec
+      - const: nic3
 
   amlogic,canvas:
     description: Canvas lookup table provider.
@@ -74,8 +78,9 @@ examples:
         clocks = <&clkc_periphs CLKID_SYS_DOS>,
                  <&clkc_periphs CLKID_VDEC>;
         clock-names = "vdec", "clk_vdec_mux";
-        power-domains = <&pwrc PWRC_T7_DOS_VDEC_ID>;
-        power-domain-names = "vdec";
+        power-domains = <&pwrc PWRC_T7_DOS_VDEC_ID>,
+                        <&pwrc PWRC_T7_NIC3_ID>;
+        power-domain-names = "vdec", "nic3";
         amlogic,canvas = <&canvas>;
         status = "disabled";
     };
