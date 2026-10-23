@@ -31,7 +31,9 @@ properties:
     type: boolean
     description: |
       Extend boot-handoff with EDID reads and HPD polling. DDC writes are
-      allowed, but video, PHY, PLL and audio programming remain forbidden.
+      allowed, but video, PHY and PLL programming remain forbidden. With
+      sound-dai-cells this also enables two-channel PCM audio for the fixed
+      firmware timing. The connector supplies EDID-derived ELD to hdmi-codec.
 
   hpd-gpios:
     maxItems: 1
@@ -110,6 +112,13 @@ allOf:
       required:
         - amlogic,boot-handoff
         - hpd-gpios
+  - if:
+      required:
+        - amlogic,boot-handoff
+        - "#sound-dai-cells"
+    then:
+      required:
+        - amlogic,boot-monitor
   - if:
       not:
         required:
