@@ -20,6 +20,13 @@ properties:
   compatible:
     const: amlogic,t7-hdmi-tx
 
+  amlogic,enc2-modeset:
+    type: boolean
+    description: |
+      Dedicated T7 display consumer owns ENC2 and HDMI PLL, independent of
+      normal meson VPU initialization. This bridge exclusively owns the PHY.
+      Cannot be combined with boot-handoff or boot-monitor.
+
   amlogic,boot-handoff:
     type: boolean
     description: |
@@ -40,14 +47,18 @@ properties:
     description: GPIOW15, active high, for the physical HDMI sink presence.
 
   reg:
+    minItems: 2
     items:
       - description: TOP registers
       - description: COR registers
+      - description: Exclusive HDMI PHY, fe008200/18, ENC2 modesetting only
 
   reg-names:
+    minItems: 2
     items:
       - const: top
       - const: cor
+      - const: phy
 
   interrupts:
     maxItems: 1
@@ -105,6 +116,23 @@ required:
 additionalProperties: false
 
 allOf:
+  - if:
+      required:
+        - amlogic,enc2-modeset
+    then:
+      properties:
+        amlogic,boot-handoff: false
+        amlogic,boot-monitor: false
+        reg:
+          minItems: 3
+        reg-names:
+          minItems: 3
+    else:
+      properties:
+        reg:
+          maxItems: 2
+        reg-names:
+          maxItems: 2
   - if:
       required:
         - amlogic,boot-monitor

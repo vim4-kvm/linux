@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/amlogic,t7-display.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amlogic T7 ENC2 linear display experiment
+
+maintainers:
+  - localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+
+description: |
+  OSD1 and ENC2 atomic modesetting with exclusive HDMI PLL ownership. Firmware
+  must initialize the VIU1 to ENC2 route and reserve the logo frames. The normal
+  VPU, simple-framebuffer and HDMI PLL clock provider must be disabled. VDIN
+  uses split capture banks and exclusively owns write arbitration words
+  0x27a2/0x27a3. Display must not initialize global arbitration, canvas or AFBC.
+  Register DMA channel 1 and both interrupt sources are exclusive to display.
+  The clock-controller regmap serializes masked display clock updates with CCF;
+  RX clocks, VPU frequency, resets and power islands must not be changed.
+
+properties:
+  compatible:
+    const: amlogic,t7-display
+  reg:
+    items:
+      - description: OSD1, ff006840/80
+      - description: ENC2 timing, ff008db8/608
+      - description: Register DMA, ff004400/100
+      - description: Exclusive HDMI PLL, fe0081c0/20
+      - description: ENC2 video clocks, fe0001e0/20
+      - description: HDMI video divider, fe000204/4
+      - description: VPP OSD input and scopes, ff0077c4/18
+      - description: OSD blend scopes and sizes, ff00e6c0/44
+      - description: OSD1 scaler bypass, ff016820/4
+      - description: VPP postblend size, ff007484/4
+      - description: VPP output size, ff007694/4
+      - description: HDMI mapping and sync polarity, ff009c6c/4
+  reg-names:
+    items:
+      - const: osd1
+      - const: venc
+      - const: rdma
+      - const: pll
+      - const: vid2
+      - const: vid-div
+      - const: vpp
+      - const: blend
+      - const: scaler
+      - const: post-size
+      - const: out-size
+      - const: hdmi-setting
+  amlogic,clock-controller:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: T7 peripheral clock controller providing the shared MMIO regmap
+  interrupts:
+    items:
+      - description: VIU1 vsync
+      - description: RDMA completion
+  clocks:
+    items:
+      - description: VPU interrupt gate
+      - description: VPU reference
+      - description: VAPB reference
+      - description: TX APB gate
+      - description: HDMI PLL oscillator, 24MHz
+  power-domains:
+    items:
+      - description: VPU HDMI
+      - description: VI CLK1
+      - description: VI CLK2
+  memory-region:
+    maxItems: 1
+    description: Reserved firmware logo frames
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - amlogic,clock-controller
+  - interrupts
+  - clocks
+  - power-domains
+  - memory-region
+  - port
+
+additionalProperties: false
