@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
 /* ENC2 timing and clocks. No VDIN, canvas or global VPU initialization. */
 #include <linux/arm-smccc.h>
 #include <linux/delay.h>
@@ -163,7 +164,7 @@ static void meson_t7_video_clock(struct meson_t7_modeset *hw)
 	/* Shared clock-controller regmap serializes masked updates with CCF. */
 	regmap_update_bits(hw->clkctrl, 0xd8, GENMASK(27, 16), 0);
 	regmap_update_bits(hw->clkctrl, 0xdc, GENMASK(22, 0),
-			   BIT(21) | BIT(20) | BIT(13) | BIT(12) | BIT(5) | BIT(4));
+			   (2 << 21) | BIT(20) | (2 << 13) | BIT(12) | (2 << 5) | BIT(4));
 	value = readl(hw->vid_div) & ~(GENMASK(19, 0));
 	writel(value | BIT(25), hw->vid_div);
 	/* VID_PLL_DIV_5: load shift preset, then enable output. */

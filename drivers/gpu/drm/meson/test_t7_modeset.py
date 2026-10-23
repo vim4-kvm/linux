@@ -79,13 +79,15 @@ struct hdmi_timing {
     int v_total,v_front,v_sync,v_back,v_active;
 };
 struct hdmi_format_para { struct hdmi_timing timing; int cs; };
-struct hdmitx_dev { struct {struct hdmi_format_para fmt_para;} tx_comm; int frl_rate,dsc_en; };
+struct chip_data {int chip_type;};
+struct hdmitx_dev { struct {struct hdmi_format_para fmt_para;} tx_comm; int frl_rate,dsc_en;
+    struct {struct chip_data *chip_data;} tx_hw;};
 static struct hdmitx_dev device;
 static struct hdmitx_dev *get_hdmitx21_device(void) {return &device;}
 static const struct hdmi_timing *hdmitx_mode_vic_to_hdmi_timing(int vic)
 { return &device.tx_comm.fmt_para.timing; }
 enum hdmi_vic {DUMMY_VIC};
-static u32 vendor_regs[0x6000], actual_regs[0x6000], pll[7], video[8], divider;
+static u32 vendor_regs[0x6000], actual_regs[0x6000], pll[7], video[8], divider, shared[256];
 static bool fail_lock;
 struct meson_t7_modeset {void *pll,*vid2,*vid_div,*clkctrl;};
 static void meson_t7_write(struct meson_t7_modeset *hw,u32 reg,u32 value)
@@ -100,7 +102,7 @@ static u32 readl(void *reg) {return *(u32 *)reg | ((uintptr_t)reg>=(uintptr_t)pl
 static void usleep_range(int a,int b) {}
 static void udelay(int a) {}
 static void regmap_update_bits(void *map,u32 reg,u32 mask,u32 value)
-{assert(reg==0xd8 || reg==0xdc);}
+{assert(reg==0xd8 || reg==0xdc);shared[reg/4]=(shared[reg/4]&~mask)|(value&mask);}
 struct arm_smccc_res {u32 a0;};
 static void arm_smccc_smc(u32 fn,u32 op,u32 wr,u32 enc,u32 a,u32 b,u32 c,u32 d,
                          struct arm_smccc_res *res)
@@ -134,7 +136,19 @@ body += '\n' + '\n'.join(function(source, name) for name in driver_names)
 body += '\n' + '\n'.join(function(hw_t7, name) for name in vendor_names)
 body += '\n' + function(clk_source, 't7_calc_pixel_clk_hpll_vco_od')
 body += '\n' + function(venc_source, 'config_tv_enc_calc')
+video_source = (vendor / 'hdmi_tx_hw.c').read_text()
+video_registers = (vendor / 'register.h').read_text()
+for name, word in re.findall(r'^#define (CLKCTRL_\w+)\s+CLKCTRL_REG_ADDR\((0x[0-9a-f]+)\)',
+                             video_registers, re.M):
+    body += f'\n#define {name} {int(word, 16) * 4}\n'
+body += '\n#define MESON_CPU_ID_S5 8\n' + function(video_source, 'enable_crt_video_hdmi')
 body += '\nint main(void) { struct meson_t7_modeset hw={.pll=pll,.vid2=video,.vid_div=&divider};\n'
+body += '''struct chip_data chip={.chip_type=7};device.tx_hw.chip_data=&chip;
+enable_crt_video_hdmi(1,0,2);meson_t7_video_clock(&hw);
+assert(shared[0xdc/4]==vendor_regs[CLKCTRL_ENC_HDMI_CLK_CTRL]);
+assert((video[1] & (BIT(10)|BIT(9)|BIT(5)))==vendor_regs[CLKCTRL_VID_CLK2_CTRL2]);
+puts("ENC2 pixel/FE/PNX mux matches executable vendor enable_crt_video_hdmi(1,0,2)");
+'''
 for name, vic, pixel, h, hs, he, ht, v, vs, ve, vt in modes:
     body += f'''
     {{struct drm_display_mode mode={{{pixel},{h},{hs},{he},{ht},{v},{vs},{ve},{vt},0}};
@@ -186,7 +200,9 @@ print(result, end='')
 if args.output:
     args.output.write_text(json.dumps(dict(vendor_commit=subprocess.check_output(
         ['git', '-C', str(args.vendor), 'rev-parse', 'HEAD'], text=True).strip(),
-        parameters=[line.split() for line in result.splitlines()]), indent=2) + '\n')
+        parameters=[dict(zip(('mode', 'vco_khz', 'od1', 'od2', 'frac', 'max_pixel', 'max_line'),
+                             line.split())) for line in result.splitlines()
+                    if line.split()[0] in {mode[0] for mode in modes}]), indent=2) + '\n')
 print('Executable vendor PLL/VENC comparison and PLL timeout tests passed')
 
 # Execute the bridge's PHY/config/atomic-enable functions, including SCDC failure.
