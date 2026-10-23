@@ -411,6 +411,22 @@ static int meson_hdmitx21_i2c_xfer(struct i2c_adapter *adap,
 	u8 segment = 0, offset = 0;
 	int i, ret = 0;
 
+	/* Validate the complete EDID transaction before issuing a DDC command. */
+	if (num != 2 && num != 3)
+		return -EOPNOTSUPP;
+	for (i = 0; i < num; i++)
+		if (!msgs[i].len || !msgs[i].buf ||
+		    msgs[i].flags & ~(I2C_M_RD | I2C_M_DMA_SAFE))
+			return -EOPNOTSUPP;
+	if (num == 3 && (msgs[0].addr != DDC_SEGMENT_ADDR ||
+			msgs[0].flags & I2C_M_RD || msgs[0].len != 1))
+		return -EOPNOTSUPP;
+	if (msgs[num - 2].addr != DDC_EDID_ADDR ||
+	    msgs[num - 2].flags & I2C_M_RD || msgs[num - 2].len != 1 ||
+	    msgs[num - 1].addr != DDC_EDID_ADDR || !(msgs[num - 1].flags & I2C_M_RD) ||
+	    msgs[num - 1].len > 256 - msgs[num - 2].buf[0])
+		return -EOPNOTSUPP;
+
 	mutex_lock(&tx->ddc_lock);
 	for (i = 0; i < num; i++) {
 		struct i2c_msg *msg = &msgs[i];

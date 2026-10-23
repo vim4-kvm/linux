@@ -129,3 +129,92 @@ int main(void)
 }
 '''
 run_test('hpd', hpd)
+
+ddc = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <string.h>
+typedef uint8_t u8;
+typedef uint32_t u32;
+#define BIT(n) (1U << (n))
+#define I2C_M_RD 1
+#define I2C_M_DMA_SAFE 0x200
+struct meson_hdmitx21 { int ddc_lock; };
+struct i2c_adapter { struct meson_hdmitx21 *tx; };
+struct i2c_msg { unsigned short addr, flags, len; u8 *buf; };
+#define i2c_get_adapdata(adap) ((adap)->tx)
+static int locks, commands, sleeps, remaining, position, failure;
+static u8 registers[0x1000];
+static void mutex_lock(int *p) { assert(!locks); locks++; }
+static void mutex_unlock(int *p) { assert(locks == 1); locks--; }
+static void usleep_range(int lo, int hi) { assert(++sleeps < 300); }
+'''
+ddc += '\n'.join(line for line in source.splitlines() if line.startswith('#define ')) + '\n'
+ddc += r'''
+static u8 cor_read(struct meson_hdmitx21 *tx, u32 reg)
+{
+    if (reg == DDC_STATUS) return failure == 1 ? DDC_STATUS_NACK :
+                                 failure == 2 ? DDC_STATUS_BUSY : 0;
+    if (reg == DDC_DOUT_CNT) return failure == 1 || failure == 3 ? 0 :
+                                   failure == 4 ? 17 : remaining > 16 ? 16 : remaining;
+    if (reg == DDC_DATA) {
+        assert(remaining > 0); remaining--;
+        return registers[DDC_SEGM] ^ position++;
+    }
+    return registers[reg];
+}
+static void cor_write(struct meson_hdmitx21 *tx, u32 reg, u8 val)
+{
+    registers[reg] = val;
+    if (reg != DDC_CMD) return;
+    commands++;
+    if (val == DDC_CMD_SEQ_READ || val == DDC_CMD_ENH_READ) {
+        remaining = registers[DDC_DIN_CNT1] + 256 * registers[DDC_DIN_CNT2];
+        position = registers[DDC_OFFSET];
+    }
+}
+static void cor_update(struct meson_hdmitx21 *tx, u32 reg, u8 mask, u8 val)
+{ cor_write(tx, reg, (cor_read(tx, reg) & ~mask) | (val & mask)); }
+'''
+ddc += functions('static void meson_hdmitx21_ddc_cmd', '/* One-byte DDC write')
+ddc += functions('static int meson_hdmitx21_i2c_xfer', 'static u32 meson_hdmitx21_i2c_func')
+ddc += r'''
+int main(void)
+{
+    struct meson_hdmitx21 tx = {0};
+    struct i2c_adapter adapter = {&tx};
+    u8 segment = 0, offset = 0, data[128];
+    struct i2c_msg msgs[] = {{0x30,0,1,&segment}, {0x50,0,1,&offset},
+                             {0x50,I2C_M_RD,128,data}};
+    for (int block = 0; block < 8; block++) {
+        segment = block / 2; offset = (block % 2) * 128;
+        sleeps = 0;
+        assert(meson_hdmitx21_i2c_xfer(&adapter, msgs + !segment, 3 - !segment)
+               == 3 - !segment);
+        for (int i = 0; i < 128; i++) assert(data[i] == (u8)(segment ^ (offset + i)));
+        assert(!locks && !(registers[TPI_DDC_MASTER_EN] & TPI_DDC_HW_EN));
+    }
+    offset = 0; segment = 0;
+    for (failure = 1; failure <= 4; failure++) {
+        int expected[] = {0, -ENXIO, -EBUSY, -ETIMEDOUT, -EIO};
+        sleeps = 0;
+        assert(meson_hdmitx21_i2c_xfer(&adapter, msgs + 1, 2) == expected[failure]);
+        assert(!locks && !(registers[TPI_DDC_MASTER_EN] & TPI_DDC_HW_EN));
+    }
+    failure = 0;
+    int before = commands;
+    assert(meson_hdmitx21_i2c_xfer(&adapter, msgs, 1) == -EOPNOTSUPP);
+    msgs[2].flags |= 0x10;
+    assert(meson_hdmitx21_i2c_xfer(&adapter, msgs, 3) == -EOPNOTSUPP);
+    msgs[2].flags = I2C_M_RD; offset = 200;
+    assert(meson_hdmitx21_i2c_xfer(&adapter, msgs, 3) == -EOPNOTSUPP);
+    offset = 0; msgs[2].len = 0;
+    assert(meson_hdmitx21_i2c_xfer(&adapter, msgs, 3) == -EOPNOTSUPP);
+    assert(commands == before);
+    puts("DDC: 8 EDID blocks, NACK, busy, empty FIFO timeout, FIFO overrun and malformed transfers passed");
+}
+'''
+run_test('ddc', ddc)
