@@ -30,6 +30,7 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int32_t s32;
 #define BIT(n) (1U << (n))
+#define GENMASK(h,l) ((UINT32_MAX << (l)) & (UINT32_MAX >> (31-(h))))
 #define div_u64(a,b) ((u64)(a)/(b))
 #define ZOOM_BITS 18
 #define PHASE_BITS 8

@@ -60,6 +60,7 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 #define U32_MAX UINT32_MAX
 #define BIT(n) (1U << (n))
+#define GENMASK(h,l) ((UINT32_MAX << (l)) & (UINT32_MAX >> (31-(h))))
 #define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))
 #define div_u64(a,b) ((u64)(a)/(b))
 #define DRM_FORMAT_NV12 1
@@ -73,6 +74,7 @@ typedef uint64_t u64;
 #define VFRAME_FLAG_VIDEO_LINEAR 0x400
 #define H_MIRROR 1
 #define V_MIRROR 2
+#define MODE_3D_ENABLE 1
 '''
 body += definitions + '\n' + linear_struct + '\n' + mif_struct + '\n' + position + '\n'
 body += without_includes((directory / 'meson_t7_video.h').read_text())
@@ -87,7 +89,12 @@ static void bits(u32 reg, u32 value, unsigned int start, unsigned int width)
 }
 struct canvas_config_s {u64 phy_addr; u32 width;};
 struct vframe_s {u32 type, flag;};
-struct video_layer_s {struct hw_vd_linear_reg_s vd_mif_linear_reg; u8 vpp_index;};
+struct video_layer_s {
+    struct hw_vd_linear_reg_s vd_mif_linear_reg;
+    struct hw_vd_reg_s vd_mif_reg;
+    u8 vpp_index;
+};
+static u32 process_3d_type;
 struct vpp_frame_par_s {u32 hscale_skip_count;};
 static struct {
     u32 display_module;
@@ -101,9 +108,11 @@ static bool cpu_after_eq(int cpu) {return cpu == MESON_CPU_MAJOR_ID_G12A;}
 static bool is_crop_left_odd(struct vpp_frame_par_s *p) {(void)p; return false;}
 static void set_vd_mif_linear_s5(struct video_layer_s *l, struct canvas_config_s *c,
                                u32 n, struct vframe_s *v, u32 s) {assert(0);}
+static void vd_set_blk_mode_s5(struct video_layer_s *l, u8 mode) {assert(0);}
 '''
 body += function(common, 'viu_line_stride') + '\n'
 body += function(hw, 'set_vd_mif_linear') + '\n'
+body += function(hw, 'vd_set_blk_mode') + '\n'
 scope = function(hw, 'vd_mif_setting')
 scope = scope[scope.index('/* vd horizontal setting */'):scope.index('if (setting->skip_afbc')]
 body += 'static void vendor_scope(struct mif_pos_s *setting) {\n'
@@ -156,6 +165,19 @@ static void compare(unsigned int index, u32 width, u32 height, u32 pitch, bool n
     assert(m.stride0==regs[base+0x23]);
     assert(m.stride1==(regs[base+0x24]&0xffff));
     assert((regs[base+0x24]&0xffff0000)==0xa5a50000);
+    /* Linear mode clears GEN_REG3 fields; progressive STRIDE_1 keeps upper bits. */
+    l.vd_mif_reg.vd_if0_gen_reg3=base+0x1c;
+    for (u32 seed=0;seed<32;seed++) {
+        u32 original=seed*0x08421085U;
+        regs[base+0x1c]=regs[base+0x24]=original;
+        vd_set_blk_mode(&l,0);
+        bits(base+0x1c,0,8,2);
+        bits(base+0x1c,pitch%64?1:2,1,2);
+        bits(base+0x1c,0,0,1);
+        bits(base+0x24,m.stride1,0,16);
+        assert(regs[base+0x1c]==((original&~m.gen3_mask)|m.gen3));
+        assert(regs[base+0x24]==((original&~m.stride1_mask)|m.stride1));
+    }
     struct hw_vd_reg_s scope_regs={.vd_if0_luma_x0=base+3,.vd_if0_luma_y0=base+4,
         .vd_if0_chroma_x0=base+5,.vd_if0_chroma_y0=base+6,.viu_vd_fmt_w=base+0x1e};
     struct mif_pos_s pos={.p_vd_mif_reg=&scope_regs,

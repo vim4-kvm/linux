@@ -67,6 +67,7 @@ int meson_t7_video_mif_prepare(const struct meson_t7_video_frame *frame,
 	next.stride0 = (frame->pitch[0] >> 4) | (frame->pitch[1] >> 4) << 16;
 	/* set_vd_mif_linear() writes only 16 bits, despite its bit16 expression. */
 	next.stride1 = frame->pitch[1] >> 4;
+	next.stride1_mask = GENMASK(15, 0);
 	next.luma_x = frame->x | right << 16;
 	next.luma_y = frame->y | bottom << 16;
 	next.chroma_x = (frame->x >> 1) | (right >> 1) << 16;
@@ -80,8 +81,10 @@ int meson_t7_video_mif_prepare(const struct meson_t7_video_frame *frame,
 	if (!index)
 		next.gen |= BIT(29);
 	next.gen2 = frame->format == DRM_FORMAT_NV12 ? 2 : 1;
+	next.gen2_mask = GENMASK(5, 0);
 	/* 8-bit, no block tiling or canvas; burst follows the luma pitch. */
 	next.gen3 = (frame->pitch[0] & 63) ? 1 << 1 : 2 << 1;
+	next.gen3_mask = GENMASK(2, 0) | GENMASK(9, 8) | GENMASK(15, 12) | GENMASK(26, 18);
 	*mif = next;
 	return 0;
 }

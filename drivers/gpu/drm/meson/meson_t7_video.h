@@ -18,6 +18,7 @@ struct meson_t7_video_mif {
 	u32 luma_x, luma_y, chroma_x, chroma_y;
 	u32 format_width, format_ctrl;
 	u32 gen, gen2, gen3;
+	u32 gen2_mask, gen3_mask, stride1_mask;
 };
 
 struct meson_t7_video_phase {
@@ -33,7 +34,8 @@ int meson_t7_video_phase_prepare(u32 width, u32 height, u32 output_width,
  * Calculate the linear NV12/NV21 MIF image without enabling or touching DMA.
  * gen has fetch disabled. The caller must own and drain the complete video
  * pipeline before applying it; these parameters alone are not a video plane.
- * stride1 describes bits 15:0 only; preserve its unrelated upper bits.
+ * Apply gen2, gen3 and stride1 through their masks, preserving unrelated bits.
+ * The stereo STRIDE_1_F1 block-mode mirror is outside this progressive profile.
  */
 int meson_t7_video_mif_prepare(const struct meson_t7_video_frame *frame,
 			       unsigned int index, struct meson_t7_video_mif *mif);
