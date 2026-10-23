@@ -134,6 +134,7 @@ struct drm_atomic_commit {
 #define drm_err(...) ((void)0)
 static bool inject_timeout;
 static bool rdma_first;
+static unsigned int timeout_part;
 static u32 osd[32], venc[66];
 static u32 rdma[64], table[8];
 static unsigned int writes, vblanks;
@@ -189,16 +190,20 @@ static void drm_framebuffer_put(struct drm_framebuffer *fb)
     assert(!(condition)); \
     if (display->rdma) { \
         assert(!meson_t7_handoff_rdma_irq(0, display)); \
-        if (!inject_timeout) { \
+        if (!inject_timeout || timeout_part == 2) { \
             for (unsigned int i = 0; i < 8; i += 2) \
                 writel(table[i + 1], osd + table[i] - VIU_OSD1_CTRL_STAT); \
             rdma[0x15] = RDMA_IRQ_STAT_CHAN1; \
-            if (rdma_first) meson_t7_handoff_rdma_irq(0, display); \
-            else meson_t7_handoff_irq(0, display); \
-            assert(!(condition)); \
-            if (rdma_first) meson_t7_handoff_irq(0, display); \
-            else meson_t7_handoff_rdma_irq(0, display); \
+            if (inject_timeout) meson_t7_handoff_rdma_irq(0, display); \
+            else { \
+                if (rdma_first) meson_t7_handoff_rdma_irq(0, display); \
+                else meson_t7_handoff_irq(0, display); \
+                assert(!(condition)); \
+                if (rdma_first) meson_t7_handoff_irq(0, display); \
+                else meson_t7_handoff_rdma_irq(0, display); \
+            } \
         } \
+        if (inject_timeout && timeout_part == 1) meson_t7_handoff_irq(0, display); \
     } else { \
         meson_t7_handoff_irq(0, display); \
         assert(!(condition)); \
@@ -290,6 +295,7 @@ int main(void)
     unsigned int start_vblank = vblanks;
     for (unsigned int i = 0; i < 60; i++) {
         rdma_first = i & 1;
+        if (i == 30) display.requested = display.written = display.applied = UINT32_MAX;
         struct drm_framebuffer *next = i & 1 ? &gpu : &first;
         if (next == &first) first.format = &xrgb;
         meson_t7_handoff_scanout(&display, next, 0x22000000);
@@ -300,10 +306,20 @@ int main(void)
     meson_t7_handoff_scanout(&display, NULL, HANDOFF_BOOT_ADDR);
     assert(first.references == 2); /* The earlier M1 fault intentionally pins one. */
     assert(gpu.references == 1);
-    inject_timeout = true;
-    meson_t7_handoff_scanout(&display, &gpu, 0x22000000);
-    assert(display.faulted && gpu.references == 2);
-    puts("RDMA: 60 flips/60 vsyncs, both IRQ orders, stale IRQ, detach and timeout passed");
+    for (timeout_part = 1; timeout_part <= 2; timeout_part++) {
+        struct meson_t7_handoff failed = {.osd=osd, .rdma=rdma, .rdma_table=table};
+        struct drm_framebuffer old = {.references=2}, next = {.references=1};
+        failed.scanout = &old;
+        inject_timeout = true;
+        meson_t7_handoff_scanout(&failed, &next, 0x22000000);
+        assert(failed.faulted && old.references == 2 && next.references == 2);
+        /* A late missing interrupt cannot release a failed transaction's buffers. */
+        rdma[0x15] = RDMA_IRQ_STAT_CHAN1;
+        meson_t7_handoff_rdma_irq(0, &failed);
+        meson_t7_handoff_irq(0, &failed);
+        assert(old.references == 2 && next.references == 2);
+    }
+    puts("RDMA: 60 flips/60 vsyncs, IRQ orders/wrap, detach, missing DMA/vsync pinning passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
