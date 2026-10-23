@@ -64,7 +64,7 @@ if args.dtb:
 
 source = Path(__file__).with_name('meson_t7_handoff.c').read_text()
 # The handoff must not configure legacy VENC interrupts or the global VIU mux.
-assert len(re.findall(r'\bwritel\(', source)) == 1
+assert len(re.findall(r'\bwritel\(', source)) == 4
 assert 'display->osd + OSD_REG(VIU_OSD1_BLK1_CFG_W4)' in source
 register_source = Path(__file__).with_name('meson_registers.h').read_text()
 registers = '\n'.join(line for line in register_source.splitlines()
@@ -94,7 +94,7 @@ struct drm_crtc_state { bool active; void *event; };
 struct drm_plane { struct drm_device *dev; struct drm_plane_state *state; };
 struct drm_crtc { struct drm_device *dev; struct drm_crtc_state *state; };
 struct drm_encoder { int unused; };
-struct drm_format_info { unsigned int format; };
+struct drm_format_info { unsigned int format; unsigned int cpp[1]; };
 struct drm_framebuffer {
     unsigned int references;
     const struct drm_format_info *format;
@@ -113,6 +113,8 @@ struct drm_atomic_commit {
     struct drm_crtc_state *old_crtc, *new_crtc;
 };
 #define DRM_FORMAT_RGB888 1
+#define DRM_FORMAT_XRGB8888 2
+#define DRM_FORMAT_XBGR8888 3
 #define DRM_FORMAT_MOD_LINEAR 0
 #define DRM_PLANE_NO_SCALING 1
 #define U32_MAX UINT32_MAX
@@ -159,7 +161,8 @@ static u32 readl(void *address) { return *(u32 *)address; }
 static void writel(u32 value, void *address)
 {
     /* This function must never write a VDIN, VPP or arbitration register. */
-    assert(address == &osd[4]);
+    assert(address == &osd[4] || address == &osd[5] ||
+           address == &osd[11] || address == &osd[29]);
     *(u32 *)address = value;
     writes++;
 }
@@ -223,6 +226,40 @@ int main(void)
     meson_t7_handoff_irq(0, &display);
     assert(first.references == 2 && second.references == 2);
     puts("OSD two-vsync retirement, active-CRTC RMFB, wrap and timeout pinning passed");
+
+    /* M2 imports can carry a padded 32-bit pitch, but never a non-linear modifier. */
+    const struct drm_format_info xrgb = {DRM_FORMAT_XRGB8888, {4}};
+    const struct drm_format_info xbgr = {DRM_FORMAT_XBGR8888, {4}};
+    struct drm_framebuffer gpu = {.references=1, .format=&xrgb,
+        .width=1920, .height=1080, .pitches={8192}};
+    struct drm_plane_state visible = {.fb=&gpu, .crtc=&display.crtc,
+        .src_w=1920 << 16, .src_h=1080 << 16, .crtc_w=1920, .crtc_h=1080};
+    rmfb.plane = &visible;
+    display.faulted = false;
+    assert(meson_t7_handoff_plane_check(&display.plane, &rmfb) == -EINVAL);
+    display.linear_formats = true;
+    assert(!meson_t7_handoff_plane_check(&display.plane, &rmfb));
+    gpu.modifier = 1;
+    assert(meson_t7_handoff_plane_check(&display.plane, &rmfb) == -EINVAL);
+    gpu.modifier = 0; gpu.pitches[0] = 7681;
+    assert(meson_t7_handoff_plane_check(&display.plane, &rmfb) == -EINVAL);
+    gpu.pitches[0] = 7648;
+    assert(meson_t7_handoff_plane_check(&display.plane, &rmfb) == -EINVAL);
+    gpu.pitches[0] = 8192;
+    display.scanout = NULL; display.stalled = NULL;
+    display.boot_format = 0x8700; display.boot_stride = 360; display.boot_ctrl2 = 0x12;
+    inject_timeout = false;
+    unsigned int before = writes;
+    meson_t7_handoff_scanout(&display, &gpu, 0x22000000);
+    assert(writes == before + 4 && osd[11] == 0x8504 && osd[5] == 512);
+    assert(osd[29] == (0x12 | (1 << 14)) && gpu.references == 2);
+    gpu.format = &xbgr;
+    meson_t7_handoff_scanout(&display, &gpu, 0x23000000);
+    assert(osd[11] == 0x8508 && gpu.references == 2);
+    meson_t7_handoff_scanout(&display, NULL, HANDOFF_BOOT_ADDR);
+    assert(osd[11] == 0x8700 && osd[5] == 360 && osd[29] == 0x12);
+    assert(gpu.references == 1);
+    puts("Linear OSD: RGB32 layout, padding/modifier rejection, vsync programming and boot restore passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
