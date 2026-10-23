@@ -884,7 +884,7 @@ static int meson_sar_adc_init(struct iio_dev *indio_dev)
 
 	/* delay between two samples = (10+1) * 1uS */
 	regmap_update_bits(priv->regmap, MESON_SAR_ADC_DELAY,
-			   MESON_SAR_ADC_DELAY_INPUT_DLY_CNT_MASK,
+			   MESON_SAR_ADC_DELAY_SAMPLE_DLY_CNT_MASK,
 			   FIELD_PREP(MESON_SAR_ADC_DELAY_SAMPLE_DLY_CNT_MASK,
 				      10));
 	regmap_update_bits(priv->regmap, MESON_SAR_ADC_DELAY,
