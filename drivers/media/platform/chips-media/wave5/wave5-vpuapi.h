@@ -485,6 +485,7 @@ struct custom_gop_pic_param {
 #define ENC_CHANGE_PICTURE		BIT(31)
 
 struct enc_wave_param {
+	bool use_long_term;
 	/*
 	 * profile indicator (HEVC only)
 	 *
@@ -638,6 +639,8 @@ struct enc_param {
 	u64 pts; /* presentation timestamp (PTS) of the input source */
 	bool src_end_flag;
 	bool force_keyframe;
+	bool mark_long_term;
+	bool use_long_term;
 	bool force_qp;
 	u32 qp_i;
 	u32 qp_p;
@@ -885,6 +888,8 @@ struct vpu_instance {
 	unsigned int vbv_buf_size;
 	unsigned int h264_cpb_size;
 	unsigned int b_frames;
+	unsigned int ltr_count;
+	atomic_t ltr_pending;
 	unsigned int quality;
 	unsigned int intra_refresh_period;
 	unsigned int rc_mode;

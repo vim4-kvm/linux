@@ -90,6 +90,7 @@ def function(name):
 
 
 scheduler = r'''
+#define BIT(n) (1U<<(n))
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -154,7 +155,7 @@ struct enc_param {
     unsigned src_idx;
     struct frame_buffer *source_frame;
     struct { unsigned implicit_header_encode, encode_aud; } code_option;
-    bool src_end_flag, force_keyframe, force_qp;
+    bool src_end_flag, force_keyframe, force_qp, mark_long_term, use_long_term;
     unsigned qp_i, qp_p, qp_b;
 };
 struct enc_output_info {
@@ -174,7 +175,7 @@ struct vpu_instance {
         struct { unsigned bytesperline, sizeimage; } plane_fmt[3]; } src_fmt;
     struct vpu_device *dev; struct codec_info *codec_info;
     void *v4l2_m2m_dev;
-    unsigned encode_aud, force_keyframe, state, std, recovery_error, fbc_buf_count;
+    unsigned encode_aud, force_keyframe, state, std, recovery_error, fbc_buf_count, ltr_pending;
     uint64_t timestamp;
 };
 struct vb2_queue { struct vpu_instance *inst; unsigned type; };
@@ -214,11 +215,14 @@ static unsigned v4l2_m2m_num_src_bufs_ready(struct v4l2_m2m_ctx *ctx) { return c
 static void *v4l2_m2m_get_curr_priv(void *ctx) { return NULL; }
 static unsigned atomic_xchg(unsigned *value,unsigned next) { unsigned old=*value; *value=next; return old; }
 static void atomic_set(unsigned *value,unsigned next) { *value=next; }
+static void atomic_or(unsigned mask,unsigned *value) { *value|=mask; }
 static int switch_state(struct vpu_instance *inst,unsigned state) { inst->state=state; return 0; }
 static const char *state_to_str(unsigned state) { return "ready"; }
 static int wave5_vpu_enc_start_one_frame(struct vpu_instance *inst,struct enc_param *param,u32 *fail)
 {
     assert(param->force_qp && param->qp_i==23 && param->qp_p==26 && param->qp_b==29);
+    if(submissions==0) assert(param->mark_long_term && param->use_long_term);
+    if(param->src_end_flag) assert(!param->mark_long_term && !param->use_long_term);
     if(fail_command) { *fail=0; return -EIO; }
     submitted[submissions++]=param->src_end_flag?99:param->src_idx;
     return 0;
@@ -248,7 +252,7 @@ int main(void)
     struct v4l2_m2m_ctx ctx={.count=3,.dst=&dst[0]};
     struct vpu_instance inst={.v4l2_fh.m2m_ctx=&ctx,.dev=&dev,.codec_info=&codec,
         .src_fmt={.height=1088,.num_planes=1,.plane_fmt={{1920,0}}},
-        .std=W_HEVC_ENC,.state=VPU_INST_STATE_PIC_RUN};
+        .std=W_HEVC_ENC,.state=VPU_INST_STATE_PIC_RUN,.ltr_pending=3};
     u32 fail=0;
     for(unsigned i=0;i<3;i++) {
         src[i].m2m_buf.vb.vb2_buf.index=i;
@@ -258,7 +262,7 @@ int main(void)
     for(unsigned i=0;i<3;i++) {
         assert(wave5_vpu_enc_job_ready(&inst));
         assert(!start_encode(&inst,&fail));
-        assert(submitted[i]==i && src[i].consumed);
+        assert(submitted[i]==i && src[i].consumed && !inst.ltr_pending);
         report=(struct enc_output_info){.recon_frame_index=-2,.enc_src_idx=-1};
         wave5_vpu_enc_finish_encode(&inst);
         assert(ctx.dst==&dst[0] && !dst[0].done && ctx.count==3);
@@ -275,9 +279,9 @@ int main(void)
         assert(dst[i].vb2_buf.timestamp==100+order[i] && dst[i].payload==1234);
     }
     assert(ctx.count==0 && (dst[2].flags&V4L2_BUF_FLAG_BFRAME));
-    ctx.dst=&dst[3]; ctx.is_draining=true;
+    ctx.dst=&dst[3]; ctx.is_draining=true; inst.ltr_pending=3;
     assert(wave5_vpu_enc_job_ready(&inst) && !start_encode(&inst,&fail));
-    assert(submitted[3]==99);
+    assert(submitted[3]==99 && inst.ltr_pending==3);
     report=(struct enc_output_info){.enc_src_idx=-1,.recon_frame_index=-1};
     wave5_vpu_enc_finish_encode(&inst);
     assert(dst[3].done && !ctx.is_draining && !dst[3].payload);
@@ -290,7 +294,7 @@ int main(void)
     src[0].m2m_buf.vb.done=src[1].m2m_buf.vb.done=dst[0].done=0;
     other=(struct v4l2_m2m_ctx){.count=2,.src={&src[0].m2m_buf,&src[1].m2m_buf},.dst=&dst[0]};
     fail_command=1;
-    assert(start_encode(&inst,&fail)==-EIO && inst.force_keyframe);
+    assert(start_encode(&inst,&fail)==-EIO && inst.force_keyframe && inst.ltr_pending==3);
     assert(other.count==1 && other.src[0]==&src[0].m2m_buf);
     assert(!src[0].m2m_buf.vb.done && src[1].m2m_buf.vb.done==VB2_BUF_STATE_ERROR);
     assert(!src[1].consumed && dst[0].done==VB2_BUF_STATE_ERROR);

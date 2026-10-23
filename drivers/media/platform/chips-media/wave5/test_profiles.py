@@ -75,6 +75,39 @@ with tempfile.TemporaryDirectory(prefix='wave5-profile-') as directory:
                     str(source), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 
+# LTR is one slot on Wave521: the two picture bits are independent requests.
+ltr_write = hardware[hardware.index('\tvpu_write_reg(inst->dev, W5_CMD_ENC_PIC_LONGTERM_PIC,'):]
+ltr_write = ltr_write[:ltr_write.index(';') + 1]
+ltr_test = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#define W5_CMD_ENC_PIC_LONGTERM_PIC 0
+struct vpu_instance { int dev; };
+struct enc_param { bool mark_long_term, use_long_term; };
+static unsigned command;
+static void vpu_write_reg(int dev,int reg,unsigned value)
+{ (void)dev; (void)reg; command=value; }
+'''
+with tempfile.TemporaryDirectory(prefix='wave5-ltr-') as directory:
+    code = Path(directory) / 'ltr.c'
+    binary = Path(directory) / 'ltr'
+    code.write_text(ltr_test + 'static void pack(struct vpu_instance *inst, '
+                    'struct enc_param *option) {\n' + ltr_write + '\n}\n' + r'''
+int main(void) {
+    struct vpu_instance inst={0};
+    for(unsigned mask=0;mask<4;mask++) {
+        struct enc_param option={.mark_long_term=mask&1,.use_long_term=mask&2};
+        pack(&inst,&option); assert(command==mask);
+    }
+    puts("Wave5 independent LTR mark/use picture bits passed");
+}
+''')
+    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    str(code), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Execute SET_PARAM packing and completion ownership with scripted firmware."""
@@ -282,7 +315,7 @@ struct vpu_instance {
     struct enc_wave_param enc_param, hevc_param;
     unsigned state, encode_aud, mirror_direction, rot_angle, vbv_buf_size;
     unsigned rc_mode, bit_rate, intra_refresh_period, rc_enable, force_keyframe;
-    unsigned h264_cpb_size, std, b_frames, quality, enc_change_mask;
+    unsigned h264_cpb_size, std, b_frames, quality, enc_change_mask, ltr_count, ltr_pending;
     struct v4l2_ctrl_handler v4l2_ctrl_hdl;
     struct v4l2_ctrl *avc_qp_limits[8], *hevc_qp_limits[8];
     struct vpu_device *dev;
@@ -290,6 +323,8 @@ struct vpu_instance {
 struct enc_open_param { unsigned vbv_buffer_size; };
 static struct vpu_instance *wave5_ctrl_to_vpu_inst(struct v4l2_ctrl *c) { return c->owner; }
 static void atomic_set(unsigned *value, int setting) { *value=setting; }
+static void atomic_or(unsigned mask,unsigned *value) { *value|=mask; }
+static void atomic_andnot(unsigned mask,unsigned *value) { *value&=~mask; }
 static int wave5_vpu_enc_ctrl_ops;
 static void v4l2_ctrl_handler_init(struct v4l2_ctrl_handler *hdl,unsigned count)
 { assert(count<=96 && !hdl->count); }
@@ -297,6 +332,8 @@ static struct v4l2_ctrl *v4l2_ctrl_new_std(struct v4l2_ctrl_handler *hdl,void *o
         unsigned id,int minimum,int maximum,int step,int value)
 {
     (void)ops;
+    if(id==V4L2_CID_MPEG_VIDEO_USE_LTR_FRAMES) assert(step==0);
+    else if(id!=V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME) assert(step>0);
     assert(hdl->count<96 && minimum<=value && value<=maximum);
     struct v4l2_ctrl *ctrl=&hdl->controls[hdl->count++];
     *ctrl=(struct v4l2_ctrl){.id=id,.val=value,.owner=hdl->owner,
@@ -439,6 +476,17 @@ int main(void)
     assert(set(&a,V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,0)==-EBUSY);
     assert(set(&a,V4L2_CID_MPEG_VIDEO_H264_PROFILE,V4L2_MPEG_VIDEO_H264_PROFILE_MAIN)==-EBUSY);
     assert(!b.enc_change_mask && b.bit_rate==2000000);
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_LTR_COUNT,1)==-EBUSY);
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_FRAME_LTR_INDEX,0)==-EINVAL);
+    a.ltr_count=1;
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_FRAME_LTR_INDEX,0));
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_USE_LTR_FRAMES,1));
+    assert(a.ltr_pending==3 && !b.ltr_pending);
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_USE_LTR_FRAMES,0));
+    assert(a.ltr_pending==1);
+    a.ltr_pending=0;
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_FRAME_LTR_INDEX,0));
+    assert(a.ltr_pending==1);
     puts("Wave5 codec control isolation, busy setters, flip reversal and two instances passed");
 }
 '''

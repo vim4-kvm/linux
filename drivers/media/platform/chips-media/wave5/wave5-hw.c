@@ -1875,7 +1875,8 @@ int wave5_vpu_enc_init_seq(struct vpu_instance *inst)
 		p_open_param->rc_enable);
 	reg_val = wave5_enc_sps_profile(inst, p_param->profile) |
 		(p_param->level << 3) |
-		(p_param->internal_bit_depth << 14);
+		(p_param->internal_bit_depth << 14) |
+		(p_param->use_long_term << 21);
 	if (inst->std == W_HEVC_ENC)
 		reg_val |= (p_param->tier << 12) |
 			(p_param->tmvp_enable << 23) |
@@ -2498,7 +2499,8 @@ int wave5_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *f
 
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_CUSTOM_MAP_OPTION_ADDR, 0);
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_CUSTOM_MAP_OPTION_PARAM, 0);
-	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_LONGTERM_PIC, 0);
+	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_LONGTERM_PIC,
+		      option->mark_long_term | (option->use_long_term << 1));
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_WP_PIXEL_SIGMA_Y, 0);
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_WP_PIXEL_SIGMA_C, 0);
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_WP_PIXEL_MEAN_Y, 0);

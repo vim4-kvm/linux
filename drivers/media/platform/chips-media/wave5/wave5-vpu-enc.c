@@ -189,6 +189,7 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 	u32 stride = inst->src_fmt.plane_fmt[0].bytesperline;
 	u32 luma_size = 0;
 	u32 chroma_size = 0;
+	u32 ltr = 0;
 
 	ret = wave5_apply_enc_changes(inst);
 	if (ret)
@@ -262,8 +263,12 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 		pic_param.qp_p = param->fixed_qp_p;
 		pic_param.qp_b = param->fixed_qp_b;
 	}
-	if (src_buf)
+	if (src_buf) {
 		pic_param.force_keyframe = atomic_xchg(&inst->force_keyframe, 0);
+		ltr = atomic_xchg(&inst->ltr_pending, 0);
+		pic_param.mark_long_term = ltr & BIT(0);
+		pic_param.use_long_term = ltr & BIT(1);
+	}
 	ret = wave5_vpu_enc_start_one_frame(inst, &pic_param, fail_res);
 	if (ret) {
 		if (wave5_vpu_isolated(inst->dev))
@@ -271,6 +276,7 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 		/* A command which was not accepted must not consume the request. */
 		if (pic_param.force_keyframe)
 			atomic_set(&inst->force_keyframe, 1);
+		atomic_or(ltr, &inst->ltr_pending);
 		if (*fail_res == WAVE5_SYSERR_QUEUEING_FAIL)
 			return -EINVAL;
 
@@ -914,6 +920,8 @@ static u32 wave5_enc_change_mask(u32 id)
 	case V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP:
 	case V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP:
 	case V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_QP:
+	case V4L2_CID_MPEG_VIDEO_FRAME_LTR_INDEX:
+	case V4L2_CID_MPEG_VIDEO_USE_LTR_FRAMES:
 		return ENC_CHANGE_PICTURE;
 	default:
 		return 0;
@@ -965,6 +973,23 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
 
 	switch (ctrl->id) {
+	case V4L2_CID_MPEG_VIDEO_LTR_COUNT:
+		inst->ltr_count = ctrl->val;
+		break;
+	case V4L2_CID_MPEG_VIDEO_FRAME_LTR_INDEX:
+	case V4L2_CID_MPEG_VIDEO_USE_LTR_FRAMES:
+		/* As in Venus, setup does not mark/use an as-yet nonexistent frame. */
+		if (inst->state != VPU_INST_STATE_PIC_RUN)
+			break;
+		if (!inst->ltr_count)
+			return -EINVAL;
+		if (ctrl->id == V4L2_CID_MPEG_VIDEO_FRAME_LTR_INDEX)
+			atomic_or(BIT(0), &inst->ltr_pending);
+		else if (ctrl->val)
+			atomic_or(BIT(1), &inst->ltr_pending);
+		else
+			atomic_andnot(BIT(1), &inst->ltr_pending);
+		break;
 	case V4L2_CID_MPEG_VIDEO_AU_DELIMITER:
 		inst->encode_aud = ctrl->val;
 		break;
@@ -1513,6 +1538,10 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	/* The fixed IBPBP preset has one reordered B picture between P pictures. */
 	open_param->wave_param.gop_preset_idx = inst->b_frames ?
 		PRESET_IDX_IBPBP : PRESET_IDX_IPP_SINGLE;
+	/* The Wave521 protocol exposes one LTR slot and no reordered-LTR contract. */
+	if (inst->ltr_count && inst->b_frames)
+		return -EINVAL;
+	open_param->wave_param.use_long_term = inst->ltr_count;
 	if (inst->b_frames &&
 	    ((inst->std == W_AVC_ENC && input.profile == H264_PROFILE_BP) ||
 	     (inst->std == W_HEVC_ENC && input.en_still_picture)))
@@ -1727,6 +1756,7 @@ static int wave5_vpu_enc_start_streaming(struct vb2_queue *q, unsigned int count
 		struct enc_open_param open_param;
 
 		inst->enc_change_mask = 0;
+		atomic_set(&inst->ltr_pending, 0);
 		memset(&open_param, 0, sizeof(struct enc_open_param));
 
 		ret = wave5_set_enc_openparam(&open_param, inst);
@@ -2241,6 +2271,12 @@ static int wave5_vpu_open_enc(struct file *filp)
 			  0, 2047, 1, 0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, 1, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_LTR_COUNT, 0, 1, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_FRAME_LTR_INDEX, 0, 0, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_USE_LTR_FRAMES, 0, 1, 0, 0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, 0, 4096, 1, 0);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
