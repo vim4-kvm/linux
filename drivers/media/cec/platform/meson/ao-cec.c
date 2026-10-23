@@ -747,10 +747,10 @@ static void meson_ao_cec_remove(struct platform_device *pdev)
 {
 	struct meson_ao_cec_device *ao_cec = platform_get_drvdata(pdev);
 
-	clk_disable_unprepare(ao_cec->core);
-
 	cec_notifier_cec_adap_unregister(ao_cec->notify, ao_cec->adap);
 	cec_unregister_adapter(ao_cec->adap);
+	/* Adapter teardown disables the controller and can still access registers. */
+	clk_disable_unprepare(ao_cec->core);
 }
 
 static const struct of_device_id meson_ao_cec_of_match[] = {

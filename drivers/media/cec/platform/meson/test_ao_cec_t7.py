@@ -49,7 +49,18 @@ static u32 regs[32], reference[32];
 struct meson_ao_cec_device {
     u32 *base, *cecb_route;
     u32 cecb_route_saved;
+    void *notify, *adap, *core;
 };
+struct platform_device {struct meson_ao_cec_device *driver_data;};
+static bool clock_live=true, notifier_live=true, adapter_live=true;
+static struct meson_ao_cec_device *platform_get_drvdata(struct platform_device *pdev)
+{return pdev->driver_data;}
+static void cec_notifier_cec_adap_unregister(void *notify, void *adap)
+{(void)notify; (void)adap; assert(adapter_live); notifier_live=false;}
+static void cec_unregister_adapter(void *adap)
+{(void)adap; assert(clock_live && !notifier_live); adapter_live=false;}
+static void clk_disable_unprepare(void *clk)
+{(void)clk; assert(!adapter_live); clock_live=false;}
 #define readl_relaxed(p) (*(u32 *)(p))
 #define writel_relaxed(v,p) (*(u32 *)(p) = (v))
 #define writel_bits_relaxed(mask,val,p) writel_relaxed((readl_relaxed(p) & ~(mask)) | (val), p)
@@ -67,6 +78,7 @@ static void cec_set_reg_bits(unsigned int word, u32 value, int start, int width)
 body = prefix + defines + '\n'
 body += function(source, 'meson_ao_cec_t7_setup') + '\n'
 body += function(source, 'meson_ao_cec_t7_restore_route') + '\n'
+body += function(source, 'meson_ao_cec_remove') + '\n'
 body += function(vendor, 'cec_ip_share_io') + '\n'
 body += 'static void vendor_init(void) {unsigned long data32;\n' + init + '}\n'
 body += r'''
@@ -94,6 +106,9 @@ int main(void)
                (before_restore & ~CEC_GEN_CNTL_SHARE_IO));
         assert((regs[16] & CEC_GEN_CNTL_SHARE_IO) == cec.cecb_route_saved);
     }
+    struct platform_device pdev = {.driver_data=&cec};
+    meson_ao_cec_remove(&pdev);
+    assert(!clock_live && !notifier_live && !adapter_live);
 }
 '''
 with tempfile.TemporaryDirectory() as work:
@@ -102,7 +117,7 @@ with tempfile.TemporaryDirectory() as work:
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     str(path / 'cec.c'), '-o', str(path / 'cec')], check=True)
     subprocess.run([str(path / 'cec')], check=True)
-print('T7 CECA: 256 vendor filter/routing combinations and masked restore passed')
+print('T7 CECA: 256 filter/routing combinations, masked restore and clocked teardown passed')
 if args.dtb:
     def prop(node, key, kind='x'):
         return subprocess.check_output(['fdtget', '-t', kind, str(args.dtb), node, key],
