@@ -88,6 +88,7 @@ patternProperties:
       - $ref: dwc2.yaml#
       - $ref: snps,dwc3.yaml#
       - $ref: generic-xhci.yaml#
+      - $ref: amlogic,t7-crg-udc.yaml#
 
 additionalProperties: false
 
