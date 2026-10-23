@@ -218,3 +218,66 @@ int main(void)
 }
 '''
 run_test('ddc', ddc)
+
+audio = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <errno.h>
+#include <stdio.h>
+#define HDMI_I2S 1
+struct drm_bridge { int unused; };
+struct drm_connector { int unused; };
+struct hdmi_codec_daifmt { int fmt; };
+struct hdmi_codec_params { int channels, sample_rate, sample_width; };
+struct meson_hdmitx21 {
+    struct drm_bridge bridge;
+    int audio_lock, pixel_khz;
+    bool sink_hdmi, audio_enabled, audio_muted;
+    struct hdmi_codec_params audio_params;
+};
+#define bridge_to_hdmitx(p) ((struct meson_hdmitx21 *)((char *)(p) - offsetof(struct meson_hdmitx21, bridge)))
+static int locked, configured, muted, stopped;
+static void mutex_lock(int *lock) { assert(!locked); locked++; }
+static void mutex_unlock(int *lock) { assert(locked == 1); locked--; }
+static void meson_hdmitx21_audio_config(struct meson_hdmitx21 *tx) { configured++; }
+static void meson_hdmitx21_audio_off(struct meson_hdmitx21 *tx) { stopped++; }
+static void meson_hdmitx21_audio_mute(struct meson_hdmitx21 *tx, bool mute) { muted++; }
+'''
+audio += functions('static int meson_hdmitx21_audio_prepare', '/* Bridge */')
+audio += r'''
+int main(void)
+{
+    struct meson_hdmitx21 tx = {0};
+    struct hdmi_codec_daifmt fmt = {HDMI_I2S};
+    struct hdmi_codec_params params = {2,48000,24};
+    assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -ENODEV);
+    tx.pixel_khz = 148500; /* DVI must not transmit audio packets */
+    assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -ENODEV);
+    tx.sink_hdmi = true;
+    int rates[] = {32000,44100,48000,88200,96000,176400,192000};
+    for (int i = 0; i < 7; i++) {
+        params.sample_rate = rates[i];
+        assert(!meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params));
+    }
+    assert(configured == 7 && tx.audio_enabled && !locked);
+    params.sample_rate = 12345;
+    assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -EINVAL);
+    params.sample_rate = 48000; params.sample_width = 32;
+    assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -EINVAL);
+    params.sample_width = 16; params.channels = 8;
+    assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -EINVAL);
+    params.channels = 2; fmt.fmt = 0;
+    assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -EINVAL);
+    assert(configured == 7);
+    meson_hdmitx21_audio_mute_stream(&tx.bridge, NULL, true, 0);
+    assert(tx.audio_muted && muted == 1);
+    tx.pixel_khz = 0;
+    meson_hdmitx21_audio_mute_stream(&tx.bridge, NULL, false, 0);
+    assert(!tx.audio_muted && muted == 1);
+    meson_hdmitx21_audio_shutdown(&tx.bridge, NULL);
+    assert(!tx.audio_enabled && stopped == 1 && !locked);
+    puts("HDMI codec: inactive/DVI refusal, PCM rate/width/channel bounds and mute/shutdown passed");
+}
+'''
+run_test('audio', audio)

@@ -179,6 +179,8 @@ struct meson_hdmitx21 {
 	/* Audio: kept to set up again after a mode change */
 	struct mutex audio_lock;	/* audio state */
 	bool audio_enabled;
+	bool audio_muted;
+	bool sink_hdmi;
 	struct hdmi_codec_params audio_params;
 	int pixel_khz;
 	struct gpio_desc *hpd;
@@ -654,7 +656,7 @@ static void meson_hdmitx21_audio_config(struct meson_hdmitx21 *tx)
 	ssize_t len;
 	int i;
 
-	if (!tx->pixel_khz)
+	if (!tx->pixel_khz || !tx->sink_hdmi)
 		return;
 
 	cor_update(tx, AIP_RST, BIT(0), BIT(0));
@@ -696,7 +698,7 @@ static void meson_hdmitx21_audio_config(struct meson_hdmitx21 *tx)
 		meson_hdmitx21_write_infoframe(tx, TPI_INFO_FSEL_AUDIO, buf, len);
 
 	cor_update(tx, AIP_RST, BIT(0), 0);
-	meson_hdmitx21_audio_mute(tx, false);
+	meson_hdmitx21_audio_mute(tx, tx->audio_muted);
 
 	dev_dbg(tx->dev, "audio %d Hz, %d bit, N %u, pixel %d kHz\n",
 		p->sample_rate, p->sample_width, n, tx->pixel_khz);
@@ -719,8 +721,27 @@ static int meson_hdmitx21_audio_prepare(struct drm_bridge *bridge,
 
 	if (fmt->fmt != HDMI_I2S || hparms->channels != 2)
 		return -EINVAL;
+	if (hparms->sample_width != 16 && hparms->sample_width != 20 &&
+	    hparms->sample_width != 24)
+		return -EINVAL;
+	switch (hparms->sample_rate) {
+	case 32000:
+	case 44100:
+	case 48000:
+	case 88200:
+	case 96000:
+	case 176400:
+	case 192000:
+		break;
+	default:
+		return -EINVAL;
+	}
 
 	mutex_lock(&tx->audio_lock);
+	if (!tx->pixel_khz || !tx->sink_hdmi) {
+		mutex_unlock(&tx->audio_lock);
+		return -ENODEV;
+	}
 	tx->audio_params = *hparms;
 	tx->audio_enabled = true;
 	meson_hdmitx21_audio_config(tx);
@@ -747,7 +768,8 @@ static int meson_hdmitx21_audio_mute_stream(struct drm_bridge *bridge,
 	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
 
 	mutex_lock(&tx->audio_lock);
-	if (tx->audio_enabled)
+	tx->audio_muted = enable;
+	if (tx->audio_enabled && tx->pixel_khz)
 		meson_hdmitx21_audio_mute(tx, enable);
 	mutex_unlock(&tx->audio_lock);
 
@@ -882,7 +904,8 @@ static void meson_hdmitx21_bridge_atomic_enable(struct drm_bridge *bridge,
 
 	mutex_lock(&tx->audio_lock);
 	tx->pixel_khz = mode->clock;
-	if (tx->audio_enabled)
+	tx->sink_hdmi = hdmi_mode;
+	if (tx->audio_enabled && hdmi_mode)
 		meson_hdmitx21_audio_config(tx);
 	mutex_unlock(&tx->audio_lock);
 
@@ -895,6 +918,11 @@ static void meson_hdmitx21_bridge_atomic_disable(struct drm_bridge *bridge,
 {
 	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
 
+	mutex_lock(&tx->audio_lock);
+	meson_hdmitx21_audio_off(tx);
+	tx->pixel_khz = 0;
+	tx->sink_hdmi = false;
+	mutex_unlock(&tx->audio_lock);
 	meson_hdmitx21_set_avmute(tx, true);
 	meson_hdmitx21_phy_off(tx);
 	cor_write(tx, TPI_INFO_FSEL, 0);
@@ -1105,6 +1133,7 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 	tx->dev = dev;
 	platform_set_drvdata(pdev, tx);
 	mutex_init(&tx->audio_lock);
+	tx->audio_muted = true;
 	tx->hpd = devm_gpiod_get(dev, "hpd", GPIOD_IN);
 	if (IS_ERR(tx->hpd))
 		return dev_err_probe(dev, PTR_ERR(tx->hpd), "No HPD GPIO\n");
