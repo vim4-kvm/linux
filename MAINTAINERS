@@ -1446,6 +1446,7 @@ F:	sound/soc/meson/t7-vad*
 AMLOGIC T7 AUDIO OFFLINE TESTS
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Maintained
+F:	sound/soc/meson/test-data/t7-audio-processing.dts
 F:	sound/soc/meson/test-data/t7-audio-routes.dts
 F:	sound/soc/meson/test_t7_aed.py
 F:	sound/soc/meson/test_t7_asrc.py

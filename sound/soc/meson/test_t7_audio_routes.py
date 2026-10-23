@@ -100,7 +100,7 @@ def driver_routes(source, filename, array, prefix):
     return [(f'{prefix} {sink}', f'{prefix} {src}') for sink, src in routes]
 
 
-def check_routes(source, tree):
+def check_routes(source, tree, processing=False):
     card = tree.nodes['/sound-digital']
     names = strings(card['audio-routing'])
     assert len(names) % 2 == 0
@@ -115,8 +115,26 @@ def check_routes(source, tree):
     for prefix in ('SPDIFOUT_A', 'SPDIFOUT_B'):
         internal += driver_routes(source, 'axg-spdifout.c',
                                   'axg_spdifout_dapm_routes', prefix)
+    if processing:
+        components = [
+            ('axg-frddr.c', 't7_frddr_aed_routes', ('FRDDR_B', 'FRDDR_C')),
+            ('axg-toddr.c', 't7_toddr_routes', ('TODDR_B', 'TODDR_C')),
+            ('axg-tdmout.c', 't7_tdmout_routes', ('TDMOUT_B', 'TDMOUT_D')),
+            ('axg-tdmin.c', 'axg_tdmin_dapm_routes', ('TDMIN_D', 'TDMIN_LB')),
+            ('axg-tdm-interface.c', 'axg_tdm_iface_dapm_routes', ('TDM_B', 'TDM_D')),
+            ('t7-asrc.c', 't7_asrc_routes', ('ASRC_A',)),
+            ('t7-asrc.c', 't7_asrc_b_routes', ('ASRC_B',)),
+            ('t7-loopback.c', 't7_loopback_routes', ('LOOPBACK_A', 'LOOPBACK_B')),
+            ('t7-aed.c', 't7_aed_routes', ('AED',)),
+            ('t7-vad.c', 't7_vad_routes', ('VAD',)),
+        ]
+        for filename, array, prefixes in components:
+            for prefix in prefixes:
+                internal += driver_routes(source, filename, array, prefix)
     widgets = {name for route in internal for name in route}
     widgets.update(('PDM Capture', 'SPDIFIN Capture'))
+    if processing:
+        widgets.update(('TDM_B Playback', 'TDM_D Playback', 'TDM_D Capture'))
     for sink, src in board_routes:
         assert sink in widgets and src in widgets, (sink, src)
     graph = defaultdict(set)
@@ -140,7 +158,22 @@ def check_routes(source, tree):
     assert reaches('PDM Capture', 'TODDR_B Capture')
     assert reaches('SPDIFIN Capture', 'TODDR_C Capture')
     assert not reaches('PDM Capture', 'TODDR_C Capture')
-    assert not reaches('SPDIFIN Capture', 'TODDR_B Capture')
+    if not processing:
+        assert not reaches('SPDIFIN Capture', 'TODDR_B Capture')
+
+    if processing:
+        for src, sink in (
+                ('SPDIFIN Capture', 'ASRC_A OUT'),
+                ('ASRC_A OUT', 'TODDR_B Capture'),
+                ('FRDDR_B Playback', 'TDM_B Playback'),
+                ('FRDDR_C Playback', 'TDM_D Playback'),
+                ('TDM_D Capture', 'TODDR_B Capture'),
+                ('TDM_B Playback Signal', 'ASRC_B OUT'),
+                ('ASRC_B OUT', 'TODDR_B Capture'),
+                ('PDM Capture', 'VAD Voice Activity')):
+            assert reaches(src, sink), (src, sink)
+        assert not reaches('LOOPBACK_A OUT', 'ASRC_B IN 6')
+        assert not reaches('LOOPBACK_B OUT', 'ASRC_B IN 6')
 
     # A CPU DAI must not be owned by both cards or take the display allocation.
     cpus = []
@@ -176,9 +209,11 @@ def main():
     parser.add_argument('--baseline', required=True, type=Path)
     parser.add_argument('--dtc', default='dtc')
     parser.add_argument('--output', type=Path, help='retain the compiled fixture DTB')
+    parser.add_argument('--processing', action='store_true', help='include processing stages')
     args = parser.parse_args()
     source = Path(__file__).resolve().parents[3]
-    fixture = Path(__file__).with_name('test-data') / 't7-audio-routes.dts'
+    name = 't7-audio-processing.dts' if args.processing else 't7-audio-routes.dts'
+    fixture = Path(__file__).with_name('test-data') / name
     with tempfile.TemporaryDirectory(prefix='t7-audio-routes-') as directory:
         preprocessed = subprocess.run(
             ['cpp', '-nostdinc', '-undef', '-D__DTS__', '-x', 'assembler-with-cpp',
@@ -196,7 +231,7 @@ def main():
         assert len(rx) == 1, rx
         assert baseline.canonical(rx[0]) == candidate.canonical(rx[0]), 'HDMI RX'
         check_resources(candidate)
-        check_routes(source, candidate)
+        check_routes(source, candidate, args.processing)
     print('T7 audio DT: RX contract, MMIO ownership and digital route graph passed')
 
 

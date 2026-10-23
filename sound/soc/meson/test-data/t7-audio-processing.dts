@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/* Compile-only topology: no pinmux or claim of physical codec connectivity. */
+#include "t7-audio-routes.dts"
+
+/ {
+	tdm_sink: tdm-sink {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
+	};
+	tdm_source: tdm-source {
+		compatible = "dmic-codec";
+		#sound-dai-cells = <0>;
+		num-channels = <2>;
+	};
+
+	sound-digital {
+		model = "VIM4PROCESSINGFIXTURE";
+		audio-aux-devs = <&tdmout_b>, <&tdmout_d>, <&tdmin_d>, <&tdmin_lb>, <&vad>;
+		audio-routing = "SPDIFOUT_A IN 1", "FRDDR_B OUT 3",
+				"SPDIFOUT_A IN 2", "FRDDR_C OUT 3",
+				"SPDIFOUT_B IN 1", "FRDDR_B OUT 4",
+				"SPDIFOUT_B IN 2", "FRDDR_C OUT 4",
+				"TODDR_B IN 4", "PDM Capture",
+				"TODDR_C IN 3", "SPDIFIN Capture",
+				"ASRC_A IN 3", "SPDIFIN Capture",
+				"TODDR_B IN 13", "ASRC_A OUT",
+				"AED IN 1", "FRDDR_B AED",
+				"AED IN 2", "FRDDR_C AED",
+				"TDMOUT_B AED", "AED TDMOUT B",
+				"TDMOUT_B IN 1", "FRDDR_B OUT 1",
+				"TDM_B Playback", "TDMOUT_B OUT",
+				"TDMIN_LB IN 13", "TDM_B Loopback",
+				"ASRC_B IN 6", "TDMIN_LB OUT",
+				"LOOPBACK_A PDM", "PDM Capture",
+				"LOOPBACK_A ASRC B", "ASRC_B OUT",
+				"LOOPBACK_B PDM", "PDM Capture",
+				"LOOPBACK_B ASRC B", "ASRC_B OUT",
+				"TODDR_B IN 7", "LOOPBACK_A OUT",
+				"TODDR_B IN 9", "LOOPBACK_B OUT",
+				"TDMOUT_D IN 2", "FRDDR_C OUT 6",
+				"TDM_D Playback", "TDMOUT_D OUT",
+				"TDMIN_D IN 3", "TDM_D Capture",
+				"TODDR_B IN 18", "TDMIN_D OUT",
+				"VAD PDM", "PDM Capture";
+
+		dai-link-6 {
+			convert-rate = <16000>;
+			convert-channels = <4>;
+		};
+		dai-link-7 {
+			convert-rate = <44100>;
+			convert-channels = <2>;
+		};
+		dai-link-8 {
+			sound-dai = <&asrc_a>;
+			codec { sound-dai = <&tdm_source>; };
+		};
+		dai-link-9 {
+			sound-dai = <&tdmif_b>;
+			dai-format = "i2s";
+			dai-tdm-slot-tx-mask-0 = <1 1>;
+			mclk-fs = <256>;
+			convert-rate = <48000>;
+			convert-channels = <2>;
+			codec { sound-dai = <&tdm_sink>; };
+		};
+		dai-link-10 {
+			sound-dai = <&asrc_b>;
+			convert-rate = <16000>;
+			convert-channels = <2>;
+			codec { sound-dai = <&tdm_source>; };
+		};
+		dai-link-11 {
+			sound-dai = <&loopback_a>;
+			codec { sound-dai = <&pdm_mics>; };
+		};
+		dai-link-12 {
+			sound-dai = <&loopback_b>;
+			codec { sound-dai = <&pdm_mics>; };
+		};
+		dai-link-13 {
+			sound-dai = <&aed>;
+			codec { sound-dai = <&tdm_sink>; };
+		};
+		dai-link-14 {
+			sound-dai = <&tdmif_d>;
+			dai-format = "i2s";
+			dai-tdm-slot-tx-mask-0 = <1 1>;
+			dai-tdm-slot-rx-mask-0 = <1 1>;
+			mclk-fs = <256>;
+			codec-0 { sound-dai = <&tdm_sink>; };
+			codec-1 { sound-dai = <&tdm_source>; };
+		};
+	};
+};
+
+&asrc_a { status = "okay"; };
+&asrc_b { status = "okay"; };
+&loopback_a { status = "okay"; };
+&loopback_b { status = "okay"; };
+&aed { status = "okay"; };
+&vad { status = "okay"; };
+&tdmif_d { status = "okay"; };
+&tdmin_d { status = "okay"; };
+&tdmout_d { status = "okay"; };

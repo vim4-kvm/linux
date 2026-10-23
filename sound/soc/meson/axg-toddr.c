@@ -471,13 +471,14 @@ static const struct snd_soc_dapm_widget t7_toddr_dapm_widgets[] = {
 	SND_SOC_DAPM_AIF_IN("IN 18", NULL, 0, SND_SOC_NOPM, 0, 0),
 };
 
+static const struct snd_soc_dapm_route t7_toddr_routes[] = {
+	{ "SRC SEL", "IN 18", "IN 18" },
+};
+
 static int t7_toddr_component_probe(struct snd_soc_component *component)
 {
-	static const struct snd_soc_dapm_route route = {
-		"SRC SEL", "IN 18", "IN 18",
-	};
-
-	return snd_soc_dapm_add_routes(snd_soc_component_to_dapm(component), &route, 1);
+	return snd_soc_dapm_add_routes(snd_soc_component_to_dapm(component),
+				      t7_toddr_routes, ARRAY_SIZE(t7_toddr_routes));
 }
 
 static const struct snd_soc_component_driver t7_toddr_component_drv = {
