@@ -15,8 +15,8 @@ functions = source[source.index('static int t7_toddr_pcm_format'):
                    source.index('static const struct snd_soc_dai_ops t7_toddr_ops')]
 enum_start = source.index('static const struct soc_enum t7_toddr_sel_enum')
 enum = source[enum_start:source.index('\n};', enum_start) + 3]
-texts_start = source.index('static const char * const sm1_toddr_sel_texts')
-texts = source[texts_start:source.index('\n};', texts_start) + 3]
+texts_start = source.index('static const char * const t7_toddr_sel_texts')
+texts = source[texts_start:enum_start]
 prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -50,7 +50,12 @@ struct axg_fifo { struct regmap *map; u32 *chsync; };
 struct snd_soc_dai { struct axg_fifo *fifo; };
 struct snd_pcm_substream { int unused; };
 struct snd_pcm_hw_params { int format; unsigned int channels, width; };
-struct soc_enum { u32 reg, shift_l, shift_r, items; const char *const *texts; u32 mask; };
+struct soc_enum {
+    u32 reg, shift_l, shift_r, items;
+    const char *const *texts;
+    u32 mask;
+    const unsigned int *values;
+};
 #define params_format(p) ((p)->format)
 #define params_channels(p) ((p)->channels)
 #define params_width(p) ((p)->width)
@@ -79,6 +84,14 @@ int main(void) {
     map.ctrl1=(map.ctrl1&~mask) | (8U << t7_toddr_sel_enum.shift_l);
     assert((map.ctrl1 & 0x7c000000)==0x20000000);
     assert((map.ctrl1 & ~0x7c000000)==0x80001234);
+    for (unsigned int i = 0; i < t7_toddr_sel_enum.items; i++) {
+        unsigned int value = t7_toddr_sel_enum.values[i];
+        map.ctrl1 = (map.ctrl1 & ~mask) | value << t7_toddr_sel_enum.shift_l;
+        assert(((map.ctrl1 >> 26) & 31) == value);
+        assert((map.ctrl1 & ~mask) == 0x80001234);
+    }
+    assert(t7_toddr_sel_enum.values[t7_toddr_sel_enum.items - 1] == 18);
+    map.ctrl1 = (map.ctrl1 & ~mask) | 8U << t7_toddr_sel_enum.shift_l;
     u32 original=map.ctrl0;
     fail_read=true;
     assert(t7_toddr_dai_hw_params(NULL,&params,&dai)==-EIO && sync==0x123400ab);

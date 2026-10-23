@@ -261,6 +261,9 @@ static const struct of_device_id axg_tdmin_of_match[] = {
 	}, {
 		.compatible = "amlogic,t7-tdmin",
 		.data = &t7_tdmin_drv,
+	}, {
+		.compatible = "amlogic,t7-tdmin-d",
+		.data = &t7_tdmin_drv,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, axg_tdmin_of_match);

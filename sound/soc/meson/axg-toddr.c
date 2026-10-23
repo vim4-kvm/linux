@@ -429,14 +429,22 @@ static struct snd_soc_dai_driver t7_toddr_dai_drv = {
 	.ops = &t7_toddr_ops,
 };
 
-/* T7 moves the source selector below bit 31 and widens it to five bits.
- * Keep the known first sixteen sources; clear all five hardware bits so a
- * previous boot cannot leave the FIFO connected to a different input.
- */
+static const char * const t7_toddr_sel_texts[] = {
+	"IN 0", "IN 1", "IN 2", "IN 3", "IN 4", "IN 5", "IN 6", "IN 7",
+	"IN 8", "IN 9", "IN 10", "IN 11", "IN 12", "IN 13", "IN 14", "IN 15",
+	"IN 18",
+};
+
+static const unsigned int t7_toddr_sel_values[] = {
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18,
+};
+
+/* Keep the full five-bit mask, including for sparse source values. */
 static const struct soc_enum t7_toddr_sel_enum = {
 	.reg = FIFO_CTRL1, .shift_l = 26, .shift_r = 26,
-	.items = ARRAY_SIZE(sm1_toddr_sel_texts),
-	.texts = sm1_toddr_sel_texts, .mask = 0x1f,
+	.items = ARRAY_SIZE(t7_toddr_sel_texts),
+	.texts = t7_toddr_sel_texts, .mask = 0x1f,
+	.values = t7_toddr_sel_values,
 };
 
 static const struct snd_kcontrol_new t7_toddr_in_mux =
@@ -460,9 +468,20 @@ static const struct snd_soc_dapm_widget t7_toddr_dapm_widgets[] = {
 	SND_SOC_DAPM_AIF_IN("IN 13", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("IN 14", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("IN 15", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 18", NULL, 0, SND_SOC_NOPM, 0, 0),
 };
 
+static int t7_toddr_component_probe(struct snd_soc_component *component)
+{
+	static const struct snd_soc_dapm_route route = {
+		"SRC SEL", "IN 18", "IN 18",
+	};
+
+	return snd_soc_dapm_add_routes(snd_soc_component_to_dapm(component), &route, 1);
+}
+
 static const struct snd_soc_component_driver t7_toddr_component_drv = {
+	.probe = t7_toddr_component_probe,
 	.dapm_widgets = t7_toddr_dapm_widgets,
 	.num_dapm_widgets = ARRAY_SIZE(t7_toddr_dapm_widgets),
 	.dapm_routes = sm1_toddr_dapm_routes,
