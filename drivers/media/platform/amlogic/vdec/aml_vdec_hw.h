@@ -127,6 +127,7 @@ struct pm_pd_s {
  * @probe_en0: DOS-top gate sample, including the shared HCODEC bits.
  * @probe_failed: A failed diagnostic prohibits another attempt in this probe.
  * @probe_pinned: Module reference held across diagnostic sysfs writes.
+ * @clkctrl: Clock provider's regmap, used only to verify physical gate state.
  */
 struct aml_vdec_hw {
 	struct platform_device *pdev;
@@ -155,6 +156,7 @@ struct aml_vdec_hw {
 	u32 probe_en0;
 	bool probe_failed;
 	bool probe_pinned;
+	struct regmap *clkctrl;
 };
 
 /**

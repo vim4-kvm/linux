@@ -49,6 +49,49 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_physical_clock_guard_rejects_closed_gates_and_wrong_recipe(self):
+        run_c(COMMON + """
+#define dev_info(...) ((void)0)
+#define dev_err(...) ((void)0)
+struct aml_vdec_hw { void *dev, *clkctrl; };
+static u32 values[3];
+static int reads, fail_at;
+static int regmap_read(void *map, int reg, u32 *value)
+{
+    static const int offsets[] = {0x44, 0x140, 0x148};
+    assert(reads < 3 && reg == offsets[reads]);
+    *value = values[reads++];
+    return fail_at == reads ? -EIO : 0;
+}
+""" + function(HERE / "aml_vdec_hw.c", "t7_clock_preflight") + """
+int main(void)
+{
+    struct aml_vdec_hw hw = {0};
+    /* Captured vendor active state, including independent HCODEC selection. */
+    values[0] = 0xffffffff; values[1] = 0x100; values[2] = 0x80000000;
+    assert(!t7_clock_preflight(&hw) && reads == 3);
+    values[0] &= ~BIT(1); reads = 0;
+    assert(t7_clock_preflight(&hw) == -EHOSTDOWN);
+    values[0] |= BIT(1);
+    /* Gate off, alternate parent, or divider are insufficient at 800 MHz. */
+    const u32 bad[] = {0, 0x300, 0x101};
+    for (unsigned int i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        values[1] = bad[i]; reads = 0;
+        assert(t7_clock_preflight(&hw) == -EHOSTDOWN && reads == 3);
+    }
+    /* An enabled unselected p0 cannot hide a disabled selected p1. */
+    values[1] = 0x7fff0100; values[2] |= BIT(15); reads = 0;
+    assert(t7_clock_preflight(&hw) == -EHOSTDOWN);
+    values[1] = 0; values[2] |= BIT(8); reads = 0;
+    assert(!t7_clock_preflight(&hw));
+    for (fail_at = 1; fail_at <= 3; fail_at++) {
+        reads = 0;
+        assert(t7_clock_preflight(&hw) == -EIO && reads == fail_at);
+    }
+    return 0;
+}
+""")
+
     def test_parent_is_owned_before_top_access_and_child_power_and_released_last(self):
         functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
             "t7_power_off", "t7_probe_begin", "t7_probe_domain_on"))
@@ -104,6 +147,7 @@ static int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3)
 { assert(clocks && parent_refs); *vdec = state; *nic3 = 0; return 0; }
 static int t7_domain_state(int id, s32 *value) { *value = state; return 0; }
 static void t7_power_fault(struct aml_vdec_hw *hw) { hw->faulted = true; }
+static int t7_clock_preflight(struct aml_vdec_hw *hw) { return 0; }
 static void arm_smccc_smc(int cmd, int id, int policy, int a, int b, int c, int d,
                          int e, struct arm_smccc_res *res)
 {
@@ -305,7 +349,7 @@ struct aml_vdec_hw {
     struct clk_bulk_data gates[2];
     struct pm *pm;
 };
-static int vdec_state, nic3_state, pm_error, off_error;
+static int vdec_state, nic3_state, pm_error, off_error, clock_error;
 static int clocks, refs, mmio, poison, phase;
 static void arm_smccc_smc(unsigned int cmd, unsigned int id, int a, int b,
                          int c, int d, int e, int f, struct arm_smccc_res *res)
@@ -326,6 +370,8 @@ static int pm_runtime_put_sync_suspend(void *dev)
 static void __module_get(void *module) { poison++; }
 static void get_device(void *dev) {}
 static void meson_t7_dos_poison(void) {}
+static int t7_clock_preflight(struct aml_vdec_hw *hw)
+{ assert(phase == 2 && !vdec_state && !nic3_state); return clock_error; }
 static int regmap_read(void *map, int reg, u32 *value)
 {
     assert(phase == 2 && clocks == 1 && refs == 1);
@@ -348,6 +394,10 @@ int main(void)
         }
     }
     struct aml_vdec_hw hw = { .has_dbus_ctrl = true, .pm = &pm };
+    phase = mmio = 0; vdec_state = nic3_state = 0; clock_error = -EHOSTDOWN;
+    assert(aml_vdec_t7_power_test(&hw) == -EHOSTDOWN);
+    assert(!mmio && !clocks && !refs && !hw.power_test_passed);
+    clock_error = 0;
     phase = mmio = 0; vdec_state = nic3_state = 0;
     assert(!aml_vdec_t7_power_test(&hw));
     assert(mmio == 1 && !clocks && !refs && hw.power_test_passed && !hw.powered);

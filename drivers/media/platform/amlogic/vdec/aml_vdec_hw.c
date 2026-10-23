@@ -276,14 +276,48 @@ release_firmware:
 	return ret;
 }
 
+static void t7_clock_provider_put(void *data)
+{
+	put_device(data);
+}
+
+static int t7_clock_provider_init(struct aml_vdec_hw *hw)
+{
+	struct platform_device *provider;
+	struct device_node *node;
+	int ret;
+
+	node = of_parse_phandle(hw->dev->of_node, "clocks", 0);
+	if (!node)
+		return -EINVAL;
+	if (!of_device_is_compatible(node, "amlogic,t7-peripherals-clkc")) {
+		of_node_put(node);
+		return -EINVAL;
+	}
+	provider = of_find_device_by_node(node);
+	of_node_put(node);
+	if (!provider)
+		return -EPROBE_DEFER;
+	ret = devm_add_action_or_reset(hw->dev, t7_clock_provider_put, &provider->dev);
+	if (ret)
+		return ret;
+	/* Reuse the provider mapping; never claim or write its shared registers. */
+	hw->clkctrl = dev_get_regmap(&provider->dev, NULL);
+	return hw->clkctrl ? 0 : -EPROBE_DEFER;
+}
+
 static int vdec_clock_gate_init(struct aml_vdec_hw *hw)
 {
+	int ret;
+
 	hw->gates[VDEC].id = "vdec";
 	hw->gates[VDEC_MUX].id = "clk_vdec_mux";
 	hw->gates[HEVCF_MUX].id = "clk_hevcf_mux";
 
-	return devm_clk_bulk_get(hw->dev, hw->has_dbus_ctrl ? 2 : DOS_CLK_MAX,
-				 hw->gates);
+	ret = devm_clk_bulk_get(hw->dev, hw->has_dbus_ctrl ? 2 : DOS_CLK_MAX, hw->gates);
+	if (ret || !hw->has_dbus_ctrl)
+		return ret;
+	return t7_clock_provider_init(hw);
 }
 
 static struct clk_bulk_data *vdec_get_clk_by_name(struct aml_vdec_hw *hw,
@@ -606,6 +640,37 @@ static int t7_power_off(struct aml_vdec_hw *hw)
 	return 0;
 }
 
+static int t7_clock_preflight(struct aml_vdec_hw *hw)
+{
+	u32 sys, p0, p1, selected;
+	int ret;
+
+	/*
+	 * Live T7 vendor H.264: SYS_DOS bit 1, VDEC p0=0x100, p1 low half=0.
+	 * CCF's cached rate alone cannot prove the gate survived secure power-on.
+	 * Read CLKCTRL (not DOS) after the transition, before any internal access.
+	 * Both documented mux paths are valid; preserve all shared HCODEC bits.
+	 */
+	ret = regmap_read(hw->clkctrl, 0x44, &sys);
+	if (ret)
+		return ret;
+	ret = regmap_read(hw->clkctrl, 0x140, &p0);
+	if (ret)
+		return ret;
+	ret = regmap_read(hw->clkctrl, 0x148, &p1);
+	if (ret)
+		return ret;
+	selected = p1 & BIT(15) ? p1 : p0;
+	dev_info(hw->dev, "CLKCTRL: SYS=%#x VDEC0=%#x VDEC1=%#x path=%u\n",
+		 sys, p0, p1, !!(p1 & BIT(15)));
+	/* 800 MHz recipe: fclk_div2p5, divide by one, gate enabled. */
+	if (!(sys & BIT(1)) || (selected & 0xf7f) != BIT(8)) {
+		dev_err(hw->dev, "refusing DOS MMIO: physical clock configuration mismatch\n");
+		return -EHOSTDOWN;
+	}
+	return 0;
+}
+
 static int t7_power_on(struct aml_vdec_hw *hw)
 {
 	s32 vdec = -1, nic3 = -1;
@@ -642,7 +707,10 @@ static int t7_power_on(struct aml_vdec_hw *hw)
 		t7_power_off(hw);
 		return ret ?: -EHOSTDOWN;
 	}
-	return 0;
+	ret = t7_clock_preflight(hw);
+	if (ret)
+		t7_power_off(hw);
+	return ret;
 }
 
 int aml_vdec_t7_power_test(struct aml_vdec_hw *hw)
@@ -722,7 +790,9 @@ static int t7_probe_domain_on(struct aml_vdec_hw *hw)
 	/* DMC normal-memory policy, not an APB permission or register proxy. */
 	arm_smccc_smc(0xb200000e, 13, 0, 0, 0, 0, 0, 0, &result);
 	dev_info(hw->dev, "CONFIG_DEVICE_SECURE(13,0) a0=%#lx\n", result.a0);
-	return result.a0 ? -EACCES : 0;
+	if (result.a0)
+		return -EACCES;
+	return t7_clock_preflight(hw);
 }
 
 /* Each register step performs exactly one MMIO operation, never an RMW. */
