@@ -20,6 +20,7 @@ properties:
       - amlogic,axg-tdmin
       - amlogic,t7-tdmin
       - amlogic,t7-tdmin-d
+      - amlogic,t7-tdmin-lb
       - amlogic,t7-tdmout
 
   clocks:
@@ -71,6 +72,7 @@ allOf:
               - amlogic,g12a-tdmout
               - amlogic,sm1-tdmout
               - amlogic,t7-tdmin
+              - amlogic,t7-tdmin-lb
               - amlogic,t7-tdmout
     then:
       required:
