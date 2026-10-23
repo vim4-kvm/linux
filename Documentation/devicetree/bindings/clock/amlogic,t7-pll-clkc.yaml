@@ -13,6 +13,12 @@ maintainers:
   - Jian Hu <jian.hu@amlogic.com>
   - Xianwei Zhao <xianwei.zhao@amlogic.com>
 
+description: |
+  The hdmi-pll-ro variant describes a firmware-owned HDMI PLL. Its DCO and
+  both output dividers are read-only, including during registration and
+  consumer enable/disable. It is restricted to the fixed display handoff
+  profile; use the normal HDMI provider when Linux owns PLL programming.
+
 properties:
   compatible:
     enum:
@@ -22,6 +28,7 @@ properties:
       - amlogic,t7-pcie-pll
       - amlogic,t7-mpll
       - amlogic,t7-hdmi-pll
+      - amlogic,t7-hdmi-pll-ro
       - amlogic,t7-mclk-pll
 
   reg:
@@ -77,6 +84,7 @@ allOf:
               - amlogic,t7-pcie-pll
               - amlogic,t7-mpll
               - amlogic,t7-hdmi-pll
+              - amlogic,t7-hdmi-pll-ro
 
     then:
       properties:

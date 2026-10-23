@@ -1467,6 +1467,12 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/spi/amlogic,a4-spisg.yaml
 F:	drivers/spi/spi-amlogic-spisg.c
 
+AMLOGIC T7 BOOT DISPLAY HANDOFF EXPERIMENT
+M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+S:	Odd Fixes
+F:	Documentation/devicetree/bindings/display/amlogic,t7-display-handoff.yaml
+F:	Documentation/devicetree/bindings/media/amlogic,t7-vdin-test.yaml
+
 AMLOGIC VDEC DRIVER
 M:	Zhentao Guo <zhentao.guo@amlogic.com>
 L:	linux-media@vger.kernel.org
