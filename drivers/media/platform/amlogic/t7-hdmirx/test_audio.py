@@ -61,7 +61,7 @@ stubs = r'''
 static void mutex_lock(struct mutex *m) { assert(!m->held); m->held=true; }
 static void mutex_unlock(struct mutex *m) { assert(m->held); m->held=false; }
 static u8 core[0x8000], top[0x4000], phy[0x90], fifo[0x30];
-static bool clocks, fail_clocks, pll_locked;
+static bool clocks, fail_clocks, pll_locked, lose_during_pll;
 static unsigned int writes, enables, disables;
 static bool cts_jitter;
 static unsigned int cts_reads;
@@ -91,7 +91,8 @@ static void clk_bulk_disable_unprepare(unsigned int count, struct clk_bulk_data 
     assert(clocks && count == 3); clocks = false; disables++;
 }
 #define readl_poll_timeout(address, value, condition, delay, timeout) \
-    ({ (value) = pll_locked ? BIT(31) : 0; (condition) ? 0 : -ETIMEDOUT; })
+    ({ if (lose_during_pll) watched->link->ready=false; \
+       (value) = pll_locked ? BIT(31) : 0; (condition) ? 0 : -ETIMEDOUT; })
 static void udelay(unsigned int us) { assert(us == 1); }
 static void acr(unsigned int offset, unsigned int value) {
     core[offset] = value >> 16; core[offset+1] = value >> 8; core[offset+2] = value;
@@ -318,6 +319,15 @@ int main(void) {
     before=xruns;
     t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
     assert(xruns==before+1);
+    assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
+    /* Distinguish a stable-source PLL fault from loss while enabling it. */
+    link.ready=true;
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    t7_hdmirx_audio_work((struct work_struct *)&rx.audio_work);
+    pll_locked=false; lose_during_pll=true;
+    assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai) && rx.audio_invalid);
+    assert(!clocks && !rx.audio_active && !readl(fifo));
     assert(!t7_hdmirx_audio_hw_free(&stream,&dai));
     puts("seven rates, packet races, native constraints, XRUN-before/after START, PLL unwind passed");
 }
