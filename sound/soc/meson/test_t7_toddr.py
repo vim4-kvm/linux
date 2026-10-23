@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """T7 register ABI: source selection, PCM alignment and channel synchronization."""
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
 source = Path(__file__).with_name('axg-toddr.c').read_text()
+header = Path(__file__).with_name('axg-fifo.h').read_text()
+formats_define = '#define AXG_FIFO_FORMATS' + header.split(
+    '#define AXG_FIFO_FORMATS', 1)[1].split('\n\n', 1)[0] + '\n'
+dai = source.split('static struct snd_soc_dai_driver t7_toddr_dai_drv', 1)[1]
+formats = re.search(r'\.formats\s*=\s*([^,]+),', dai).group(1)
 functions = source[source.index('static int t7_toddr_pcm_format'):
                    source.index('static const struct snd_soc_dai_ops t7_toddr_ops')]
 enum_start = source.index('static const struct soc_enum t7_toddr_sel_enum')
@@ -29,9 +35,16 @@ typedef uint32_t u32;
 #define CTRL0_TODDR_LSB_POS GENMASK(7,3)
 #define SNDRV_PCM_FORMAT_S16_LE 2
 #define SNDRV_PCM_FORMAT_S8 0
+#define SNDRV_PCM_FORMAT_S20_LE 25
 #define SNDRV_PCM_FORMAT_S24_LE 6
 #define SNDRV_PCM_FORMAT_S32_LE 10
 #define SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE 18
+#define SNDRV_PCM_FMTBIT_S8 (1ULL << SNDRV_PCM_FORMAT_S8)
+#define SNDRV_PCM_FMTBIT_S16_LE (1ULL << SNDRV_PCM_FORMAT_S16_LE)
+#define SNDRV_PCM_FMTBIT_S20_LE (1ULL << SNDRV_PCM_FORMAT_S20_LE)
+#define SNDRV_PCM_FMTBIT_S24_LE (1ULL << SNDRV_PCM_FORMAT_S24_LE)
+#define SNDRV_PCM_FMTBIT_S32_LE (1ULL << SNDRV_PCM_FORMAT_S32_LE)
+#define SNDRV_PCM_FMTBIT_IEC958_SUBFRAME_LE (1ULL << SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE)
 struct regmap { u32 ctrl0, ctrl1; };
 struct axg_fifo { struct regmap *map; u32 *chsync; };
 struct snd_soc_dai { struct axg_fifo *fifo; };
@@ -96,13 +109,31 @@ int main(void) {
     params.format=SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE;
     assert(!t7_toddr_dai_hw_params(NULL,&params,&dai));
     assert((map.ctrl0 & fields) == ((3U<<13)|(27U<<8)|(4U<<3)));
+    for (int format = 0; format < 64; format++) {
+        params.format = format;
+        params.width = format == SNDRV_PCM_FORMAT_S8 ? 8 :
+                       format == SNDRV_PCM_FORMAT_S16_LE ? 16 :
+                       format == SNDRV_PCM_FORMAT_S24_LE ? 24 : 32;
+        map.ctrl1 = format == SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE ? 3U << 26 : 0;
+        original = map.ctrl0;
+        u32 original_sync = sync;
+        int ret = t7_toddr_dai_hw_params(NULL, &params, &dai);
+        if (advertised_formats & (1ULL << format)) {
+            assert(!ret);
+        } else {
+            assert(ret == -EINVAL);
+            assert(map.ctrl0 == original && sync == original_sync);
+        }
+    }
     puts("T7 selector isolation, S16 cropping and channel sync passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     code = Path(directory) / 'toddr.c'
     binary = Path(directory) / 'toddr'
-    code.write_text(prefix + texts + enum + functions + checks)
+    code.write_text(prefix + formats_define +
+                    f'static const uint64_t advertised_formats = {formats};\n' +
+                    texts + enum + functions + checks)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-fsanitize=address,undefined',
                     str(code), '-o', str(binary)], check=True)

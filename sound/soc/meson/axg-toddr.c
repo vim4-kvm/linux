@@ -418,9 +418,13 @@ static const struct snd_soc_dai_ops t7_toddr_ops = {
 static struct snd_soc_dai_driver t7_toddr_dai_drv = {
 	.name = "TODDR",
 	.capture = {
-		.stream_name = "Capture", .channels_min = 1, .channels_max = AXG_FIFO_CH_MAX,
-		.rates = SNDRV_PCM_RATE_CONTINUOUS, .rate_min = 5515, .rate_max = 768000,
-		.formats = AXG_FIFO_FORMATS,
+		.stream_name = "Capture",
+		.channels_min = 1,
+		.channels_max = AXG_FIFO_CH_MAX,
+		.rates = SNDRV_PCM_RATE_CONTINUOUS,
+		.rate_min = 5515,
+		.rate_max = 768000,
+		.formats = AXG_FIFO_FORMATS & ~SNDRV_PCM_FMTBIT_S20_LE,
 	},
 	.ops = &t7_toddr_ops,
 };
