@@ -221,6 +221,7 @@
 
 struct meson_ao_cec_device {
 	struct platform_device		*pdev;
+	int				irq;
 	void __iomem			*base;
 	void __iomem			*cecb_route;
 	u32				cecb_route_saved;
@@ -695,12 +696,11 @@ static int meson_ao_cec_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	ret = devm_request_threaded_irq(&pdev->dev, irq,
-					meson_ao_cec_irq,
-					meson_ao_cec_irq_thread,
-					0, NULL, ao_cec);
-	if (ret)
+	if (irq < 0) {
+		ret = irq;
 		goto out_probe_adapter;
+	}
+	ao_cec->irq = irq;
 
 	ao_cec->core = devm_clk_get(&pdev->dev, "core");
 	if (IS_ERR(ao_cec->core)) {
@@ -726,25 +726,36 @@ static int meson_ao_cec_probe(struct platform_device *pdev)
 	ao_cec->pdev = pdev;
 	platform_set_drvdata(pdev, ao_cec);
 
+	/* Initialize before publishing the adapter: userspace may open it at once. */
+	meson_ao_cec_irq_setup(ao_cec, false);
+	writel_relaxed(CEC_GEN_CNTL_RESET,
+		       ao_cec->base + CEC_GEN_CNTL_REG);
+	ret = devm_request_threaded_irq(&pdev->dev, irq,
+					meson_ao_cec_irq,
+					meson_ao_cec_irq_thread,
+					0, NULL, ao_cec);
+	if (ret)
+		goto out_probe_clk;
+
 	ao_cec->notify = cec_notifier_cec_adap_register(hdmi_dev, NULL,
 							ao_cec->adap);
 	if (!ao_cec->notify) {
 		ret = -ENOMEM;
-		goto out_probe_clk;
+		goto out_probe_irq;
 	}
 
 	ret = cec_register_adapter(ao_cec->adap, &pdev->dev);
 	if (ret < 0)
 		goto out_probe_notify;
 
-	/* Setup Hardware */
-	writel_relaxed(CEC_GEN_CNTL_RESET,
-		       ao_cec->base + CEC_GEN_CNTL_REG);
-
 	return 0;
 
 out_probe_notify:
 	cec_notifier_cec_adap_unregister(ao_cec->notify, ao_cec->adap);
+
+out_probe_irq:
+	meson_ao_cec_adap_enable(ao_cec->adap, false);
+	devm_free_irq(&pdev->dev, ao_cec->irq, ao_cec);
 
 out_probe_clk:
 	clk_disable_unprepare(ao_cec->core);
@@ -762,6 +773,8 @@ static void meson_ao_cec_remove(struct platform_device *pdev)
 	struct meson_ao_cec_device *ao_cec = platform_get_drvdata(pdev);
 
 	cec_notifier_cec_adap_unregister(ao_cec->notify, ao_cec->adap);
+	/* Join the threaded handler before the adapter it references can be freed. */
+	devm_free_irq(&pdev->dev, ao_cec->irq, ao_cec);
 	cec_unregister_adapter(ao_cec->adap);
 	/* Adapter teardown disables the controller and can still access registers. */
 	clk_disable_unprepare(ao_cec->core);

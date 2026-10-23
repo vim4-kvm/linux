@@ -53,8 +53,11 @@ struct meson_ao_cec_device {
     u32 *base, *cecb_route;
     u32 cecb_route_saved;
     void *notify, *adap, *core;
+    struct platform_device *pdev;
+    int irq;
 };
-struct platform_device {struct meson_ao_cec_device *driver_data;};
+struct device {int unused;};
+struct platform_device {struct meson_ao_cec_device *driver_data; struct device dev;};
 struct cec_adapter {void *priv;};
 #define CEC_LOG_ADDR_INVALID 255
 #define CEC_LOGICAL_ADDR0 0x16
@@ -81,15 +84,57 @@ static void aocec_wr_reg(unsigned int address, unsigned int value) {reference[ad
 #define CEC_CHIP_A1 0
 static struct {int chip_id;} platform={0};
 static struct {void *unused; __typeof__(platform) *plat_data;} device={0,&platform}, *cec_dev=&device;
-static bool clock_live=true, notifier_live=true, adapter_live=true;
+static bool clock_live=true, notifier_live=true, adapter_live=true, irq_live=true;
+static int probe_failure;
 static struct meson_ao_cec_device *platform_get_drvdata(struct platform_device *pdev)
 {return pdev->driver_data;}
+static void platform_set_drvdata(struct platform_device *pdev, void *data)
+{pdev->driver_data=data;}
 static void cec_notifier_cec_adap_unregister(void *notify, void *adap)
 {(void)notify; (void)adap; assert(adapter_live); notifier_live=false;}
 static void cec_unregister_adapter(void *adap)
-{(void)adap; assert(clock_live && !notifier_live); adapter_live=false;}
+{(void)adap; assert(clock_live && !notifier_live && !irq_live); adapter_live=false;}
+static void cec_delete_adapter(void *adap)
+{(void)adap; assert(!irq_live && !clock_live); adapter_live=false;}
 static void clk_disable_unprepare(void *clk)
-{(void)clk; assert(!adapter_live); clock_live=false;}
+{(void)clk; assert(!irq_live); clock_live=false;}
+static void devm_free_irq(struct device *dev, int irq, void *data)
+{(void)dev; (void)irq; (void)data; assert(adapter_live && irq_live); irq_live=false;}
+static void meson_ao_cec_irq_setup(struct meson_ao_cec_device *cec, bool enable)
+{(void)cec; assert(clock_live); regs[2]=enable;}
+static void meson_ao_cec_irq(void) {}
+static void meson_ao_cec_irq_thread(void) {}
+static int devm_request_threaded_irq(struct device *dev, int irq, void (*top)(void),
+                                     void (*thread)(void), int flags,
+                                     void *name, void *data)
+{
+    (void)dev; (void)irq; (void)top; (void)thread; (void)flags; (void)name; (void)data;
+    assert(clock_live && (regs[0] & 1) && !regs[2]);
+    if (probe_failure == 1) return -EIO;
+    irq_live=true;
+    return 0;
+}
+static void *cec_notifier_cec_adap_register(struct device *hdmi, void *port, void *adap)
+{
+    (void)hdmi; (void)port; (void)adap;
+    assert(irq_live);
+    if (probe_failure == 2) return NULL;
+    notifier_live=true;
+    return &notifier_live;
+}
+static int cec_register_adapter(void *adap, struct device *dev)
+{
+    (void)adap; (void)dev;
+    assert(irq_live && notifier_live && clock_live);
+    if (probe_failure == 3) return -EIO;
+    /* Deterministically open/configure as soon as the device is published. */
+    regs[0]=0;
+    regs[2]=3;
+    return 0;
+}
+static int meson_ao_cec_adap_enable(void *adap, bool enable)
+{(void)adap; assert(!enable && clock_live); regs[0]=1; regs[2]=0; return 0;}
+#define dev_err(...) ((void)0)
 #define readl_relaxed(p) (*(u32 *)(p))
 #define writel_relaxed(v,p) (*(u32 *)(p) = (v))
 #define writel_bits_relaxed(mask,val,p) writel_relaxed((readl_relaxed(p) & ~(mask)) | (val), p)
@@ -109,6 +154,11 @@ body += function(source, 'meson_ao_cec_t7_setup') + '\n'
 body += function(source, 'meson_ao_cec_t7_restore_route') + '\n'
 body += function(source, 'meson_ao_cec_remove') + '\n'
 body += function(source, 'meson_ao_cec_set_log_addr') + '\n'
+probe = function(source, 'meson_ao_cec_probe')
+body += 'static int probe_registration(struct platform_device *pdev) {\n'
+body += 'struct meson_ao_cec_device *ao_cec=pdev->driver_data;\n'
+body += 'struct device *hdmi_dev=NULL; int irq=ao_cec->irq, ret;\n'
+body += probe[probe.index('\tao_cec->pdev = pdev;'):] + '\n'
 body += function(vendor, 'cec_ip_share_io') + '\n'
 body += function(vendor, 'ceca_addr_add') + '\n'
 body += 'static void vendor_init(void) {unsigned long data32;\n' + init + '}\n'
@@ -157,15 +207,29 @@ int main(void)
     assert(command[CEC_LOGICAL_ADDR0] == (LOGICAL_ADDR_VALID | 4));
     meson_ao_cec_remove(&pdev);
     assert(!clock_live && !notifier_live && !adapter_live);
+    for (probe_failure=0; probe_failure<4; probe_failure++) {
+        clock_live=adapter_live=true;
+        notifier_live=irq_live=false;
+        regs[0]=0; regs[2]=3;
+        int result=probe_registration(&pdev);
+        if (!probe_failure) {
+            assert(!result && regs[0] == 0 && regs[2] == 3);
+            meson_ao_cec_remove(&pdev);
+        } else {
+            assert(result < 0 && !clock_live && !adapter_live && !irq_live);
+            assert(!notifier_live && regs[0] == 1 && regs[2] == 0);
+        }
+    }
 }
 '''
 with tempfile.TemporaryDirectory() as work:
     path = Path(work)
     (path / 'cec.c').write_text(body)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                    '-Wno-unused-label',
                     str(path / 'cec.c'), '-o', str(path / 'cec')], check=True)
     subprocess.run([str(path / 'cec')], check=True)
-print('T7 CECA: filters, routing, vendor logical-address bitmaps, I/O failure and teardown passed')
+print('T7 CECA: vendor filters/routing/addresses, I/O failures, publication race and teardown passed')
 if args.dtb:
     def prop(node, key, kind='x'):
         return subprocess.check_output(['fdtget', '-t', kind, str(args.dtb), node, key],
