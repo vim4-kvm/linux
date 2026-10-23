@@ -59,6 +59,9 @@ if args.dtb:
     print('Compiled M1 DT: disjoint capture/display claims, exclusive KMS and read-only PLL')
 
 source = Path(__file__).with_name('meson_t7_handoff.c').read_text()
+# The handoff must not configure legacy VENC interrupts or the global VIU mux.
+assert len(re.findall(r'\bwritel\(', source)) == 1
+assert 'display->osd + OSD_REG(VIU_OSD1_BLK1_CFG_W4)' in source
 register_source = Path(__file__).with_name('meson_registers.h').read_text()
 registers = '\n'.join(line for line in register_source.splitlines()
                       if line.startswith('#define ') and not line.endswith('\\'))

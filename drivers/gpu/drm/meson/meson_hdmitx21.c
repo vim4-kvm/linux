@@ -951,10 +951,8 @@ meson_hdmitx21_boot_mode_valid(struct drm_bridge *bridge,
 static enum drm_connector_status
 meson_hdmitx21_boot_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 {
-	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
-
-	return meson_hdmitx21_boot_read(tx->boot_top + TOP_STAT0, 32) & TOP_STAT0_HPD ?
-		connector_status_connected : connector_status_disconnected;
+	/* Fixed firmware sink. Real T7 HPD is GPIOW15, not TOP_STAT0 bit 0. */
+	return connector_status_connected;
 }
 
 static int meson_hdmitx21_boot_get_modes(struct drm_bridge *bridge,
@@ -984,7 +982,7 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct meson_hdmitx21 *tx;
 	struct resource *top, *cor;
-	u32 status, active, tmds;
+	u32 status, active, tpi;
 
 	top = platform_get_resource_byname(pdev, IORESOURCE_MEM, "top");
 	cor = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cor");
@@ -1006,11 +1004,11 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 		return PTR_ERR(tx->pclk);
 	status = meson_hdmitx21_boot_read(tx->boot_top + TOP_STAT0, 32);
 	active = meson_hdmitx21_boot_read(tx->boot_top + TOP_HV_ACTIVE, 32);
-	tmds = meson_hdmitx21_boot_read(tx->boot_cor + TMDS_CTRL, 8);
-	dev_info(dev, "boot TX HPD=%#x active=%#x TMDS=%#x (SMC read-only)\n",
-		 status, active, tmds);
-	if (!(status & TOP_STAT0_HPD) || active != (1080 << 16 | 1920))
-		return dev_err_probe(dev, -ENODEV, "TX boot mode is not connected 1080p\n");
+	tpi = meson_hdmitx21_boot_read(tx->boot_cor + TPI_SC, 8);
+	dev_info(dev, "boot TX TOP_STAT0=%#x active=%#x TPI_SC=%#x (SMC read-only, fixed sink)\n",
+		 status, active, tpi);
+	if (active != (1080 << 16 | 1920))
+		return dev_err_probe(dev, -ENODEV, "TX boot active area is not 1080p\n");
 	tx->bridge.of_node = dev->of_node;
 	tx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_MODES;
 	tx->bridge.type = DRM_MODE_CONNECTOR_HDMIA;

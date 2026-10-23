@@ -8,7 +8,7 @@
 	display@ff006840 {
 		compatible = "amlogic,t7-display-handoff";
 		reg = <0x0 0xff006840 0x0 0x80>,
-		      <0x0 0xff006db8 0x0 0x108>;
+		      <0x0 0xff008db8 0x0 0x108>;
 		reg-names = "osd1", "venc";
 		memory-region = <&{/reserved-memory/framebuffer@3f800000}>;
 		interrupts = <GIC_SPI 197 IRQ_TYPE_EDGE_RISING>;
