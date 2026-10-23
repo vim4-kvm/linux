@@ -183,7 +183,8 @@ static int irq_thread(void *data)
 	int irq_status, ret;
 
 	while (!kthread_should_stop()) {
-		if (down_interruptible(&dev->irq_sem))
+		/* kthread_stop() alone cannot release a semaphore waiter. */
+		if (down_timeout(&dev->irq_sem, msecs_to_jiffies(100)))
 			continue;
 
 		if (kthread_should_stop())
