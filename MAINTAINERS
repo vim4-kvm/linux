@@ -1455,6 +1455,7 @@ F:	sound/soc/meson/test_t7_frddr.py
 F:	sound/soc/meson/test_t7_loopback.py
 F:	sound/soc/meson/test_t7_spdifin.py
 F:	sound/soc/meson/test_t7_spdifout.py
+F:	sound/soc/meson/test_t7_tdm_stream.py
 F:	sound/soc/meson/test_t7_tdmin.py
 F:	sound/soc/meson/test_t7_tdmout.py
 F:	sound/soc/meson/test_t7_toddr.py

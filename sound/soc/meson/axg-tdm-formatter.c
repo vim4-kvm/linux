@@ -397,10 +397,16 @@ int axg_tdm_stream_start(struct axg_tdm_stream *ts)
 		ret = axg_tdm_formatter_enable(formatter);
 		if (ret) {
 			pr_err("failed to start tdm stream\n");
-			return ret;
+			goto disable;
 		}
 	}
 
+	return ret;
+
+disable:
+	ts->ready = false;
+	list_for_each_entry(formatter, &ts->formatter_list, list)
+		axg_tdm_formatter_disable(formatter);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(axg_tdm_stream_start);
