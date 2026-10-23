@@ -27,6 +27,16 @@ properties:
       do not reset or program TX, PHY, DDC, audio, or clocks. Only valid with
       the dedicated T7 display-handoff consumer, not normal meson modesetting.
 
+  amlogic,boot-monitor:
+    type: boolean
+    description: |
+      Extend boot-handoff with EDID reads and HPD polling. DDC writes are
+      allowed, but video, PHY, PLL and audio programming remain forbidden.
+
+  hpd-gpios:
+    maxItems: 1
+    description: GPIOW15, active high, for the physical HDMI sink presence.
+
   reg:
     items:
       - description: TOP registers
@@ -92,6 +102,22 @@ required:
 
 additionalProperties: false
 
+allOf:
+  - if:
+      required:
+        - amlogic,boot-monitor
+    then:
+      required:
+        - amlogic,boot-handoff
+        - hpd-gpios
+  - if:
+      not:
+        required:
+          - amlogic,boot-handoff
+    then:
+      required:
+        - hpd-gpios
+
 examples:
   - |
     #include <dt-bindings/interrupt-controller/arm-gic.h>
@@ -107,6 +133,7 @@ examples:
         reset-names = "hdmitx", "phy";
         power-domains = <&pwrc 14>;
         #sound-dai-cells = <0>;
+        hpd-gpios = <&gpio 55 0>;
 
         ports {
             #address-cells = <1>;
