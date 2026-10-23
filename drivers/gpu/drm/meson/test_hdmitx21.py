@@ -89,6 +89,9 @@ struct meson_hdmitx21 {
 #define msecs_to_jiffies(x) (x)
 static int queued, cancelled, notifications, disconnected;
 static enum drm_connector_status notified;
+static int cec_invalidations;
+static void drm_connector_cec_phys_addr_invalidate(struct drm_connector *connector)
+{ cec_invalidations++; }
 static int gpiod_get_value_cansleep(struct gpio_desc *gpio) { return gpio->level; }
 static void meson_hdmitx21_audio_disconnect(struct meson_hdmitx21 *tx) { disconnected++; }
 static void schedule_delayed_work(struct delayed_work *w, int delay) { queued++; }
@@ -100,9 +103,17 @@ hpd += functions('static enum drm_connector_status\nmeson_hdmitx21_bridge_detect
                  'static const struct drm_edid *')
 hpd += functions('static void meson_hdmitx21_hpd_work',
                  'static void meson_hdmitx21_monitor_cleanup')
+hpd += functions('static void meson_hdmitx21_cec_hpd_notify',
+                 '/* GPIOW15 is the T7 HPD level.')
 hpd += r'''
 int main(void)
 {
+    struct drm_connector connector = {0};
+    meson_hdmitx21_cec_hpd_notify(NULL, &connector, connector_status_connected);
+    meson_hdmitx21_cec_hpd_notify(NULL, &connector, connector_status_unknown);
+    assert(cec_invalidations == 0);
+    meson_hdmitx21_cec_hpd_notify(NULL, &connector, connector_status_disconnected);
+    assert(cec_invalidations == 1);
     struct gpio_desc gpio = {0};
     struct meson_hdmitx21 tx = {.hpd = &gpio};
     meson_hdmitx21_monitor_hpd_enable(&tx.bridge);

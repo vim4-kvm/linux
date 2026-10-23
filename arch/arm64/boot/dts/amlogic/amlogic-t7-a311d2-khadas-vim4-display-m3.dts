@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Experimental display extension; the deployed default remains unchanged. */
+#include "amlogic-t7-a311d2-khadas-vim4-display-m2.dts"
+
+/ {
+	cec@fe044000 {
+		compatible = "amlogic,t7-ao-cec";
+		reg = <0x0 0xfe044000 0x0 0x14>, <0x0 0xfe044040 0x0 0x4>;
+		reg-names = "core", "cecb-route";
+		clocks = <&clkc_periphs CLKID_CECA>, <&clkc_periphs CLKID_SYS_CEC>;
+		clock-names = "core", "pclk";
+		interrupts = <GIC_SPI 179 IRQ_TYPE_EDGE_RISING>;
+		hdmi-phandle = <&hdmi_tx>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cec_a_pins>;
+	};
+};
+
+&periphs_pinctrl {
+	cec_a_pins: cec-a {
+		mux {
+			groups = "cec_a";
+			function = "cec_a";
+			bias-disable;
+		};
+	};
+};

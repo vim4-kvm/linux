@@ -1043,6 +1043,14 @@ static void meson_hdmitx21_bridge_atomic_disable(struct drm_bridge *bridge,
 	mutex_unlock(&tx->packet_lock);
 }
 
+static void meson_hdmitx21_cec_hpd_notify(struct drm_bridge *bridge,
+					  struct drm_connector *connector,
+					  enum drm_connector_status status)
+{
+	if (status == connector_status_disconnected)
+		drm_connector_cec_phys_addr_invalidate(connector);
+}
+
 /* GPIOW15 is the T7 HPD level. TOP_STAT0 bit 0 is not a cable indication.
  * Polling keeps the firmware pin/IRQ routing out of the handoff experiment.
  */
@@ -1103,6 +1111,7 @@ static const struct drm_bridge_funcs meson_hdmitx21_bridge_funcs = {
 	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.hpd_enable = meson_hdmitx21_monitor_hpd_enable,
 	.hpd_disable = meson_hdmitx21_monitor_hpd_disable,
+	.hpd_notify = meson_hdmitx21_cec_hpd_notify,
 	.hdmi_audio_prepare = meson_hdmitx21_audio_prepare,
 	.hdmi_audio_shutdown = meson_hdmitx21_audio_shutdown,
 	.hdmi_audio_mute_stream = meson_hdmitx21_audio_mute_stream,
@@ -1283,6 +1292,10 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 			return ret;
 		tx->bridge.ddc = &tx->ddc;
 		tx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID | DRM_BRIDGE_OP_HPD;
+		if (enc2 && IS_ENABLED(CONFIG_CEC_NOTIFIER)) {
+			tx->bridge.ops |= DRM_BRIDGE_OP_HDMI_CEC_NOTIFIER;
+			tx->bridge.hdmi_cec_dev = dev;
+		}
 		if (of_property_present(dev->of_node, "#sound-dai-cells")) {
 			tx->bridge.ops |= DRM_BRIDGE_OP_HDMI_AUDIO;
 			tx->bridge.hdmi_audio_dev = dev;
