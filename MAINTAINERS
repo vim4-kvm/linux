@@ -1431,6 +1431,11 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/spi/amlogic,a4-spisg.yaml
 F:	drivers/spi/spi-amlogic-spisg.c
 
+AMLOGIC T7 AUDIO OFFLINE TESTS
+M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+S:	Maintained
+F:	sound/soc/meson/test_t7_*.py
+
 AMLOGIC T7 BOOT DISPLAY HANDOFF EXPERIMENT
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Odd Fixes
