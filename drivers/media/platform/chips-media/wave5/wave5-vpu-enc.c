@@ -282,6 +282,10 @@ static void wave5_vpu_enc_finish_encode(struct vpu_instance *inst)
 
 	if (wave5_vpu_isolated(inst->dev))
 		return;
+	/* STREAMOFF drains reports itself after M2M cancellation has finished. */
+	if (inst->dev->legacy_firmware &&
+	    v4l2_m2m_get_curr_priv(inst->v4l2_m2m_dev) != inst)
+		return;
 	ret = wave5_vpu_enc_get_output_info(inst, &enc_output_info);
 	if (ret) {
 		dev_dbg(inst->dev->dev,
