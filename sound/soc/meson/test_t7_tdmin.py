@@ -9,7 +9,7 @@ import tempfile
 directory = Path(__file__).parent
 source = (directory / 'axg-tdmin.c').read_text()
 defines = '\n'.join(re.findall(r'^#define.*$', source, re.M))
-start = source.index('static int axg_tdmin_prepare')
+start = source.index('static void axg_tdmin_enable')
 prepare = source[start:source.index('static const struct snd_soc_dapm_widget', start)]
 source = (directory / 'axg-tdm-formatter.c').read_text()
 start = source.index('int axg_tdm_formatter_set_channel_masks')
@@ -50,6 +50,10 @@ static bool axg_tdm_lrclk_invert(unsigned int fmt) { return fmt == SND_SOC_DAIFM
 checks = r'''
 int main(void) {
     struct regmap map = {0};
+    t7_tdmin_enable(&map);
+    assert((map.regs[0] & (BIT(31) | BIT(26))) == (BIT(31) | BIT(26)));
+    axg_tdmin_disable(&map);
+    assert(!(map.regs[0] & BIT(31)) && (map.regs[0] & BIT(26)));
     struct axg_tdm_iface iface = {.fmt = SND_SOC_DAIFMT_I2S, .slots = 2, .slot_width = 32};
     u32 mask[4] = {3, 3, 3, 3};
     struct axg_tdm_stream stream = {.iface = &iface, .channels = 6, .mask = mask};

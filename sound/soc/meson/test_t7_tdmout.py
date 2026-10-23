@@ -82,6 +82,16 @@ static void clk_disable_unprepare(int *clock) { --*clock; }
 '''
 checks = r'''
 int main(void) {
+	struct regmap mute_map = {0};
+	t7_tdmout_enable(&mute_map);
+	assert(mute_map.regs[0] & BIT(31));
+	t7_tdmout_disable(&mute_map);
+	assert(!(mute_map.regs[0] & BIT(31)));
+	for (unsigned int i = 0; i < 4; i++)
+		assert(mute_map.regs[(TDMOUT_MUTE0 / 4) + i] == ~0U);
+	t7_tdmout_enable(&mute_map);
+	for (unsigned int i = 0; i < 4; i++)
+		assert(!mute_map.regs[(TDMOUT_MUTE0 / 4) + i]);
     u32 core[16] = {0}, ext[14] = {0}, value;
     struct axg_tdm_registers banks = {core, ext};
     assert(!axg_tdm_reg_write(&banks, 0x3c, 0x1234));

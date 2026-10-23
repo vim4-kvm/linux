@@ -108,6 +108,26 @@ static void axg_tdmout_disable(struct regmap *map)
 	regmap_update_bits(map, TDMOUT_CTRL0, TDMOUT_CTRL0_ENABLE, 0);
 }
 
+static void t7_tdmout_enable(struct regmap *map)
+{
+	unsigned int i;
+
+	axg_tdmout_enable(map);
+	for (i = 0; i < AXG_TDM_NUM_LANES; i++)
+		regmap_write(map, TDMOUT_MUTE0 + i * 4, 0);
+}
+
+static void t7_tdmout_disable(struct regmap *map)
+{
+	unsigned int i;
+
+	/* T7 requires silence before the output and playback FIFO stop. */
+	regmap_write(map, TDMOUT_MUTE_VAL, 0);
+	for (i = 0; i < AXG_TDM_NUM_LANES; i++)
+		regmap_write(map, TDMOUT_MUTE0 + i * 4, ~0U);
+	axg_tdmout_disable(map);
+}
+
 static int axg_tdmout_prepare(struct regmap *map,
 			      const struct axg_tdm_formatter_hw *quirks,
 			      struct axg_tdm_stream *ts)
@@ -400,10 +420,17 @@ static const struct snd_soc_component_driver t7_tdmout_component_drv = {
 	.num_dapm_routes = ARRAY_SIZE(t7_tdmout_routes),
 };
 
+static const struct axg_tdm_formatter_ops t7_tdmout_ops = {
+	.get_stream = axg_tdmout_get_tdm_stream,
+	.prepare = axg_tdmout_prepare,
+	.enable = t7_tdmout_enable,
+	.disable = t7_tdmout_disable,
+};
+
 static const struct axg_tdm_formatter_driver t7_tdmout_drv = {
 	.component_drv = &t7_tdmout_component_drv,
 	.regmap_cfg = &t7_tdmout_regmap_cfg,
-	.ops = &axg_tdmout_ops,
+	.ops = &t7_tdmout_ops,
 	.quirks = &(const struct axg_tdm_formatter_hw) {
 		.skew_offset = 2,
 		.extended = true,

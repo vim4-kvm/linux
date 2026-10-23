@@ -110,6 +110,12 @@ static void axg_tdmin_disable(struct regmap *map)
 	regmap_update_bits(map, TDMIN_CTRL, TDMIN_CTRL_ENABLE, 0);
 }
 
+static void t7_tdmin_enable(struct regmap *map)
+{
+	regmap_update_bits(map, TDMIN_CTRL, BIT(26), BIT(26));
+	axg_tdmin_enable(map);
+}
+
 static int axg_tdmin_prepare(struct regmap *map,
 			     const struct axg_tdm_formatter_hw *quirks,
 			     struct axg_tdm_stream *ts)
@@ -241,10 +247,17 @@ static const struct axg_tdm_formatter_driver axg_tdmin_drv = {
 	},
 };
 
+static const struct axg_tdm_formatter_ops t7_tdmin_ops = {
+	.get_stream = axg_tdmin_get_tdm_stream,
+	.prepare = axg_tdmin_prepare,
+	.enable = t7_tdmin_enable,
+	.disable = axg_tdmin_disable,
+};
+
 static const struct axg_tdm_formatter_driver t7_tdmin_drv = {
 	.component_drv = &axg_tdmin_component_drv,
 	.regmap_cfg = &axg_tdmin_regmap_cfg,
-	.ops = &axg_tdmin_ops,
+	.ops = &t7_tdmin_ops,
 	.quirks = &(const struct axg_tdm_formatter_hw) {
 		.skew_offset = 3,
 		.slot_num_mask = T7_TDMIN_CTRL_SLOTNUM_MASK,
