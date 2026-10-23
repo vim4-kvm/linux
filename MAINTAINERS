@@ -1451,6 +1451,7 @@ F:	drivers/gpu/drm/meson/test_t7_producer_layouts.py
 F:	drivers/gpu/drm/meson/test_t7_scanout.py
 F:	drivers/gpu/drm/meson/test_t7_sram.py
 F:	drivers/gpu/drm/meson/test_t7_video.py
+F:	drivers/gpu/drm/meson/test_t7_video_phase.py
 
 AMLOGIC VDEC DRIVER
 M:	Zhentao Guo <zhentao.guo@amlogic.com>

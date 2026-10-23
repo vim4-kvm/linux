@@ -20,6 +20,15 @@ struct meson_t7_video_mif {
 	u32 gen, gen2, gen3;
 };
 
+struct meson_t7_video_phase {
+	u32 hstep, vstep;
+	u32 vphase, vreceive_repeat;
+};
+
+/* Progressive PPS math only; no prescaler, clipping, or super-resolution. */
+int meson_t7_video_phase_prepare(u32 width, u32 height, u32 output_width,
+				 u32 output_height, struct meson_t7_video_phase *phase);
+
 /*
  * Calculate the linear NV12/NV21 MIF image without enabling or touching DMA.
  * gen has fetch disabled. The caller must own and drain the complete video

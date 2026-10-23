@@ -3,9 +3,34 @@
 #include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/math64.h>
 #include <drm/drm_fourcc.h>
 
 #include "meson_t7_video.h"
+
+int meson_t7_video_phase_prepare(u32 width, u32 height, u32 output_width,
+				 u32 output_height, struct meson_t7_video_phase *phase)
+{
+	struct meson_t7_video_phase next = {};
+	u32 ratio, offset;
+
+	if (!phase || !width || !height || !output_width || !output_height ||
+	    width > 3840 || output_width > 3840 || height > 2160 || output_height > 2160 ||
+	    width > output_width * 4 || output_width > width * 4 ||
+	    height > output_height * 4 || output_height > height * 4)
+		return -EINVAL;
+	/* The vendor truncates the 18-bit ratio before expanding to 24 bits. */
+	next.hstep = div_u64((u64)width << 18, output_width) << 6;
+	ratio = div_u64((u64)height << 18, output_height);
+	next.vstep = ratio << 6;
+	/* f2v_get_vertical_phase(): progressive downscaling shifts output by 1/4. */
+	offset = ratio > BIT(18) ? ratio >> 10 : 0;
+	next.vphase = ((offset & 0x3ff) >> 2) << 8;
+	/* skip_tab[0/1]: receive four samples, repeat one/zero initial samples. */
+	next.vreceive_repeat = offset >= 0x400 ? 0x04 : 0x24;
+	*phase = next;
+	return 0;
+}
 
 int meson_t7_video_mif_prepare(const struct meson_t7_video_frame *frame,
 			       unsigned int index, struct meson_t7_video_mif *mif)

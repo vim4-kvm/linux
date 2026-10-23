@@ -61,6 +61,7 @@ typedef uint64_t u64;
 #define U32_MAX UINT32_MAX
 #define BIT(n) (1U << (n))
 #define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))
+#define div_u64(a,b) ((u64)(a)/(b))
 #define DRM_FORMAT_NV12 1
 #define DRM_FORMAT_NV21 2
 #define pr_err(...) assert(0)
