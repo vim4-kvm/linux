@@ -17616,6 +17616,7 @@ S:	Supported
 W:	http://linux-meson.com/
 T:	git git://linuxtv.org/media.git
 F:	Documentation/devicetree/bindings/media/cec/amlogic,meson-gx-ao-cec.yaml
+F:	Documentation/devicetree/bindings/media/cec/amlogic,t7-ao-cec.yaml
 F:	drivers/media/cec/platform/meson/ao-cec-g12a.c
 F:	drivers/media/cec/platform/meson/ao-cec.c
 
