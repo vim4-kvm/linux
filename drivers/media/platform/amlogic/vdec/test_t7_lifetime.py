@@ -49,6 +49,46 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_snapshot_guard_stops_internal_access_but_allows_abort(self):
+        functions = "\n".join(function(HERE / "aml_vdec_drv.c", name) for name in (
+            "register_step_store", "mdec_test_store"))
+        run_c(COMMON + """
+#include <stdlib.h>
+#include <sys/types.h>
+#define READ_ONCE(x) (x)
+struct device {};
+struct device_attribute {};
+struct aml_vdec_hw { unsigned int probe_step; };
+struct aml_vdec_dev { void *dec_ctx; int dev_mutex; struct aml_vdec_hw *dec_hw; };
+static struct aml_vdec_hw hw;
+static struct aml_vdec_dev vdec = { .dec_hw = &hw };
+static bool t7_snapshot_only = true, allow_t7_power = true;
+static unsigned int accesses, last_step;
+static void *dev_get_drvdata(struct device *dev) { return &vdec; }
+static int kstrtouint(const char *s, int base, unsigned int *v)
+{ *v = strtoul(s, NULL, base); return 0; }
+static int kstrtobool(const char *s, bool *v) { *v = true; return 0; }
+static void mutex_lock(int *p) {}
+static void mutex_unlock(int *p) {}
+static bool pm_runtime_suspended(struct device *dev) { return true; }
+static int aml_vdec_t7_register_step(struct aml_vdec_hw *p, unsigned int step)
+{ accesses++; last_step = step; return 0; }
+static int aml_vdec_t7_mdec_test(struct aml_vdec_hw *p)
+{ assert(!"snapshot called the full MDEC sequence"); return 0; }
+""" + functions + """
+int main(void)
+{
+    assert(register_step_store(NULL, NULL, "8", 1) == 1 && accesses == 1);
+    assert(register_step_store(NULL, NULL, "9", 1) == -EPERM && accesses == 1);
+    assert(register_step_store(NULL, NULL, "13", 2) == -EPERM && accesses == 1);
+    assert(mdec_test_store(NULL, NULL, "1", 1) == -EPERM && accesses == 1);
+    allow_t7_power = false;
+    assert(register_step_store(NULL, NULL, "0", 1) == 1);
+    assert(accesses == 2 && last_step == 0);
+    return 0;
+}
+""")
+
     def test_apb_clocks_are_held_before_dos_and_unwound_on_failure(self):
         functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
             "t7_clocks_on", "t7_clocks_off"))
@@ -355,7 +395,7 @@ struct aml_vdec_dev { struct hw *dec_hw; struct pdata *pvdec_data; };
 static struct hw hw;
 static struct pdata pdata = { .has_dbus_ctrl = true };
 static struct aml_vdec_dev vdec = { .dec_hw = &hw, .pvdec_data = &pdata };
-static bool allow_t7_power;
+static bool allow_t7_power, t7_snapshot_only;
 static int power_calls;
 static void *dev_get_drvdata(struct device *dev) { return &vdec; }
 static int vdec_enable(struct hw *hw) { power_calls++; return 0; }
@@ -369,6 +409,9 @@ int main(void)
     hw.power_test_passed = true;
     assert(aml_vdec_runtime_resume(&dev) == -EPERM && !power_calls);
     hw.mdec_test_passed = true;
+    t7_snapshot_only = true;
+    assert(aml_vdec_runtime_resume(&dev) == -EPERM && !power_calls);
+    t7_snapshot_only = false;
     assert(!aml_vdec_runtime_resume(&dev) && power_calls == 1);
     allow_t7_power = false;
     assert(aml_vdec_runtime_resume(&dev) == -EPERM && power_calls == 1);
