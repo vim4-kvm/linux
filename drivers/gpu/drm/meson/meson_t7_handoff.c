@@ -49,7 +49,7 @@ struct meson_t7_handoff {
 	wait_queue_head_t wait;
 	u32 pending_addr;
 	u32 requested, written, applied;
-	u32 boot_interrupts;
+	u32 vsync_count;
 	bool faulted;
 	/* Keep DMA memory alive even if the display interrupt stops. */
 	struct drm_framebuffer *scanout;
@@ -66,9 +66,9 @@ static irqreturn_t meson_t7_handoff_irq(int irq, void *data)
 	struct meson_t7_handoff *display = data;
 	unsigned long flags;
 
-	/* VENC_INTFLAG is read-to-clear, as in the normal meson handler. */
-	readl(display->venc + VENC_REG(VENC_INTFLAG));
+	/* T7 VIU1 uses an edge IRQ; the vendor handler has no VENC acknowledgment. */
 	spin_lock_irqsave(&display->lock, flags);
+	WRITE_ONCE(display->vsync_count, display->vsync_count + 1);
 	WRITE_ONCE(display->applied, display->written);
 	if (display->written != display->requested) {
 		writel(display->pending_addr >> 4,
@@ -286,13 +286,6 @@ static void meson_t7_handoff_domain_put(void *data)
 	dev_pm_domain_detach(domain, true);
 }
 
-static void meson_t7_handoff_restore_irq(void *data)
-{
-	struct meson_t7_handoff *display = data;
-
-	writel(display->boot_interrupts, display->venc + VENC_REG(VENC_INTCTRL));
-}
-
 static void __iomem *meson_t7_handoff_map(struct platform_device *pdev,
 					  const char *name, resource_size_t start,
 					  resource_size_t size)
@@ -386,14 +379,15 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	display->osd = meson_t7_handoff_map(pdev, "osd1", 0xff006840, 0x80);
 	if (IS_ERR(display->osd))
 		return PTR_ERR(display->osd);
-	display->venc = meson_t7_handoff_map(pdev, "venc", 0xff006db8, 0x108);
+	/* The matching firmware selects ENC2: vendor VENC words have +0x800. */
+	display->venc = meson_t7_handoff_map(pdev, "venc", 0xff008db8, 0x108);
 	if (IS_ERR(display->venc))
 		return PTR_ERR(display->venc);
 	ctrl = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
 	format = readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W0));
 	htotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_PXCNT));
 	vtotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_LNCNT));
-	dev_info(dev, "boot OSD ctrl=%#x format=%#x VENC totals=%u/%u\n",
+	dev_info(dev, "boot OSD ctrl=%#x format=%#x ENC2 totals=%u/%u\n",
 		 ctrl, format, htotal, vtotal);
 	/* RGB888 little endian, linear, 1920x1080 with the matching boot frame. */
 	if ((ctrl & 5) != 5 || (format & 0xffff) != 0x8700 ||
@@ -456,13 +450,10 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	drm_mode_config_reset(drm);
-	/* Preserve all other VENC interrupt users; VDIN has a separate IRQ. */
-	display->boot_interrupts = readl(display->venc + VENC_REG(VENC_INTCTRL));
-	ret = devm_add_action_or_reset(dev, meson_t7_handoff_restore_irq, display);
-	if (ret)
-		return ret;
-	writel(display->boot_interrupts | VENC_INTCTRL_ENCP_LNRST_INT_EN,
-	       display->venc + VENC_REG(VENC_INTCTRL));
+	/* Do not enable legacy ENC0 interrupts or rewrite the firmware VIU mux. */
+	if (!wait_event_timeout(display->wait, READ_ONCE(display->vsync_count) >= 2,
+				msecs_to_jiffies(100)))
+		return dev_err_probe(dev, -ETIMEDOUT, "No firmware VIU1 vsync IRQ\n");
 	return drm_dev_register(drm, 0);
 }
 
