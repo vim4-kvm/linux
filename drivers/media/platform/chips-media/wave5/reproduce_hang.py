@@ -75,6 +75,34 @@ def video_owners(device):
     return owners
 
 
+def validate_stream(stream, width, height, frames):
+    actual = (stream.get('width'), stream.get('height'), stream.get('nb_read_frames'))
+    expected = (width, height, str(frames))
+    if actual != expected:
+        raise ValueError(f'encoded geometry/frame count {actual}, expected {expected}')
+
+
+def probe_stream(elementary, output, width, height, frames):
+    # V4L2 plugins may ignore a failed crop and encode the padded RAW size.
+    # A clean process exit alone must not be reported as the requested mode.
+    with (output / 'stream.json').open('w') as data, (output / 'probe.log').open('w') as log:
+        process = subprocess.Popen(
+            ['ffprobe', '-v', 'error', '-count_frames', '-select_streams', 'v:0',
+             '-show_entries', 'stream=codec_name,width,height,nb_read_frames',
+             '-of', 'json', str(elementary)], stdout=data, stderr=log,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+    status = wait_until_exit(process, 10)
+    if status is None:
+        signal_group(process, signal.SIGKILL)
+        wait_until_exit(process, 1)
+        raise ValueError(f'ffprobe timed out; pid={process.pid}')
+    if status:
+        raise ValueError(f'ffprobe failed: {status}')
+    stream = json.loads((output / 'stream.json').read_text())['streams'][0]
+    validate_stream(stream, width, height, frames)
+    return stream
+
+
 def main():
     if len(sys.argv) == 4 and sys.argv[1] == '--snapshot':
         snapshot(int(sys.argv[2]), Path(sys.argv[3]))
@@ -157,6 +185,12 @@ def main():
         tasks = sorted(p.name for p in Path(f'/proc/{process.pid}/task').glob('*'))
         report.update(exit_code=process.poll(), timed_out=timed_out, remaining_tasks=tasks,
                       ended=time.time())
+        if process.poll() == 0 and not tasks and args.terminate_after is None:
+            try:
+                report['stream'] = probe_stream(elementary, args.output, args.width,
+                                                args.height, args.frames)
+            except (OSError, ValueError, KeyError, IndexError) as error:
+                report['validation_error'] = str(error)
         (args.output / 'run.json').write_text(json.dumps(report, indent=2) + '\n')
         print(json.dumps(report), flush=True)
     if (report['exit_code'] is None or tasks or
@@ -166,6 +200,8 @@ def main():
         return 125
     if timed_out:
         return 124
+    if 'validation_error' in report:
+        return 1
     if any(item['status'] != 0 for item in report.get('snapshots', [])):
         return 1
     if args.terminate_after is not None:

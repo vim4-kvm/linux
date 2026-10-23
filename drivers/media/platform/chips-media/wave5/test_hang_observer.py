@@ -15,6 +15,14 @@ spec.loader.exec_module(observer)
 
 
 class ObserverTest(unittest.TestCase):
+    def test_padded_stream_does_not_pass_as_requested_geometry(self):
+        stream = {'width': 1376, 'height': 768, 'nb_read_frames': '180'}
+        with self.assertRaisesRegex(ValueError, 'encoded geometry'):
+            observer.validate_stream(stream, 1366, 768, 180)
+        observer.validate_stream(stream, 1376, 768, 180)
+        with self.assertRaises(ValueError):
+            observer.validate_stream(stream, 1376, 768, 181)
+
     def test_unkillable_child_does_not_extend_deadline(self):
         process = Mock()
         process.poll.return_value = None
