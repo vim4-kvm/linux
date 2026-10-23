@@ -170,7 +170,11 @@ int main(void) {
         assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-ENOLINK);
         value=1;memcpy(top+T7_RX_TOP_MISC_STAT0,&value,4);
         value=4096;memcpy(top+T7_RX_TOP_METER_CABLE_STAT,&value,4);
-        assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-ENOLINK);
+        struct v4l2_dv_timings previous=timing;
+        struct v4l2_fract previous_interval=interval;
+        assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-EAGAIN);
+        assert(!memcmp(&timing,&previous,sizeof(timing)));
+        assert(!memcmp(&interval,&previous_interval,sizeof(interval)));
         value=T7_RX_METER_VALID|4096;memcpy(top+T7_RX_TOP_METER_CABLE_STAT,&value,4);
         for (int sign=-1;sign<=1;sign+=2) {
             value=T7_RX_METER_VALID|((uhd?16384:4096)+sign*98);

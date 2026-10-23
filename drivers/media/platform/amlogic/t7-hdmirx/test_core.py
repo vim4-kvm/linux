@@ -231,6 +231,30 @@ int main(void)
     rx.link=&lease;rx.lease_yuv=true;rx.lease_hdr=true;rx.lease_420=true;
     assert(t7_hdmirx_video_status(&rx)==-ENOLINK); /* HDR -> SDR, same geometry */
     rx.lease_hdr=false;assert(!t7_hdmirx_video_status(&rx));
+    /* The recovered link stays present while a TOP measurement is unavailable.
+     * Capture must retry a frame, while genuine loss must still stop the queue.
+     */
+    const char *reason;
+    lease.ready=true;
+    writel(16384,top+T7_RX_TOP_METER_HDMI_STAT);
+    assert(t7_hdmirx_check_capture(&dev,&reason)==-EAGAIN);
+    assert(!strcmp(reason,"tmds-measurement"));
+    writel(0,top+T7_RX_TOP_MISC_STAT0);
+    assert(t7_hdmirx_check_capture(&dev,&reason)==-ENOLINK);
+    writel(1,top+T7_RX_TOP_MISC_STAT0);
+    writel(0,top+T7_RX_TOP_TMDS_ALIGN_STAT);
+    assert(t7_hdmirx_check_capture(&dev,&reason)==-ENOLINK);
+    writel(1,top+T7_RX_TOP_TMDS_ALIGN_STAT);
+    writel(BIT(1),top+T7_RX_TOP_HPD_PWR5V);
+    assert(t7_hdmirx_check_capture(&dev,&reason)==-ENOLINK);
+    writel(BIT(21)|BIT(1),top+T7_RX_TOP_HPD_PWR5V);
+    writel(T7_RX_METER_VALID|12000,top+T7_RX_TOP_METER_HDMI_STAT);
+    assert(t7_hdmirx_check_capture(&dev,&reason)==-ENOLINK);
+    writel(T7_RX_METER_VALID|16384,top+T7_RX_TOP_METER_HDMI_STAT);
+    writel(4096,top+T7_RX_TOP_METER_CABLE_STAT);
+    assert(t7_hdmirx_check_capture(&dev,&reason)==-EAGAIN);
+    writel(T7_RX_METER_VALID|4096,top+T7_RX_TOP_METER_CABLE_STAT);
+    assert(!t7_hdmirx_check_capture(&dev,&reason));
     rx.lease_yuv=false;assert(t7_hdmirx_video_status(&rx)==-ENOLINK);
     unsigned char sdr444[17]={0x82,2,13,0x14,0x52,0xa8,0,0x61};
     memcpy(core+0x1140,sdr444,sizeof(sdr444));core[T7_RX_COR_COLOR_DEPTH]=0;

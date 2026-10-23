@@ -1038,12 +1038,12 @@ static int t7_hdmirx_video_error(const char **reason, const char *value, int err
 	return error;
 }
 
-static bool t7_hdmirx_tmds_valid(struct t7_hdmirx *rx)
+static int t7_hdmirx_tmds_status(struct t7_hdmirx *rx)
 {
 	unsigned long reference = clk_get_rate(rx->clocks[T7_RX_METER].clk);
 	u32 sqo, cable_status, tmds_status;
 	u64 cable, tmds, delta;
-	bool valid;
+	int ret;
 
 	/* Vendor T7 aml_get_tmds_valid_t7 uses SQO, matching recovered clocks
 	 * and alignment (checked by the caller), not the APLL lock bit. Keep
@@ -1052,16 +1052,23 @@ static bool t7_hdmirx_tmds_valid(struct t7_hdmirx *rx)
 	sqo = readl(rx->top + T7_RX_TOP_MISC_STAT0) & BIT(0);
 	cable_status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
 	tmds_status = readl(rx->top + T7_RX_TOP_METER_HDMI_STAT);
+	/* A TOP meter can briefly clear VALID while retaining the matching count.
+	 * That is an unavailable measurement, not proof of a lost recovered clock.
+	 * Retry the frame; the link worker bounds persistent measurement failures.
+	 */
+	if (sqo && (!(cable_status & T7_RX_METER_VALID) ||
+		    !(tmds_status & T7_RX_METER_VALID)))
+		return -EAGAIN;
 	cable = t7_hdmirx_meter_hz(cable_status, reference);
 	tmds = t7_hdmirx_meter_hz(tmds_status, reference);
 	if (rx->uhd60)
 		cable *= 4;
 	delta = cable > tmds ? cable - tmds : tmds - cable;
-	valid = sqo && cable && tmds && delta <= 2000000;
-	if (!valid)
+	ret = sqo && cable && tmds && delta <= 2000000 ? 0 : -ENOLINK;
+	if (ret)
 		pr_info_ratelimited("t7-hdmirx TMDS admission: sqo=%u cable=%#x tmds=%#x reference=%lu ratio=%u\n",
 				    sqo, cable_status, tmds_status, reference, rx->uhd60 ? 4 : 1);
-	return valid;
+	return ret;
 }
 
 static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reason)
@@ -1077,11 +1084,15 @@ static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reas
 	if (rx->dynamic_modes &&
 	    (!!(readb(rx->cor + T7_RX_COR_TMDS_CONFIG) & BIT(1)) != READ_ONCE(rx->uhd60)))
 		return t7_hdmirx_video_error(reason, "clock-ratio", -ENOLINK);
-	if (rx->link && !t7_hdmirx_tmds_valid(rx))
-		return t7_hdmirx_video_error(reason, "tmds-invalid", -ENOLINK);
 	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
 	    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
 		return t7_hdmirx_video_error(reason, "5v-or-align", -ENOLINK);
+	if (rx->link) {
+		ret = t7_hdmirx_tmds_status(rx);
+		if (ret)
+			return t7_hdmirx_video_error(reason,
+				ret == -EAGAIN ? "tmds-measurement" : "tmds-invalid", ret);
+	}
 	if (readb(rx->cor + T7_RX_COR_FRAME_STATUS) & BIT(2))
 		return t7_hdmirx_video_error(reason, "interlaced", -ERANGE);
 	hdr = t7_hdmirx_hdr_input(rx);
