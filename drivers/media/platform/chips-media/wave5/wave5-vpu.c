@@ -382,7 +382,21 @@ static __maybe_unused int wave5_pm_resume(struct device *dev)
 	return ret;
 }
 
+static int wave5_prepare(struct device *dev)
+{
+	struct vpu_device *vpu = dev_get_drvdata(dev);
+
+	/* Runtime power cycling does not restore live T7 codec instances. */
+	if (vpu->legacy_firmware) {
+		dev_err_ratelimited(dev, "System sleep requires codec context restore\n");
+		return -EBUSY;
+	}
+
+	return 0;
+}
+
 static const struct dev_pm_ops wave5_pm_ops = {
+	.prepare = pm_sleep_ptr(wave5_prepare),
 	SET_RUNTIME_PM_OPS(wave5_pm_suspend, wave5_pm_resume, NULL)
 };
 
