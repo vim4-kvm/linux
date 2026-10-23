@@ -10,6 +10,8 @@ types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
                source.index('static int t7_hdmirx_validate_edid')]
 functions = source[source.index('static void t7_hdmirx_core_stop'):
                    source.index('int t7_hdmirx_query_timings')]
+functions = source[source.index('static u32 t7_hdmirx_meter_hz'):
+                   source.index('static u32 t7_hdmirx_sample_cable')] + functions
 vdin = Path(__file__).with_name('t7-vdin-test.c').read_text()
 status_api = vdin[vdin.index('static int t7_vdin_enum_input'):
                   vdin.index('static int t7_vdin_get_input')]
@@ -28,6 +30,8 @@ struct delayed_work { int unused; };
 #define WRITE_ONCE(place, value) ((place) = (value))
 typedef uint64_t u64;
 #define div_u64(a,b) ((a)/(b))
+#define FIELD_GET(mask,value) (((value)&(mask)) >> __builtin_ctz(mask))
+#define U32_MAX UINT32_MAX
 static u64 now_ns = 1000000000ULL;
 static u64 ktime_get_ns(void) { return now_ns; }
 #ifdef __clang__
@@ -220,6 +224,9 @@ int main(void)
     memcpy(core+0x1140,sdravi,sizeof(sdravi));
     assert(t7_hdmirx_sdr420_input(&rx) && !t7_hdmirx_video_status(&rx));
     struct t7_hdmirx_link lease={.users=1};
+    writel(1,top+T7_RX_TOP_MISC_STAT0);
+    writel(T7_RX_METER_VALID|4096,top+T7_RX_TOP_METER_CABLE_STAT);
+    writel(T7_RX_METER_VALID|16384,top+T7_RX_TOP_METER_HDMI_STAT);
     u32 pll=T7_RX_PHY_PLL_LOCK;rx.phy=core;memcpy(core+T7_RX_PHY_APLL0,&pll,4);
     rx.link=&lease;rx.lease_yuv=true;rx.lease_hdr=true;rx.lease_420=true;
     assert(t7_hdmirx_video_status(&rx)==-ENOLINK); /* HDR -> SDR, same geometry */
