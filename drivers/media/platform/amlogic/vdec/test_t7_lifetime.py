@@ -49,12 +49,90 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_mdec_single_read_requires_all_prerequisites_and_verified_power_off(self):
+        functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
+            "t7_prepare_mdec", "aml_vdec_t7_mdec_test"))
+        run_c(COMMON + """
+#include "reg_defines.h"
+#define DOS_BUS 0
+#define dev_info(...) ((void)0)
+struct aml_vdec_hw {
+    bool has_dbus_ctrl, powered, power_test_passed, mdec_test_passed;
+    u32 mdec_test_value;
+    void *dev, *map[1];
+};
+static int fail_at, bad_at, calls, pic_reads, on_error, off_error, off_calls;
+static const int registers[] = {
+    DOS_SW_RESET0, DOS_MEM_PD_VDEC, DOS_GCLK_EN0, DOS_GCLK_EN0,
+    GCLK_EN, GCLK_EN, MDEC_PIC_DC_CTRL
+};
+static int access_reg(int reg)
+{
+    assert(calls < 7 && registers[calls] == reg);
+    calls++;
+    if (reg == MDEC_PIC_DC_CTRL) pic_reads++;
+    return fail_at == calls ? -EIO : 0;
+}
+static int regmap_read(void *map, int reg, u32 *value)
+{
+    int ret = access_reg(reg);
+    *value = (reg == DOS_SW_RESET0 || reg == DOS_MEM_PD_VDEC) ? 0 : 0x3ff;
+    if (calls == bad_at) *value ^= 1;
+    return ret;
+}
+static int regmap_update_bits(void *map, int reg, u32 mask, u32 value)
+{
+    assert(reg == DOS_GCLK_EN0 && mask == 0x3ff && value == 0x3ff);
+    return access_reg(reg);
+}
+static int regmap_write(void *map, int reg, u32 value)
+{
+    assert(reg == GCLK_EN && value == 0x3ff);
+    return access_reg(reg);
+}
+static int t7_power_on(struct aml_vdec_hw *hw)
+{ hw->powered = !on_error; return on_error; }
+static int t7_power_off(struct aml_vdec_hw *hw)
+{ hw->powered = false; off_calls++; return off_error; }
+""" + functions + """
+int main(void)
+{
+    struct aml_vdec_hw hw = { .has_dbus_ctrl = true };
+    assert(aml_vdec_t7_mdec_test(&hw) == -EPERM && !calls && !off_calls);
+    hw.power_test_passed = true;
+    on_error = -EIO;
+    assert(aml_vdec_t7_mdec_test(&hw) == -EIO && !calls && !off_calls);
+    on_error = 0;
+    for (int i = 1; i <= 7; i++) {
+        calls = pic_reads = off_calls = 0; fail_at = i;
+        assert(aml_vdec_t7_mdec_test(&hw) == -EIO);
+        assert(calls == i && pic_reads == (i == 7) && off_calls == 1);
+        assert(!hw.mdec_test_passed && !hw.powered);
+    }
+    fail_at = 0;
+    const int checks[] = {1, 2, 4, 6};
+    for (unsigned int i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
+        calls = pic_reads = off_calls = 0; bad_at = checks[i];
+        assert(aml_vdec_t7_mdec_test(&hw) < 0);
+        assert(!pic_reads && off_calls == 1 && !hw.mdec_test_passed);
+    }
+    bad_at = calls = pic_reads = off_calls = 0;
+    off_error = -EIO;
+    assert(aml_vdec_t7_mdec_test(&hw) == -EIO && !hw.mdec_test_passed);
+    calls = pic_reads = off_calls = off_error = 0;
+    assert(!aml_vdec_t7_mdec_test(&hw));
+    assert(calls == 7 && pic_reads == 1 && off_calls == 1);
+    assert(hw.mdec_test_passed && !hw.powered && hw.mdec_test_value == 0x3ff);
+    return 0;
+}
+""")
+
     def test_runtime_resume_requires_opt_in_and_completed_power_test(self):
         resume = function(HERE / "aml_vdec_drv.c", "aml_vdec_runtime_resume")
         run_c(COMMON + """
 #define READ_ONCE(value) (value)
 struct device { int unused; };
-struct hw { bool power_test_passed; };
+struct hw { bool power_test_passed, mdec_test_passed; };
 struct pdata { bool has_dbus_ctrl; };
 struct aml_vdec_dev { struct hw *dec_hw; struct pdata *pvdec_data; };
 static struct hw hw;
@@ -72,6 +150,8 @@ int main(void)
     allow_t7_power = true;
     assert(aml_vdec_runtime_resume(&dev) == -EPERM && !power_calls);
     hw.power_test_passed = true;
+    assert(aml_vdec_runtime_resume(&dev) == -EPERM && !power_calls);
+    hw.mdec_test_passed = true;
     assert(!aml_vdec_runtime_resume(&dev) && power_calls == 1);
     allow_t7_power = false;
     assert(aml_vdec_runtime_resume(&dev) == -EPERM && power_calls == 1);
@@ -102,7 +182,7 @@ struct clk_bulk_data { void *clk; };
 struct pd { void *dev; };
 struct pm { struct pd pd_data[1]; };
 struct aml_vdec_hw {
-    bool has_dbus_ctrl, powered, faulted, power_test_passed;
+    bool has_dbus_ctrl, powered, faulted, power_test_passed, mdec_test_passed;
     u32 power_test_reset;
     void *dev, *map[1];
     struct clk_bulk_data gates[2];
@@ -117,7 +197,7 @@ static void arm_smccc_smc(unsigned int cmd, unsigned int id, int a, int b,
     assert(id == 4 || id == 39);
     res->a0 = id == 4 ? vdec_state : nic3_state;
 }
-static int clk_set_rate(void *clk, int rate) { return 0; }
+static int clk_set_rate(void *clk, int rate) { assert(rate == 800000000); return 0; }
 static int clk_bulk_prepare_enable(int n, void *gates)
 { assert(phase == 0); phase = 1; clocks++; return 0; }
 static void clk_bulk_disable_unprepare(int n, void *gates)

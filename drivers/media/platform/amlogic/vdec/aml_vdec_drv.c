@@ -21,7 +21,7 @@ MODULE_PARM_DESC(enable_t7, "Enable unverified T7 decode experiment; requires lo
 
 static bool allow_t7_power;
 module_param(allow_t7_power, bool, 0600);
-MODULE_PARM_DESC(allow_t7_power, "Allow supervised T7 power test; video open also requires a passed test");
+MODULE_PARM_DESC(allow_t7_power, "Allow supervised T7 tests; video open requires power and MDEC tests");
 
 static ssize_t power_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -69,6 +69,37 @@ static ssize_t power_test_store(struct device *dev, struct device_attribute *att
 }
 static DEVICE_ATTR_RW(power_test);
 
+static ssize_t mdec_test_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
+	struct aml_vdec_hw *hw = vdec->dec_hw;
+
+	return sysfs_emit(buf, "passed=%u MDEC_PIC_DC_CTRL=%#x\n",
+			 READ_ONCE(hw->mdec_test_passed), READ_ONCE(hw->mdec_test_value));
+}
+
+static ssize_t mdec_test_store(struct device *dev, struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
+	bool run;
+	int ret;
+
+	ret = kstrtobool(buf, &run);
+	if (ret || !run)
+		return -EINVAL;
+	mutex_lock(&vdec->dev_mutex);
+	if (!READ_ONCE(allow_t7_power))
+		ret = -EPERM;
+	else if (vdec->dec_ctx || !pm_runtime_suspended(dev))
+		ret = -EBUSY;
+	else
+		ret = aml_vdec_t7_mdec_test(vdec->dec_hw);
+	mutex_unlock(&vdec->dev_mutex);
+	return ret ?: count;
+}
+static DEVICE_ATTR_RW(mdec_test);
+
 static ssize_t faulted_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
@@ -81,6 +112,7 @@ static struct attribute *aml_vdec_attrs[] = {
 	&dev_attr_faulted.attr,
 	&dev_attr_power_state.attr,
 	&dev_attr_power_test.attr,
+	&dev_attr_mdec_test.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(aml_vdec);
@@ -93,7 +125,8 @@ static int fops_vcodec_open(struct file *file)
 
 	/* udev v4l_id opens a newly registered node. Do not let it power DOS. */
 	if (dec_dev->pvdec_data->has_dbus_ctrl &&
-	    (!READ_ONCE(allow_t7_power) || !READ_ONCE(dec_dev->dec_hw->power_test_passed)))
+	    (!READ_ONCE(allow_t7_power) || !READ_ONCE(dec_dev->dec_hw->power_test_passed) ||
+	     !READ_ONCE(dec_dev->dec_hw->mdec_test_passed)))
 		return -EPERM;
 
 	ctx = kzalloc_obj(*ctx, GFP_KERNEL);
@@ -368,7 +401,8 @@ static int aml_vdec_runtime_resume(struct device *dev)
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
 
 	if (vdec->pvdec_data->has_dbus_ctrl &&
-	    (!READ_ONCE(allow_t7_power) || !READ_ONCE(vdec->dec_hw->power_test_passed)))
+	    (!READ_ONCE(allow_t7_power) || !READ_ONCE(vdec->dec_hw->power_test_passed) ||
+	     !READ_ONCE(vdec->dec_hw->mdec_test_passed)))
 		return -EPERM;
 	return vdec_enable(vdec->dec_hw);
 }

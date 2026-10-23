@@ -116,6 +116,8 @@ struct pm_pd_s {
  * @powered: Domain and functional clocks are held.
  * @power_test_passed: Explicit read-only DOS access and power-off succeeded.
  * @power_test_reset: Cached DOS_SW_RESET0 sample; not a silicon identifier.
+ * @mdec_test_passed: Explicit MDEC read and subsequent power-off succeeded.
+ * @mdec_test_value: Cached MDEC_PIC_DC_CTRL sample.
  * @secure_swap: Scratch G supplied by the secure microcode loader.
  */
 struct aml_vdec_hw {
@@ -134,6 +136,8 @@ struct aml_vdec_hw {
 	bool powered;
 	bool power_test_passed;
 	u32 power_test_reset;
+	bool mdec_test_passed;
+	u32 mdec_test_value;
 	u32 secure_swap;
 };
 
@@ -163,6 +167,7 @@ int vdec_enable(struct aml_vdec_hw *hw);
 int vdec_disable(struct aml_vdec_hw *hw);
 int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3);
 int aml_vdec_t7_power_test(struct aml_vdec_hw *hw);
+int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
 int aml_stop_vdec_hw(struct aml_vdec_hw *hw);
