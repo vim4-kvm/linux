@@ -211,7 +211,7 @@ static int wave5_wait_vpu_busy(struct vpu_device *vpu_dev, unsigned int addr)
 	u32 data;
 	int ret;
 
-	if (wave5_vpu_isolated(vpu_dev))
+	if (wave5_vpu_hw_blocked(vpu_dev))
 		return -EIO;
 	ret = read_poll_timeout(wave5_vdi_read_register, data, data == 0,
 				10, VPU_BUSY_CHECK_TIMEOUT, false, vpu_dev, addr);
@@ -316,7 +316,7 @@ static int send_firmware_command(struct vpu_instance *inst, u32 cmd, bool check_
 {
 	int ret;
 
-	if (wave5_vpu_isolated(inst->dev))
+	if (wave5_vpu_isolated(inst->dev) || inst->recovery_error)
 		return -EIO;
 	wave5_bit_issue_command(inst->dev, inst, cmd);
 	ret = wave5_wait_vpu_busy(inst->dev, W5_VPU_BUSY_STATUS);
@@ -343,7 +343,7 @@ static int wave5_send_query(struct vpu_device *vpu_dev, struct vpu_instance *ins
 {
 	int ret;
 
-	if (wave5_vpu_isolated(vpu_dev))
+	if (wave5_vpu_hw_blocked(vpu_dev) || (inst && inst->recovery_error))
 		return -EIO;
 	vpu_write_reg(vpu_dev, W5_QUERY_OPTION, query_opt);
 	vpu_write_reg(vpu_dev, W5_VPU_BUSY_STATUS, 1);

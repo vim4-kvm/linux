@@ -60,6 +60,21 @@ void wave5_cleanup_instance(struct vpu_instance *inst, struct file *filp)
 	kfree(inst);
 }
 
+void wave5_vpu_release_retained(struct vpu_instance *inst)
+{
+	unsigned long flags;
+
+	lockdep_assert_held(&inst->dev->dev_lock);
+	mutex_lock(&inst->dev->irq_lock);
+	spin_lock_irqsave(&inst->dev->irq_spinlock, flags);
+	list_del_init(&inst->list);
+	spin_unlock_irqrestore(&inst->dev->irq_spinlock, flags);
+	mutex_unlock(&inst->dev->irq_lock);
+	v4l2_m2m_ctx_release(inst->v4l2_fh.m2m_ctx);
+	/* release already removed the file handle before retaining this context. */
+	wave5_cleanup_instance(inst, NULL);
+}
+
 int wave5_vpu_release_device(struct file *filp,
 			     int (*close_func)(struct vpu_instance *inst, u32 *fail_res),
 			     char *name)

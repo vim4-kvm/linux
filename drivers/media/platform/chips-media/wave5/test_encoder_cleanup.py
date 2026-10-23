@@ -11,7 +11,7 @@ hardware = (root / 'wave5-hw.c').read_text()
 register = hardware[hardware.index('static u32 calculate_luma_stride'):
                     hardware.index('static u32 wave5_vpu_enc_validate_sec_axi')]
 api = (root / 'wave5-vpuapi.c').read_text()
-close = api[api.index('int wave5_vpu_enc_close('):
+close = api[api.index('void wave5_vpu_enc_free_buffers('):
             api.index('int wave5_vpu_enc_register_frame_buffer(')]
 # Register values and buffer sizing do not affect allocation ownership.
 registers = sorted(set(re.findall(r'\bW5_[A-Z_0-9]+', register)))
@@ -59,13 +59,14 @@ struct vpu_device { struct device *dev; int hw_lock; bool legacy_firmware; };
 struct vpu_instance { struct vpu_device *dev; struct codec_info *codec_info; int std; };
 struct frame_buffer { uintptr_t buf_y, buf_cb; };
 static unsigned attempts, fail_at, live, commands;
+static unsigned pm_refs;
 static bool firmware_owns, fail_command, fail_queue, fail_close;
 static void *dev_get_drvdata(struct device *dev) { return dev->data; }
 static int mutex_lock_interruptible(int *lock) { (void)lock; return 0; }
 static void mutex_unlock(int *lock) { (void)lock; }
-static void pm_runtime_resume_and_get(struct device *dev) { (void)dev; }
-static void pm_runtime_put_sync(struct device *dev) { (void)dev; }
-static void pm_runtime_put_autosuspend(struct device *dev) { (void)dev; }
+static int pm_runtime_resume_and_get(struct device *dev) { (void)dev; pm_refs++; return 0; }
+static void pm_runtime_put_sync(struct device *dev) { (void)dev; assert(pm_refs); pm_refs--; }
+static void pm_runtime_put_autosuspend(struct device *dev) { pm_runtime_put_sync(dev); }
 static void wave5_vpu_isolate(struct vpu_device *dev, const char *reason, u32 command)
 { (void)dev; (void)reason; (void)command; }
 static void vpu_write_reg(struct vpu_device *dev, u32 reg, uintptr_t value)
@@ -143,12 +144,14 @@ int main(void)
             // A failed destroy must retain every DMA allocation for hardware.
             fail_close = true;
             assert(wave5_vpu_enc_close(&inst, &reason) == -ETIMEDOUT);
+            assert(!pm_refs);
             assert(live == 5);
         } else {
             assert(live == (unsigned)existing_task);
         }
         fail_close = false;
         assert(!wave5_vpu_enc_close(&inst, &reason));
+        assert(!pm_refs);
         assert(!live);
     }
     puts("Wave5 allocation rollback, firmware ownership and close passed (32 cases)");

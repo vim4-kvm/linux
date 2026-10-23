@@ -280,7 +280,7 @@ static void wave5_vpu_enc_finish_encode(struct vpu_instance *inst)
 	struct vb2_v4l2_buffer *src_buf = NULL;
 	struct vb2_v4l2_buffer *dst_buf = NULL;
 
-	if (wave5_vpu_isolated(inst->dev))
+	if (wave5_vpu_isolated(inst->dev) || inst->recovery_error)
 		return;
 	/* STREAMOFF drains reports itself after M2M cancellation has finished. */
 	if (inst->dev->legacy_firmware &&
@@ -1428,7 +1428,7 @@ static int wave5_vpu_enc_start_streaming(struct vb2_queue *q, unsigned int count
 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
 	int ret = 0;
 
-	if (wave5_vpu_isolated(inst->dev)) {
+	if (wave5_vpu_isolated(inst->dev) || inst->recovery_error) {
 		wave5_return_bufs(q, VB2_BUF_STATE_QUEUED);
 		return -EIO;
 	}
@@ -1542,10 +1542,10 @@ static void wave5_vpu_enc_stop_streaming(struct vb2_queue *q)
 	dev_dbg(inst->dev->dev, "%s: type: %u\n", __func__, q->type);
 	pm_runtime_resume_and_get(inst->dev->dev);
 
-	if (wave5_vpu_both_queues_are_streaming(inst))
+	if (!inst->recovery_error && wave5_vpu_both_queues_are_streaming(inst))
 		switch_state(inst, VPU_INST_STATE_STOP);
 
-	while (!wave5_vpu_isolated(inst->dev)) {
+	while (!wave5_vpu_isolated(inst->dev) && !inst->recovery_error) {
 		struct queue_status_info q_status;
 		struct enc_output_info enc_output_info;
 
@@ -1613,10 +1613,19 @@ static void wave5_vpu_enc_device_run(void *priv)
 	u32 fail_res = 0;
 	int ret = 0;
 
-	pm_runtime_resume_and_get(inst->dev->dev);
 	mutex_lock(&inst->dev->irq_lock);
-	if (wave5_vpu_isolated(inst->dev))
-		goto finish;
+	if (wave5_vpu_isolated(inst->dev) || inst->recovery_error) {
+		wave5_vpu_job_finish(inst);
+		mutex_unlock(&inst->dev->irq_lock);
+		return;
+	}
+	ret = pm_runtime_resume_and_get(inst->dev->dev);
+	if (ret < 0) {
+		wave5_vpu_isolate(inst->dev, "job runtime resume failed", 0);
+		wave5_vpu_job_finish(inst);
+		mutex_unlock(&inst->dev->irq_lock);
+		return;
+	}
 	wave5_vpu_job_start(inst);
 	switch (inst->state) {
 	case VPU_INST_STATE_PIC_RUN:
@@ -1639,7 +1648,6 @@ static void wave5_vpu_enc_device_run(void *priv)
 		     state_to_str(inst->state));
 		break;
 	}
-finish:
 	dev_dbg(inst->dev->dev, "%s: leave and finish job", __func__);
 	pm_runtime_put_autosuspend(inst->dev->dev);
 	wave5_vpu_job_finish(inst);
@@ -1651,7 +1659,7 @@ static int wave5_vpu_enc_job_ready(void *priv)
 	struct vpu_instance *inst = priv;
 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
 
-	if (wave5_vpu_isolated(inst->dev))
+	if (wave5_vpu_isolated(inst->dev) || READ_ONCE(inst->recovery_error))
 		return false;
 	switch (inst->state) {
 	case VPU_INST_STATE_NONE:
@@ -1979,6 +1987,7 @@ static int wave5_vpu_enc_release(struct file *filp)
 	return ret;
 retain:
 	/* Keep the queues, imported DMA refs, instance and auxiliary allocations. */
+	inst->released = true;
 	v4l2_fh_del(&inst->v4l2_fh, filp);
 	v4l2_fh_exit(&inst->v4l2_fh);
 	filp->private_data = NULL;
@@ -1990,7 +1999,7 @@ static long wave5_vpu_enc_ioctl(struct file *filp, unsigned int cmd, unsigned lo
 {
 	struct vpu_instance *inst = file_to_vpu_inst(filp);
 
-	if (wave5_vpu_isolated(inst->dev))
+	if (wave5_vpu_isolated(inst->dev) || READ_ONCE(inst->recovery_error))
 		return -EIO;
 	return video_ioctl2(filp, cmd, arg);
 }
@@ -1999,7 +2008,7 @@ static __poll_t wave5_vpu_enc_poll(struct file *filp, struct poll_table_struct *
 {
 	struct vpu_instance *inst = file_to_vpu_inst(filp);
 
-	if (wave5_vpu_isolated(inst->dev))
+	if (wave5_vpu_isolated(inst->dev) || READ_ONCE(inst->recovery_error))
 		return EPOLLERR;
 	return v4l2_m2m_fop_poll(filp, wait);
 }

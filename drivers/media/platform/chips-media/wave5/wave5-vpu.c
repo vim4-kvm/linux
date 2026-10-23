@@ -11,6 +11,7 @@
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_domain.h>
 #include <linux/reset.h>
 #include "wave5-vpu.h"
 #include "wave5-regdefine.h"
@@ -36,6 +37,11 @@ struct wave5_match_data {
 
 static int vpu_poll_interval = 5;
 module_param(vpu_poll_interval, int, 0644);
+
+/* One-shot failures: drain, domain off, domain on, reload, nested timeout. */
+static unsigned int recovery_fail_step;
+module_param(recovery_fail_step, uint, 0600);
+MODULE_PARM_DESC(recovery_fail_step, "One-shot T7 recovery failure injection (1-5)");
 
 int wave5_vpu_wait_interrupt(struct vpu_instance *inst, unsigned int timeout)
 {
@@ -206,10 +212,16 @@ static int irq_thread(void *data)
 	return 0;
 }
 
+static void wave5_release_firmware(void *data)
+{
+	release_firmware(data);
+}
+
 static int wave5_vpu_load_firmware(struct device *dev, const char *fw_name,
 				   u32 *revision)
 {
 	const struct firmware *fw;
+	struct vpu_device *vpu = dev_get_drvdata(dev);
 	int ret;
 	unsigned int product_id;
 
@@ -225,12 +237,20 @@ static int wave5_vpu_load_firmware(struct device *dev, const char *fw_name,
 		release_firmware(fw);
 		return ret;
 	}
-	release_firmware(fw);
-
 	ret = wave5_vpu_get_version_info(dev, revision, &product_id);
 	if (ret) {
 		dev_err(dev, "vpu_get_version_info fail: %d\n", ret);
+		release_firmware(fw);
 		return ret;
+	}
+	if (vpu->legacy_firmware) {
+		/* Recovery must not wait for userspace or filesystem firmware loading. */
+		ret = devm_add_action_or_reset(dev, wave5_release_firmware, (void *)fw);
+		if (ret)
+			return ret;
+		vpu->firmware = fw;
+	} else {
+		release_firmware(fw);
 	}
 
 	dev_dbg(dev, "%s: enum product_id: %08x, fw revision: %u\n",
@@ -239,11 +259,87 @@ static int wave5_vpu_load_firmware(struct device *dev, const char *fw_name,
 	return 0;
 }
 
+static int wave5_power_notify(struct notifier_block *nb, unsigned long action, void *data)
+{
+	struct vpu_device *vpu = container_of(nb, struct vpu_device, power_notifier);
+
+	if (action == GENPD_NOTIFY_OFF)
+		WRITE_ONCE(vpu->power_off_seen, true);
+	else if (action == GENPD_NOTIFY_ON)
+		WRITE_ONCE(vpu->power_on_seen, true);
+	return NOTIFY_OK;
+}
+
+int wave5_vpu_recover_hardware(struct vpu_device *vpu)
+{
+	const struct firmware *fw = vpu->firmware;
+	unsigned int fail_step = xchg(&recovery_fail_step, 0);
+	int ret;
+
+	lockdep_assert_held(&vpu->hw_lock);
+	if (!fw)
+		return -EINVAL;
+	if (fail_step == 1) {
+		ret = -ETIMEDOUT;
+		goto out;
+	}
+	/* Keep functional clocks running through secure domain power-off. */
+	ret = wave5_vpu_reset(vpu->dev, SW_RESET_ON_BOOT);
+	if (ret)
+		goto out;
+	if (fail_step == 2) {
+		ret = -EIO;
+		goto out;
+	}
+	WRITE_ONCE(vpu->power_off_seen, false);
+	ret = pm_runtime_put_sync_suspend(vpu->dev);
+	if (ret < 0 || !READ_ONCE(vpu->power_off_seen)) {
+		/* put_sync_suspend consumes our reference even on failure. */
+		pm_runtime_get_noresume(vpu->dev);
+		ret = ret < 0 ? ret : -EBUSY;
+		goto out;
+	}
+	if (fail_step == 3) {
+		pm_runtime_get_noresume(vpu->dev);
+		ret = -EIO;
+		goto out;
+	}
+	WRITE_ONCE(vpu->power_on_seen, false);
+	ret = pm_runtime_resume_and_get(vpu->dev);
+	if (ret < 0) {
+		pm_runtime_get_noresume(vpu->dev);
+		goto out;
+	}
+	if (!READ_ONCE(vpu->power_on_seen)) {
+		ret = -EIO;
+		goto out;
+	}
+	if (wave5_vpu_is_init(vpu)) {
+		ret = -EIO;
+		goto out;
+	}
+	if (fail_step == 4 || fail_step == 5) {
+		if (fail_step == 5)
+			wave5_vpu_isolate(vpu, "injected recovery timeout", W5_INIT_VPU);
+		ret = -ETIMEDOUT;
+		goto out;
+	}
+	/* Cold INIT copies the firmware; WAKEUP would reuse destroyed contexts. */
+	ret = wave5_vpu_init(vpu->dev, (u8 *)fw->data, fw->size);
+	if (!ret) {
+		vpu_write_reg(vpu, W5_VPU_VINT_REASON_CLR, U32_MAX);
+		vpu_write_reg(vpu, W5_VPU_VINT_REASON_USR, 0);
+		vpu_write_reg(vpu, W5_VPU_VINT_CLEAR, 1);
+	}
+out:
+	return ret;
+}
+
 static __maybe_unused int wave5_pm_suspend(struct device *dev)
 {
 	struct vpu_device *vpu = dev_get_drvdata(dev);
 
-	if (wave5_vpu_isolated(vpu))
+	if (wave5_vpu_hw_blocked(vpu))
 		return -EBUSY;
 	/* T7 keeps clocks running until genpd completes its power-off sequence. */
 	if (vpu->legacy_firmware)
@@ -265,7 +361,7 @@ static __maybe_unused int wave5_pm_resume(struct device *dev)
 	struct vpu_device *vpu = dev_get_drvdata(dev);
 	int ret = 0;
 
-	if (wave5_vpu_isolated(vpu))
+	if (wave5_vpu_hw_blocked(vpu))
 		return -EIO;
 	/* T7 probe owns the clocks before asking genpd to power the block on. */
 	if (vpu->legacy_firmware)
@@ -466,6 +562,12 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 		wave5_vpu_sleep_wake(&pdev->dev, true, NULL, 0);
 	}
 
+	if (dev->legacy_firmware) {
+		dev->power_notifier.notifier_call = wave5_power_notify;
+		ret = dev_pm_genpd_add_notifier(&pdev->dev, &dev->power_notifier);
+		if (ret)
+			goto err_enc_unreg;
+	}
 	dev->isolation_ready = true;
 	return 0;
 
@@ -525,6 +627,8 @@ static void wave5_vpu_remove(struct platform_device *pdev)
 	dev->isolation_ready = false;
 	cancel_delayed_work_sync(&dev->job_timeout_work);
 	cancel_work_sync(&dev->isolation_work);
+	if (dev->legacy_firmware)
+		dev_pm_genpd_remove_notifier(&pdev->dev);
 	wave5_vpu_enc_unregister_device(dev);
 	wave5_vpu_dec_unregister_device(dev);
 	v4l2_device_unregister(&dev->v4l2_dev);
@@ -574,7 +678,10 @@ static void wave5_vpu_shutdown(struct platform_device *pdev)
 {
 	struct vpu_device *dev = dev_get_drvdata(&pdev->dev);
 
-	/* No firmware waits, power collapse or reset on the quarantine path. */
+	WRITE_ONCE(dev->shutting_down, true);
+	cancel_delayed_work_sync(&dev->job_timeout_work);
+	flush_work(&dev->isolation_work);
+	/* Quarantine never attempts another firmware command or power cycle. */
 	if (wave5_vpu_isolated(dev))
 		dev_info(dev->dev, "shutdown: retaining quarantined DMA storage\n");
 }

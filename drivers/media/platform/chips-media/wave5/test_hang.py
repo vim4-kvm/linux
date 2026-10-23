@@ -47,6 +47,7 @@ struct vpu_attr { bool support_hevc10bit_enc, support_avc10bit_enc; };
 struct vpu_device { int product, dev_lock; struct vpu_attr attr; bool isolated, legacy_firmware; };
 struct v4l2_m2m_ctx { bool running, linked, output, capture; };
 struct vpu_instance {
+    bool released;
     struct vpu_device *dev;
     int std, id, state;
     struct { unsigned width, height; } dst_fmt;
