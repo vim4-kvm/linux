@@ -19,6 +19,7 @@ properties:
       - amlogic,sm1-tdmin
       - amlogic,axg-tdmin
       - amlogic,t7-tdmin
+      - amlogic,t7-tdmout
 
   clocks:
     items:
@@ -37,7 +38,15 @@ properties:
       - const: lrclk_sel
 
   reg:
-    maxItems: 1
+    minItems: 1
+    items:
+      - description: Main formatter registers
+      - description: Extended lane and gain registers
+
+  reg-names:
+    items:
+      - const: core
+      - const: ext
 
   resets:
     maxItems: 1
@@ -61,6 +70,7 @@ allOf:
               - amlogic,g12a-tdmout
               - amlogic,sm1-tdmout
               - amlogic,t7-tdmin
+              - amlogic,t7-tdmout
     then:
       required:
         - resets
@@ -68,6 +78,22 @@ allOf:
     else:
       properties:
         resets: false
+
+  - if:
+      properties:
+        compatible:
+          const: amlogic,t7-tdmout
+    then:
+      properties:
+        reg:
+          minItems: 2
+      required:
+        - reg-names
+    else:
+      properties:
+        reg:
+          maxItems: 1
+        reg-names: false
 
 unevaluatedProperties: false
 
