@@ -1430,8 +1430,10 @@ static int t7_hdmirx_audio_prepare_locked(struct snd_soc_dai *dai)
 	unsigned int i;
 	int ret;
 
-	if (rx->audio_invalid)
-		return 0;
+	if (rx->audio_invalid) {
+		t7_hdmirx_audio_stop_locked(rx);
+		rx->audio_invalid = false;
+	}
 	ret = t7_hdmirx_read_audio(rx, &format);
 	if (ret || !format.pcm || format.rate != rx->audio_rate ||
 	    !t7_hdmirx_audio_same(&format, &rx->audio_format))

@@ -213,6 +213,15 @@ int main(void) {
     pll_locked=true;
     assert(!t7_hdmirx_audio_hw_params(&stream,&params,&dai));
     assert(!t7_hdmirx_audio_prepare(&stream,&dai));
+    core[T7_RX_COR_AUDIO_AIF+3]++;
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai) && rx.audio_invalid);
+    assert(!(readl(fifo)&BIT(31)));
+    core[T7_RX_COR_AUDIO_AIF+3]--;
+    /* Standard XRUN recovery may prepare the same-rate PCM again, without
+     * hw_params. A single torn packet must not latch it off forever.
+     */
+    assert(!t7_hdmirx_audio_prepare(&stream,&dai) && !rx.audio_invalid);
+    assert(clocks && (readl(fifo)&BIT(31)));
     rx.audio_invalid=true;
     assert(!t7_hdmirx_audio_prepare(&stream,&dai));
     assert(clocks && rx.audio_active && (readl(fifo)&BIT(31)));
