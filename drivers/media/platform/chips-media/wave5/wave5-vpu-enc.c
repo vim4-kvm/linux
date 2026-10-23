@@ -1988,7 +1988,7 @@ static int wave5_vpu_open_enc(struct file *filp)
 			  V4L2_CID_MPEG_VIDEO_HEVC_INTRA_PU_SPLIT, 0, 1, 1, 1);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
-			  0, 51, 1, 8);
+			  0, 51, 1, 0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,
 			  0, 51, 1, 51);
@@ -2051,7 +2051,7 @@ static int wave5_vpu_open_enc(struct file *filp)
 			       V4L2_MPEG_VIDEO_H264_LEVEL_1_0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_H264_MIN_QP,
-			  0, 51, 1, 8);
+			  0, 51, 1, 0);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
 			  0, 51, 1, 51);

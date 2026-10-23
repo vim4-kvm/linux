@@ -227,6 +227,11 @@ int main(void)
     a.force_keyframe=0;
     assert(set(&a,V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP,52)==-ERANGE);
     assert(set(&a,V4L2_CID_MPEG_VIDEO_H264_MIN_QP,-1)==-ERANGE);
+    assert(a.enc_param.min_qp_i==0 && a.hevc_param.min_qp_i==0);
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_H264_MAX_QP,0));
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_H264_MAX_QP,51));
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,0));
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,51));
     assert(set(&a,V4L2_CID_MPEG_VIDEO_HEVC_MAX_NUM_MERGE_MV_MINUS1,2)==-ERANGE);
     assert(set(&a,V4L2_CID_MPEG_VIDEO_B_FRAMES,2)==-ERANGE);
     assert(set(&a,V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2)==-ERANGE);
