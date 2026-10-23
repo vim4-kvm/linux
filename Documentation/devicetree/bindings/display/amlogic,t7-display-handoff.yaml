@@ -13,8 +13,9 @@ description: |
   Dedicated 1080p60 RGB888 OSD1 handoff. Firmware must have initialized the
   complete display path and reserved both logo frames at 3f800000/c00000.
   The normal VPU and simple-framebuffer nodes must remain disabled. VDIN
-  must use disjoint capture resources. Only OSD1 address and VENC interrupt
-  control may be written; clocks, reset, VPP, timing and PHY stay unchanged.
+  must use disjoint capture resources. Only the OSD1 address may be written;
+  VENC, VIU interrupt routing, clocks, reset, VPP, timing and PHY stay unchanged.
+  The firmware must select ENC2 and supply the VIU1 vsync edge interrupt.
 
 properties:
   compatible:
@@ -22,7 +23,7 @@ properties:
   reg:
     items:
       - description: OSD1 control and linear MIF, ff006840/80
-      - description: VENC interrupt and timing readback, ff006db8/108
+      - description: ENC2 timing readback, ff008db8/108
   reg-names:
     items:
       - const: osd1
