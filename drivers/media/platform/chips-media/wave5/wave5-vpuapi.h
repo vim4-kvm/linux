@@ -778,6 +778,15 @@ struct vpu_device {
 	struct semaphore irq_sem; /* signal to irq_thread when interrupt happens*/
 	struct reset_control *resets;
 	spinlock_t irq_spinlock; /* protect instances list */
+	/* Quarantine is irreversible until the next boot. */
+	unsigned int isolated;
+	u32 isolation_command;
+	const char *isolation_reason;
+	u64 isolation_time_ns;
+	bool isolation_ready;
+	struct work_struct isolation_work;
+	struct delayed_work job_timeout_work;
+	unsigned long job_deadline; /* protected by irq_lock */
 };
 
 struct vpu_instance;
@@ -793,6 +802,7 @@ struct vpu_instance {
 	struct v4l2_ctrl_handler v4l2_ctrl_hdl;
 	struct vpu_device *dev;
 	struct completion irq_done;
+	wait_queue_head_t job_wait;
 
 	struct v4l2_pix_format_mplane src_fmt;
 	struct v4l2_pix_format_mplane dst_fmt;

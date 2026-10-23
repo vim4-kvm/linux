@@ -235,6 +235,8 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 		pic_param.force_keyframe = atomic_xchg(&inst->force_keyframe, 0);
 	ret = wave5_vpu_enc_start_one_frame(inst, &pic_param, fail_res);
 	if (ret) {
+		if (wave5_vpu_isolated(inst->dev))
+			return ret;
 		/* A command which was not accepted must not consume the request. */
 		if (pic_param.force_keyframe)
 			atomic_set(&inst->force_keyframe, 1);
@@ -261,6 +263,7 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 		dst_buf->vb2_buf.timestamp = src_buf->vb2_buf.timestamp;
 		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
 		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
+		return ret;
 	} else {
 		dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame success\n",
 			__func__);
@@ -277,11 +280,15 @@ static void wave5_vpu_enc_finish_encode(struct vpu_instance *inst)
 	struct vb2_v4l2_buffer *src_buf = NULL;
 	struct vb2_v4l2_buffer *dst_buf = NULL;
 
+	if (wave5_vpu_isolated(inst->dev))
+		return;
 	ret = wave5_vpu_enc_get_output_info(inst, &enc_output_info);
 	if (ret) {
 		dev_dbg(inst->dev->dev,
 			"%s: vpu_enc_get_output_info fail: %d  reason: %u | info: %u\n",
 			__func__, ret, enc_output_info.error_reason, enc_output_info.warn_info);
+		/* A failed result query cannot prove which buffers firmware owns. */
+		wave5_vpu_isolate(inst->dev, "frame result query failed", 0);
 		return;
 	}
 
@@ -314,11 +321,11 @@ static void wave5_vpu_enc_finish_encode(struct vpu_instance *inst)
 
 		v4l2_event_queue_fh(&inst->v4l2_fh, &vpu_event_eos);
 
-		v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
+		wave5_vpu_job_finish(inst);
 	} else {
 		if (!dst_buf) {
 			dev_warn(inst->dev->dev, "No bitstream buffer.");
-			v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
+			wave5_vpu_job_finish(inst);
 			return;
 		}
 
@@ -349,7 +356,7 @@ static void wave5_vpu_enc_finish_encode(struct vpu_instance *inst)
 		dev_dbg(inst->dev->dev, "%s: frame_cycle %8u\n",
 			__func__, enc_output_info.frame_cycle);
 
-		v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
+		wave5_vpu_job_finish(inst);
 	}
 }
 
@@ -1417,6 +1424,10 @@ static int wave5_vpu_enc_start_streaming(struct vb2_queue *q, unsigned int count
 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
 	int ret = 0;
 
+	if (wave5_vpu_isolated(inst->dev)) {
+		wave5_return_bufs(q, VB2_BUF_STATE_QUEUED);
+		return -EIO;
+	}
 	pm_runtime_resume_and_get(inst->dev->dev);
 	v4l2_m2m_update_start_streaming_state(m2m_ctx, q);
 
@@ -1516,7 +1527,8 @@ static void streamoff_capture(struct vpu_instance *inst, struct vb2_queue *q)
 static void wave5_vpu_enc_stop_streaming(struct vb2_queue *q)
 {
 	struct vpu_instance *inst = vb2_get_drv_priv(q);
-	bool check_cmd = true;
+	unsigned int timeout = inst->dev->legacy_firmware ? 5000 : VPU_ENC_TIMEOUT;
+	unsigned long deadline = jiffies + msecs_to_jiffies(timeout);
 
 	/*
 	 * Note that we don't need m2m_ctx->next_buf_last for this driver, so we
@@ -1529,7 +1541,7 @@ static void wave5_vpu_enc_stop_streaming(struct vb2_queue *q)
 	if (wave5_vpu_both_queues_are_streaming(inst))
 		switch_state(inst, VPU_INST_STATE_STOP);
 
-	while (check_cmd) {
+	while (!wave5_vpu_isolated(inst->dev)) {
 		struct queue_status_info q_status;
 		struct enc_output_info enc_output_info;
 
@@ -1537,8 +1549,12 @@ static void wave5_vpu_enc_stop_streaming(struct vb2_queue *q)
 
 		if (q_status.report_queue_count == 0)
 			break;
+		if (time_after_eq(jiffies, deadline)) {
+			wave5_vpu_isolate(inst->dev, "streamoff drain timeout", 0);
+			break;
+		}
 
-		if (wave5_vpu_wait_interrupt(inst, VPU_ENC_TIMEOUT) < 0)
+		if (wave5_vpu_wait_interrupt(inst, jiffies_to_msecs(deadline - jiffies)) < 0)
 			break;
 
 		if (wave5_vpu_enc_get_output_info(inst, &enc_output_info))
@@ -1594,6 +1610,10 @@ static void wave5_vpu_enc_device_run(void *priv)
 	int ret = 0;
 
 	pm_runtime_resume_and_get(inst->dev->dev);
+	mutex_lock(&inst->dev->irq_lock);
+	if (wave5_vpu_isolated(inst->dev))
+		goto finish;
+	wave5_vpu_job_start(inst);
 	switch (inst->state) {
 	case VPU_INST_STATE_PIC_RUN:
 		ret = start_encode(inst, &fail_res);
@@ -1608,15 +1628,18 @@ static void wave5_vpu_enc_device_run(void *priv)
 		}
 		dev_dbg(inst->dev->dev, "%s: leave with active job", __func__);
 		pm_runtime_put_autosuspend(inst->dev->dev);
+		mutex_unlock(&inst->dev->irq_lock);
 		return;
 	default:
 		WARN(1, "Execution of a job in state %s is invalid.\n",
 		     state_to_str(inst->state));
 		break;
 	}
+finish:
 	dev_dbg(inst->dev->dev, "%s: leave and finish job", __func__);
 	pm_runtime_put_autosuspend(inst->dev->dev);
-	v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
+	wave5_vpu_job_finish(inst);
+	mutex_unlock(&inst->dev->irq_lock);
 }
 
 static int wave5_vpu_enc_job_ready(void *priv)
@@ -1624,6 +1647,8 @@ static int wave5_vpu_enc_job_ready(void *priv)
 	struct vpu_instance *inst = priv;
 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
 
+	if (wave5_vpu_isolated(inst->dev))
+		return false;
 	switch (inst->state) {
 	case VPU_INST_STATE_NONE:
 		dev_dbg(inst->dev->dev, "Encoder must be open to start queueing M2M jobs!\n");
@@ -1650,6 +1675,12 @@ static const struct v4l2_m2m_ops wave5_vpu_enc_m2m_ops = {
 	.job_ready = wave5_vpu_enc_job_ready,
 };
 
+static const struct v4l2_m2m_ops wave5_vpu_enc_t7_m2m_ops = {
+	.device_run = wave5_vpu_enc_device_run,
+	.job_ready = wave5_vpu_enc_job_ready,
+	.job_abort = wave5_vpu_job_abort,
+};
+
 static int wave5_vpu_open_enc(struct file *filp)
 {
 	struct video_device *vdev = video_devdata(filp);
@@ -1658,6 +1689,8 @@ static int wave5_vpu_open_enc(struct file *filp)
 	struct v4l2_ctrl_handler *v4l2_ctrl_hdl;
 	int ret = 0;
 
+	if (wave5_vpu_isolated(dev))
+		return -EIO;
 	inst = kzalloc_obj(*inst);
 	if (!inst)
 		return -ENOMEM;
@@ -1864,6 +1897,7 @@ static int wave5_vpu_open_enc(struct file *filp)
 	inst->frame_rate = 30;
 
 	init_completion(&inst->irq_done);
+	init_waitqueue_head(&inst->job_wait);
 	ret = wave5_kfifo_alloc(inst);
 	if (ret) {
 		dev_err(inst->dev->dev, "failed to allocate fifo\n");
@@ -1883,7 +1917,17 @@ static int wave5_vpu_open_enc(struct file *filp)
 	if (ret)
 		goto cleanup_inst;
 
+	mutex_lock(&dev->irq_lock);
+	if (wave5_vpu_isolated(dev)) {
+		mutex_unlock(&dev->irq_lock);
+		mutex_unlock(&dev->dev_lock);
+		ret = -EIO;
+		goto cleanup_inst;
+	}
+	spin_lock_irq(&dev->irq_spinlock);
 	list_add_tail(&inst->list, &dev->instances);
+	spin_unlock_irq(&dev->irq_spinlock);
+	mutex_unlock(&dev->irq_lock);
 
 	mutex_unlock(&dev->dev_lock);
 
@@ -1908,20 +1952,60 @@ static int wave5_vpu_enc_release(struct file *filp)
 	 * keeping both queues stopped also prevents another job being queued.
 	 */
 	mutex_lock(&dev->dev_lock);
+	if (wave5_vpu_isolated(dev))
+		goto retain;
 	v4l2_m2m_streamoff(filp, m2m_ctx, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
 	v4l2_m2m_streamoff(filp, m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+	if (wave5_vpu_isolated(dev))
+		goto retain;
+	/* Confirm DESTROY before releasing any queue backing on the T7. */
+	if (dev->legacy_firmware && inst->state != VPU_INST_STATE_NONE) {
+		u32 fail_res;
+
+		ret = wave5_vpu_enc_close(inst, &fail_res);
+		if (ret) {
+			wave5_vpu_isolate(dev, "instance destroy failed", 0);
+			goto retain;
+		}
+		inst->state = VPU_INST_STATE_NONE;
+	}
 	ret = wave5_vpu_release_device(filp, wave5_vpu_enc_close, "encoder");
 	mutex_unlock(&dev->dev_lock);
 
 	return ret;
+retain:
+	/* Keep the queues, imported DMA refs, instance and auxiliary allocations. */
+	v4l2_fh_del(&inst->v4l2_fh, filp);
+	v4l2_fh_exit(&inst->v4l2_fh);
+	filp->private_data = NULL;
+	mutex_unlock(&dev->dev_lock);
+	return 0;
+}
+
+static long wave5_vpu_enc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	struct vpu_instance *inst = file_to_vpu_inst(filp);
+
+	if (wave5_vpu_isolated(inst->dev))
+		return -EIO;
+	return video_ioctl2(filp, cmd, arg);
+}
+
+static __poll_t wave5_vpu_enc_poll(struct file *filp, struct poll_table_struct *wait)
+{
+	struct vpu_instance *inst = file_to_vpu_inst(filp);
+
+	if (wave5_vpu_isolated(inst->dev))
+		return EPOLLERR;
+	return v4l2_m2m_fop_poll(filp, wait);
 }
 
 static const struct v4l2_file_operations wave5_vpu_enc_fops = {
 	.owner = THIS_MODULE,
 	.open = wave5_vpu_open_enc,
 	.release = wave5_vpu_enc_release,
-	.unlocked_ioctl = video_ioctl2,
-	.poll = v4l2_m2m_fop_poll,
+	.unlocked_ioctl = wave5_vpu_enc_ioctl,
+	.poll = wave5_vpu_enc_poll,
 	.mmap = v4l2_m2m_fop_mmap,
 };
 
@@ -1934,7 +2018,8 @@ int wave5_vpu_enc_register_device(struct vpu_device *dev)
 	if (!vdev_enc)
 		return -ENOMEM;
 
-	dev->v4l2_m2m_enc_dev = v4l2_m2m_init(&wave5_vpu_enc_m2m_ops);
+	dev->v4l2_m2m_enc_dev = v4l2_m2m_init(dev->legacy_firmware ?
+		&wave5_vpu_enc_t7_m2m_ops : &wave5_vpu_enc_m2m_ops);
 	if (IS_ERR(dev->v4l2_m2m_enc_dev)) {
 		ret = PTR_ERR(dev->v4l2_m2m_enc_dev);
 		dev_err(dev->dev, "v4l2_m2m_init, fail: %d\n", ret);
