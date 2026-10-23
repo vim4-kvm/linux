@@ -63,7 +63,7 @@ struct vpu_device {
 struct device { struct vpu_device *data; };
 static struct {
     ktime_t now;
-    u32 config, indirect[0x10000 / 4], address, data;
+    u32 config, config1, indirect[0x10000 / 4], address, data;
     bool fio_write, idle_seen, never_idle, reset_stuck, reset_done;
     unsigned fio_starts, fail_fio_at, fio_data_reads, busy_reads;
     unsigned reset_requests, reenables, writes, sleeps, wakes;
@@ -131,6 +131,7 @@ static u32 wave5_vdi_read_register(struct vpu_device *dev, u32 addr)
 {
     (void)dev;
     if (addr == W5_VPU_RET_VPU_CONFIG0) return hw.config;
+    if (addr == W5_VPU_RET_VPU_CONFIG1) return hw.config1;
     if (addr == W5_VPU_RESET_STATUS) return hw.reset_stuck ? 1 : 0;
     int command_ret = hw.command == W5_SLEEP_VPU ? hw.sleep_ret :
                       hw.command == W5_WAKEUP_VPU ? hw.wake_ret : 0;
@@ -189,6 +190,23 @@ int main(void)
         W521_FEATURE_BACKBONE | W521_FEATURE_VCORE_BACKBONE |
             W521_FEATURE_VCPU_BACKBONE };
     unsigned cases = 0;
+    /* A single-core drain cannot authorize resetting a dual-core device. */
+    for (unsigned mode = SW_RESET_SAFETY; mode <= SW_RESET_ON_BOOT; mode++) {
+        setup(W521_FEATURE_BACKBONE | W521_FEATURE_VCORE_BACKBONE);
+        hw.config1 = BIT(26);
+        assert(wave5_vpu_reset(&dev, mode) == -EOPNOTSUPP);
+        assert(!hw.writes && !hw.fio_starts && !hw.sleeps && !hw.wakes);
+        cases++;
+    }
+
+    /* CONFIG1 bit 26 has this meaning only in the legacy firmware ABI. */
+    setup(0);
+    hw.config1 = BIT(26);
+    vpu.legacy_firmware = false;
+    assert(!wave5_vpu_reset(&dev, SW_RESET_ON_BOOT));
+    assert(hw.reset_requests == 1);
+    cases++;
+
     for (unsigned c = 0; c < sizeof(configs)/sizeof(configs[0]); c++) {
         /* The indirect read is ready before its bus has drained. */
         setup(configs[c]);
