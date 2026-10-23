@@ -25,8 +25,8 @@ typedef uint32_t u32;
 #define W_AVC_ENC 1
 #define W_HEVC_ENC 2
 struct vpu_device { bool legacy_firmware; };
-struct vpu_instance { struct vpu_device *dev; unsigned std, bit_depth;
-    struct { u32 profile, constraint_set1_flag; } enc_param; };
+struct vpu_instance { struct vpu_device *dev; unsigned std;
+    struct { u32 profile, constraint_set1_flag, internal_bit_depth; } enc_param; };
 struct control { unsigned id, val; };
 '''
 checks = r'''
@@ -37,10 +37,10 @@ int main(void)
     /* A High request must issue legacy High, not the High10 command that
      * produced profile_idc=110 with 8-bit pixels in the hardware regression. */
     assert(!set_profile(&inst,V4L2_MPEG_VIDEO_H264_PROFILE_HIGH));
-    assert(inst.bit_depth==8);
+    assert(inst.enc_param.internal_bit_depth==8);
     assert(wave5_enc_sps_profile(&inst,inst.enc_param.profile)==3);
     assert(!set_profile(&inst,V4L2_MPEG_VIDEO_H264_PROFILE_HIGH_10));
-    assert(inst.bit_depth==10);
+    assert(inst.enc_param.internal_bit_depth==10);
     assert(wave5_enc_sps_profile(&inst,inst.enc_param.profile)==4);
     for (unsigned p=1;p<=7;p++) {
         dev.legacy_firmware=false;
@@ -63,6 +63,7 @@ int main(void)
 }
 '''
 function = ('static int set_profile(struct vpu_instance *inst, unsigned value) {\n'
+            '__typeof__(inst->enc_param) *param=&inst->enc_param;\n'
             'struct control storage={.id=V4L2_CID_MPEG_VIDEO_H264_PROFILE,.val=value};\n'
             'struct control *ctrl=&storage; switch(ctrl->id) {\n' + profile_control +
             'default: return -EINVAL; } return 0; }\n')
@@ -71,5 +72,78 @@ with tempfile.TemporaryDirectory(prefix='wave5-profile-') as directory:
     source.write_text(prefix + defines + '\n' + translation + function + checks)
     binary = Path(directory) / 'profiles'
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2',
+                    str(source), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+# Compile the complete setter too: separate extracted profile switches cannot
+# catch the shared-storage bug when both codec control sets are configured.
+api = (root / 'wave5-vpuapi.h').read_text()
+param = api[api.index('struct enc_wave_param {'):]
+param = param[:param.index('\n};') + 3]
+setter = controls[controls.index('static int wave5_vpu_enc_s_ctrl('):
+                  controls.index('static const struct v4l2_ctrl_ops')]
+protocol = '\n'.join(line for line in api.splitlines()
+                     if line.startswith(('#define HEVC_PROFILE_', '#define H264_PROFILE_')))
+framework = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <linux/v4l2-controls.h>
+typedef uint32_t u32;
+typedef int32_t s32;
+#define VPU_INST_STATE_NONE 0
+#define dev_dbg(...) ((void)0)
+#ifndef V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE
+#define V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE 0x00990b00
+#define V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_CYCLIC 0
+#endif
+#ifndef V4L2_CID_MPEG_VIDEO_BACKGROUND_DETECTION
+#define V4L2_CID_MPEG_VIDEO_BACKGROUND_DETECTION (V4L2_CID_CODEC_BASE + 238)
+#endif
+struct vpu_instance {
+    struct enc_wave_param enc_param, hevc_param;
+    unsigned state, encode_aud, mirror_direction, rot_angle, vbv_buf_size;
+    unsigned rc_mode, bit_rate, intra_refresh_period, rc_enable, force_keyframe;
+};
+struct v4l2_ctrl { unsigned id; int val; struct vpu_instance *owner; };
+static struct vpu_instance *wave5_ctrl_to_vpu_inst(struct v4l2_ctrl *c) { return c->owner; }
+static void atomic_set(unsigned *value, int setting) { *value=setting; }
+'''
+behavior = r'''
+static int set(struct vpu_instance *inst,unsigned id,int value)
+{ struct v4l2_ctrl ctrl={id,value,inst}; return wave5_vpu_enc_s_ctrl(&ctrl); }
+int main(void)
+{
+    struct vpu_instance a={0}, b={0};
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_H264_PROFILE,V4L2_MPEG_VIDEO_H264_PROFILE_HIGH));
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_H264_LEVEL,V4L2_MPEG_VIDEO_H264_LEVEL_5_1));
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE));
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN));
+    assert(!a.hevc_param.en_still_picture);
+    assert(a.enc_param.profile==H264_PROFILE_HP && a.enc_param.level==51);
+    assert(a.hevc_param.profile==HEVC_PROFILE_MAIN);
+    assert(!set(&a,V4L2_CID_HFLIP,1)); assert(!set(&a,V4L2_CID_VFLIP,1));
+    assert(a.mirror_direction==3);
+    assert(!set(&a,V4L2_CID_HFLIP,0)); assert(a.mirror_direction==1);
+    assert(!set(&a,V4L2_CID_VFLIP,0)); assert(a.mirror_direction==0);
+    a.state=1;
+    assert(set(&a,V4L2_CID_MPEG_VIDEO_BITRATE,1000000)==-EBUSY);
+    assert(a.bit_rate==0);
+    assert(!set(&a,V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,0)); assert(a.force_keyframe);
+    assert(!set(&b,V4L2_CID_MPEG_VIDEO_BITRATE,2000000));
+    assert(a.bit_rate==0 && b.bit_rate==2000000);
+    puts("Wave5 codec control isolation, busy setters, flip reversal and two instances passed");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='wave5-controls-') as directory:
+    source = Path(directory) / 'controls.c'
+    binary = Path(directory) / 'controls'
+    # Basic types precede the real parameter structure; mock framework follows.
+    split = framework.index('struct vpu_instance {')
+    source.write_text(framework[:split] + protocol + '\n' + param +
+                      framework[split:] + setter + behavior)
+    subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     str(source), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

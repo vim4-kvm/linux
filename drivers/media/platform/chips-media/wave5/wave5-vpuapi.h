@@ -862,7 +862,6 @@ struct vpu_instance {
 	unsigned int min_src_buf_count;
 	unsigned int rot_angle;
 	unsigned int mirror_direction;
-	unsigned int bit_depth;
 	unsigned int frame_rate;
 	unsigned int vbv_buf_size;
 	unsigned int intra_refresh_period;
@@ -872,6 +871,7 @@ struct vpu_instance {
 	unsigned int encode_aud;
 	atomic_t force_keyframe;
 	struct enc_wave_param enc_param;
+	struct enc_wave_param hevc_param;
 };
 
 void wave5_vdi_write_register(struct vpu_device *vpu_dev, u32 addr, u32 data);

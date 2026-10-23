@@ -814,6 +814,19 @@ static const struct v4l2_ioctl_ops wave5_vpu_enc_ioctl_ops = {
 static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct vpu_instance *inst = wave5_ctrl_to_vpu_inst(ctrl);
+	struct enc_wave_param *param = &inst->enc_param;
+
+	if ((ctrl->id >= V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP &&
+	     ctrl->id <= V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L6_BR) ||
+	    (ctrl->id >= V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_MIN_QP &&
+	     ctrl->id <= V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_MAX_QP))
+		param = &inst->hevc_param;
+
+	/* Sequence controls cannot be applied to an already created instance. */
+	if (inst->state != VPU_INST_STATE_NONE &&
+	    ctrl->id != V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME &&
+	    ctrl->id != V4L2_CID_MIN_BUFFERS_FOR_OUTPUT)
+		return -EBUSY;
 
 	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
 
@@ -822,10 +835,10 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		inst->encode_aud = ctrl->val;
 		break;
 	case V4L2_CID_HFLIP:
-		inst->mirror_direction |= (ctrl->val << 1);
+		inst->mirror_direction = (inst->mirror_direction & ~2) | (ctrl->val << 1);
 		break;
 	case V4L2_CID_VFLIP:
-		inst->mirror_direction |= ctrl->val;
+		inst->mirror_direction = (inst->mirror_direction & ~1) | ctrl->val;
 		break;
 	case V4L2_CID_ROTATE:
 		inst->rot_angle = ctrl->val;
@@ -849,10 +862,10 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		inst->bit_rate = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_BACKGROUND_DETECTION:
-		inst->enc_param.bg_detection = ctrl->val;
+		param->bg_detection = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
-		inst->enc_param.avc_idr_period = ctrl->val;
+		param->avc_idr_period = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD:
 		inst->intra_refresh_period = ctrl->val;
@@ -865,35 +878,36 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		atomic_set(&inst->force_keyframe, 1);
 		break;
 	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE:
-		inst->enc_param.independ_slice_mode = ctrl->val;
-		inst->enc_param.avc_slice_mode = ctrl->val;
+		param->independ_slice_mode = ctrl->val;
+		param->avc_slice_mode = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB:
-		inst->enc_param.independ_slice_mode_arg = ctrl->val;
-		inst->enc_param.avc_slice_arg = ctrl->val;
+		param->independ_slice_mode_arg = ctrl->val;
+		param->avc_slice_arg = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE:
 		inst->rc_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_MB_RC_ENABLE:
-		inst->enc_param.mb_level_rc_enable = ctrl->val;
-		inst->enc_param.cu_level_rc_enable = ctrl->val;
-		inst->enc_param.hvs_qp_enable = ctrl->val;
+		param->mb_level_rc_enable = ctrl->val;
+		param->cu_level_rc_enable = ctrl->val;
+		param->hvs_qp_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_PROFILE:
+		param->en_still_picture = 0;
 		switch (ctrl->val) {
 		case V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN:
-			inst->enc_param.profile = HEVC_PROFILE_MAIN;
-			inst->bit_depth = 8;
+			param->profile = HEVC_PROFILE_MAIN;
+			param->internal_bit_depth = 8;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE:
-			inst->enc_param.profile = HEVC_PROFILE_STILLPICTURE;
-			inst->enc_param.en_still_picture = 1;
-			inst->bit_depth = 8;
+			param->profile = HEVC_PROFILE_STILLPICTURE;
+			param->en_still_picture = 1;
+			param->internal_bit_depth = 8;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10:
-			inst->enc_param.profile = HEVC_PROFILE_MAIN10;
-			inst->bit_depth = 10;
+			param->profile = HEVC_PROFILE_MAIN10;
+			param->internal_bit_depth = 10;
 			break;
 		default:
 			return -EINVAL;
@@ -902,147 +916,147 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDEO_HEVC_LEVEL:
 		switch (ctrl->val) {
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_1:
-			inst->enc_param.level = 10 * 3;
+			param->level = 10 * 3;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_2:
-			inst->enc_param.level = 20 * 3;
+			param->level = 20 * 3;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_2_1:
-			inst->enc_param.level = 21 * 3;
+			param->level = 21 * 3;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_3:
-			inst->enc_param.level = 30 * 3;
+			param->level = 30 * 3;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_3_1:
-			inst->enc_param.level = 31 * 3;
+			param->level = 31 * 3;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_4:
-			inst->enc_param.level = 40 * 3;
+			param->level = 40 * 3;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_4_1:
-			inst->enc_param.level = 41 * 3;
+			param->level = 41 * 3;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_5:
-			inst->enc_param.level = 50 * 3;
+			param->level = 50 * 3;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1:
-			inst->enc_param.level = 51 * 3;
+			param->level = 51 * 3;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2:
-			inst->enc_param.level = 52 * 3;
+			param->level = 52 * 3;
 			break;
 		default:
 			return -EINVAL;
 		}
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP:
-		inst->enc_param.min_qp_i = ctrl->val;
-		inst->enc_param.min_qp_p = ctrl->val;
-		inst->enc_param.min_qp_b = ctrl->val;
+		param->min_qp_i = ctrl->val;
+		param->min_qp_p = ctrl->val;
+		param->min_qp_b = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP:
-		inst->enc_param.max_qp_i = ctrl->val;
-		inst->enc_param.max_qp_p = ctrl->val;
-		inst->enc_param.max_qp_b = ctrl->val;
+		param->max_qp_i = ctrl->val;
+		param->max_qp_p = ctrl->val;
+		param->max_qp_b = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP:
-		inst->enc_param.intra_qp = ctrl->val;
+		param->intra_qp = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE:
 		switch (ctrl->val) {
 		case V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED:
-			inst->enc_param.disable_deblk = 1;
-			inst->enc_param.sao_enable = 0;
-			inst->enc_param.lf_cross_slice_boundary_enable = 0;
+			param->disable_deblk = 1;
+			param->sao_enable = 0;
+			param->lf_cross_slice_boundary_enable = 0;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_ENABLED:
-			inst->enc_param.disable_deblk = 0;
-			inst->enc_param.sao_enable = 1;
-			inst->enc_param.lf_cross_slice_boundary_enable = 1;
+			param->disable_deblk = 0;
+			param->sao_enable = 1;
+			param->lf_cross_slice_boundary_enable = 1;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY:
-			inst->enc_param.disable_deblk = 0;
-			inst->enc_param.sao_enable = 1;
-			inst->enc_param.lf_cross_slice_boundary_enable = 0;
+			param->disable_deblk = 0;
+			param->sao_enable = 1;
+			param->lf_cross_slice_boundary_enable = 0;
 			break;
 		default:
 			return -EINVAL;
 		}
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_LF_BETA_OFFSET_DIV2:
-		inst->enc_param.beta_offset_div2 = ctrl->val;
+		param->beta_offset_div2 = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_LF_TC_OFFSET_DIV2:
-		inst->enc_param.tc_offset_div2 = ctrl->val;
+		param->tc_offset_div2 = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_REFRESH_TYPE:
 		switch (ctrl->val) {
 		case V4L2_MPEG_VIDEO_HEVC_REFRESH_NONE:
-			inst->enc_param.decoding_refresh_type = 0;
+			param->decoding_refresh_type = 0;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_REFRESH_CRA:
-			inst->enc_param.decoding_refresh_type = 1;
+			param->decoding_refresh_type = 1;
 			break;
 		case V4L2_MPEG_VIDEO_HEVC_REFRESH_IDR:
-			inst->enc_param.decoding_refresh_type = 2;
+			param->decoding_refresh_type = 2;
 			break;
 		default:
 			return -EINVAL;
 		}
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_REFRESH_PERIOD:
-		inst->enc_param.intra_period = ctrl->val;
+		param->intra_period = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_LOSSLESS_CU:
-		inst->enc_param.lossless_enable = ctrl->val;
+		param->lossless_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_CONST_INTRA_PRED:
-		inst->enc_param.const_intra_pred_flag = ctrl->val;
+		param->const_intra_pred_flag = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_WAVEFRONT:
-		inst->enc_param.wpp_enable = ctrl->val;
+		param->wpp_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_STRONG_SMOOTHING:
-		inst->enc_param.strong_intra_smooth_enable = ctrl->val;
+		param->strong_intra_smooth_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_MAX_NUM_MERGE_MV_MINUS1:
-		inst->enc_param.max_num_merge = ctrl->val;
+		param->max_num_merge = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_HEVC_TMV_PREDICTION:
-		inst->enc_param.tmvp_enable = ctrl->val;
+		param->tmvp_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
-		inst->enc_param.constraint_set1_flag =
+		param->constraint_set1_flag =
 			ctrl->val == V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE;
 		switch (ctrl->val) {
 		case V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE:
 		case V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE:
-			inst->enc_param.profile = H264_PROFILE_BP;
-			inst->bit_depth = 8;
+			param->profile = H264_PROFILE_BP;
+			param->internal_bit_depth = 8;
 			break;
 		case V4L2_MPEG_VIDEO_H264_PROFILE_MAIN:
-			inst->enc_param.profile = H264_PROFILE_MP;
-			inst->bit_depth = 8;
+			param->profile = H264_PROFILE_MP;
+			param->internal_bit_depth = 8;
 			break;
 		case V4L2_MPEG_VIDEO_H264_PROFILE_EXTENDED:
-			inst->enc_param.profile = H264_PROFILE_EXTENDED;
-			inst->bit_depth = 8;
+			param->profile = H264_PROFILE_EXTENDED;
+			param->internal_bit_depth = 8;
 			break;
 		case V4L2_MPEG_VIDEO_H264_PROFILE_HIGH:
-			inst->enc_param.profile = H264_PROFILE_HP;
-			inst->bit_depth = 8;
+			param->profile = H264_PROFILE_HP;
+			param->internal_bit_depth = 8;
 			break;
 		case V4L2_MPEG_VIDEO_H264_PROFILE_HIGH_10:
-			inst->enc_param.profile = H264_PROFILE_HIGH10;
-			inst->bit_depth = 10;
+			param->profile = H264_PROFILE_HIGH10;
+			param->internal_bit_depth = 10;
 			break;
 		case V4L2_MPEG_VIDEO_H264_PROFILE_HIGH_422:
-			inst->enc_param.profile = H264_PROFILE_HIGH422;
-			inst->bit_depth = 10;
+			param->profile = H264_PROFILE_HIGH422;
+			param->internal_bit_depth = 10;
 			break;
 		case V4L2_MPEG_VIDEO_H264_PROFILE_HIGH_444_PREDICTIVE:
-			inst->enc_param.profile = H264_PROFILE_HIGH444;
-			inst->bit_depth = 10;
+			param->profile = H264_PROFILE_HIGH444;
+			param->internal_bit_depth = 10;
 			break;
 		default:
 			return -EINVAL;
@@ -1051,112 +1065,112 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
 		switch (ctrl->val) {
 		case V4L2_MPEG_VIDEO_H264_LEVEL_1_0:
-			inst->enc_param.level = 10;
+			param->level = 10;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_1B:
-			inst->enc_param.level = 9;
+			param->level = 9;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_1_1:
-			inst->enc_param.level = 11;
+			param->level = 11;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_1_2:
-			inst->enc_param.level = 12;
+			param->level = 12;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_1_3:
-			inst->enc_param.level = 13;
+			param->level = 13;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_2_0:
-			inst->enc_param.level = 20;
+			param->level = 20;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_2_1:
-			inst->enc_param.level = 21;
+			param->level = 21;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_2_2:
-			inst->enc_param.level = 22;
+			param->level = 22;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_3_0:
-			inst->enc_param.level = 30;
+			param->level = 30;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_3_1:
-			inst->enc_param.level = 31;
+			param->level = 31;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_3_2:
-			inst->enc_param.level = 32;
+			param->level = 32;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_4_0:
-			inst->enc_param.level = 40;
+			param->level = 40;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_4_1:
-			inst->enc_param.level = 41;
+			param->level = 41;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_4_2:
-			inst->enc_param.level = 42;
+			param->level = 42;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_5_0:
-			inst->enc_param.level = 50;
+			param->level = 50;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LEVEL_5_1:
-			inst->enc_param.level = 51;
+			param->level = 51;
 			break;
 		default:
 			return -EINVAL;
 		}
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_MIN_QP:
-		inst->enc_param.min_qp_i = ctrl->val;
-		inst->enc_param.min_qp_p = ctrl->val;
-		inst->enc_param.min_qp_b = ctrl->val;
+		param->min_qp_i = ctrl->val;
+		param->min_qp_p = ctrl->val;
+		param->min_qp_b = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_MAX_QP:
-		inst->enc_param.max_qp_i = ctrl->val;
-		inst->enc_param.max_qp_p = ctrl->val;
-		inst->enc_param.max_qp_b = ctrl->val;
+		param->max_qp_i = ctrl->val;
+		param->max_qp_p = ctrl->val;
+		param->max_qp_b = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP:
-		inst->enc_param.intra_qp = ctrl->val;
+		param->intra_qp = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE:
 		switch (ctrl->val) {
 		case V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_DISABLED:
-			inst->enc_param.disable_deblk = 1;
-			inst->enc_param.lf_cross_slice_boundary_enable = 1;
+			param->disable_deblk = 1;
+			param->lf_cross_slice_boundary_enable = 1;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_ENABLED:
-			inst->enc_param.disable_deblk = 0;
-			inst->enc_param.lf_cross_slice_boundary_enable = 1;
+			param->disable_deblk = 0;
+			param->lf_cross_slice_boundary_enable = 1;
 			break;
 		case V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY:
-			inst->enc_param.disable_deblk = 0;
-			inst->enc_param.lf_cross_slice_boundary_enable = 0;
+			param->disable_deblk = 0;
+			param->lf_cross_slice_boundary_enable = 0;
 			break;
 		default:
 			return -EINVAL;
 		}
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_BETA:
-		inst->enc_param.beta_offset_div2 = ctrl->val;
+		param->beta_offset_div2 = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_ALPHA:
-		inst->enc_param.tc_offset_div2 = ctrl->val;
+		param->tc_offset_div2 = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM:
-		inst->enc_param.transform8x8_enable = ctrl->val;
+		param->transform8x8_enable = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_CONSTRAINED_INTRA_PREDICTION:
-		inst->enc_param.const_intra_pred_flag = ctrl->val;
+		param->const_intra_pred_flag = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_CHROMA_QP_INDEX_OFFSET:
-		inst->enc_param.chroma_cb_qp_offset = ctrl->val;
-		inst->enc_param.chroma_cr_qp_offset = ctrl->val;
+		param->chroma_cb_qp_offset = ctrl->val;
+		param->chroma_cr_qp_offset = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_I_PERIOD:
-		inst->enc_param.intra_period = ctrl->val;
+		param->intra_period = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE:
-		inst->enc_param.entropy_coding_mode = ctrl->val;
+		param->entropy_coding_mode = ctrl->val;
 		break;
 	case V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR:
-		inst->enc_param.forced_idr_header_enable = ctrl->val;
+		param->forced_idr_header_enable = ctrl->val;
 		break;
 	case V4L2_CID_MIN_BUFFERS_FOR_OUTPUT:
 		break;
@@ -1283,7 +1297,9 @@ static void wave5_set_enc_picture_size(struct enc_open_param *open_param,
 static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 				   struct vpu_instance *inst)
 {
-	struct enc_wave_param input = inst->enc_param;
+	struct enc_wave_param input = inst->std == W_HEVC_ENC ?
+		inst->hevc_param : inst->enc_param;
+	const struct enc_wave_param *common = &inst->enc_param;
 	const struct v4l2_format_info *info;
 
 	info = v4l2_format_info(inst->src_fmt.pixelformat);
@@ -1334,9 +1350,9 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 		open_param->wave_param.rc_weight_param = 16;
 		open_param->wave_param.rc_weight_buf = 128;
 	}
-	open_param->wave_param.mb_level_rc_enable = input.mb_level_rc_enable;
-	open_param->wave_param.cu_level_rc_enable = input.cu_level_rc_enable;
-	open_param->wave_param.hvs_qp_enable = input.hvs_qp_enable;
+	open_param->wave_param.mb_level_rc_enable = common->mb_level_rc_enable;
+	open_param->wave_param.cu_level_rc_enable = common->cu_level_rc_enable;
+	open_param->wave_param.hvs_qp_enable = common->hvs_qp_enable;
 	open_param->bit_rate = inst->bit_rate;
 	open_param->vbv_buffer_size = inst->vbv_buf_size;
 	if (inst->rc_mode == 0)
@@ -1344,7 +1360,7 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.profile = input.profile;
 	open_param->wave_param.en_still_picture = input.en_still_picture;
 	open_param->wave_param.level = input.level;
-	open_param->wave_param.internal_bit_depth = inst->bit_depth;
+	open_param->wave_param.internal_bit_depth = input.internal_bit_depth;
 	open_param->wave_param.intra_qp = input.intra_qp;
 	open_param->wave_param.min_qp_i = input.min_qp_i;
 	open_param->wave_param.max_qp_i = input.max_qp_i;
@@ -1359,11 +1375,11 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.beta_offset_div2 = input.beta_offset_div2;
 	open_param->wave_param.decoding_refresh_type = input.decoding_refresh_type;
 	open_param->wave_param.intra_period = input.intra_period;
-	open_param->wave_param.bg_detection = input.bg_detection;
+	open_param->wave_param.bg_detection = common->bg_detection;
 	if (inst->std == W_HEVC_ENC) {
 		if (input.intra_period == 0) {
 			open_param->wave_param.decoding_refresh_type = DEC_REFRESH_TYPE_IDR;
-			open_param->wave_param.intra_period = input.avc_idr_period;
+			open_param->wave_param.intra_period = common->avc_idr_period;
 		}
 	} else {
 		open_param->wave_param.constraint_set1_flag = input.constraint_set1_flag;
@@ -1379,13 +1395,13 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.transform8x8_enable = input.transform8x8_enable;
 	open_param->wave_param.chroma_cb_qp_offset = input.chroma_cb_qp_offset;
 	open_param->wave_param.chroma_cr_qp_offset = input.chroma_cr_qp_offset;
-	open_param->wave_param.independ_slice_mode = input.independ_slice_mode;
-	open_param->wave_param.independ_slice_mode_arg = input.independ_slice_mode_arg;
-	open_param->wave_param.avc_slice_mode = input.avc_slice_mode;
-	open_param->wave_param.avc_slice_arg = input.avc_slice_arg;
+	open_param->wave_param.independ_slice_mode = common->independ_slice_mode;
+	open_param->wave_param.independ_slice_mode_arg = common->independ_slice_mode_arg;
+	open_param->wave_param.avc_slice_mode = common->avc_slice_mode;
+	open_param->wave_param.avc_slice_arg = common->avc_slice_arg;
 	wave5_set_intra_refresh(&open_param->wave_param, inst->conf_win.height,
 			       inst->intra_refresh_period, inst->std == W_HEVC_ENC);
-	open_param->wave_param.forced_idr_header_enable = input.forced_idr_header_enable;
+	open_param->wave_param.forced_idr_header_enable = common->forced_idr_header_enable;
 
 	return 0;
 }
