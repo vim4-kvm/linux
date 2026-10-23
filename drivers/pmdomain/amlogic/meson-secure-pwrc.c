@@ -23,6 +23,7 @@
 #include <linux/arm-smccc.h>
 #include <linux/firmware/meson/meson_sm.h>
 #include <linux/module.h>
+#include <linux/iopoll.h>
 
 #define PWRC_ON		1
 #define PWRC_OFF	0
@@ -33,6 +34,7 @@ struct meson_secure_pwrc_domain {
 	unsigned int index;
 	unsigned int parent;
 	struct meson_secure_pwrc *pwrc;
+	bool verify_state;
 };
 
 struct meson_secure_pwrc {
@@ -47,6 +49,7 @@ struct meson_secure_pwrc_domain_desc {
 	unsigned int flags;
 	char *name;
 	bool (*is_off)(struct meson_secure_pwrc_domain *pwrc_domain);
+	bool verify_state;
 };
 
 struct meson_secure_pwrc_domain_data {
@@ -65,6 +68,25 @@ static bool pwrc_secure_is_off(struct meson_secure_pwrc_domain *pwrc_domain)
 	return is_off;
 }
 
+static int meson_secure_pwrc_wait(struct meson_secure_pwrc_domain *domain, bool off)
+{
+	int ret, status;
+	s32 is_off;
+
+	if (!domain->verify_state)
+		return 0;
+	/* SET only acknowledges dispatch; GET reports whether power was removed. */
+	ret = read_poll_timeout(meson_sm_call, status,
+				status < 0 || is_off < 0 || is_off == off,
+				10, 10000, false, domain->pwrc->fw, SM_A1_PWRC_GET,
+				&is_off, domain->index, 0, 0, 0, 0);
+	if (ret)
+		return ret;
+	if (status < 0)
+		return status;
+	return is_off < 0 ? -EIO : 0;
+}
+
 static int meson_secure_pwrc_off(struct generic_pm_domain *domain)
 {
 	int ret = 0;
@@ -77,7 +99,7 @@ static int meson_secure_pwrc_off(struct generic_pm_domain *domain)
 		ret = -EINVAL;
 	}
 
-	return ret;
+	return ret ?: meson_secure_pwrc_wait(pwrc_domain, true);
 }
 
 static int meson_secure_pwrc_on(struct generic_pm_domain *domain)
@@ -92,7 +114,7 @@ static int meson_secure_pwrc_on(struct generic_pm_domain *domain)
 		ret = -EINVAL;
 	}
 
-	return ret;
+	return ret ?: meson_secure_pwrc_wait(pwrc_domain, false);
 }
 
 #define SEC_PD(__name, __flag)			\
@@ -335,7 +357,13 @@ static const struct meson_secure_pwrc_domain_desc t7_pwrc_domains[] = {
 	TOP_PD(T7_DOS_HCODEC,	0, PWRC_T7_NIC3_ID),
 	TOP_PD(T7_DOS_HEVC,	0, PWRC_T7_NIC3_ID),
 	TOP_PD(T7_DOS_VDEC,	0, PWRC_T7_NIC3_ID),
-	TOP_PD(T7_DOS_WAVE,	0, PWRC_T7_NIC3_ID),
+	[PWRC_T7_DOS_WAVE_ID] = {
+		.name = "T7_DOS_WAVE",
+		.index = PWRC_T7_DOS_WAVE_ID,
+		.parent = PWRC_T7_NIC3_ID,
+		.is_off = pwrc_secure_is_off,
+		.verify_state = true,
+	},
 	/* VPU domains: the VPU keeps state in all three, keep them on */
 	SEC_PD(T7_VPU_HDMI,	GENPD_FLAG_ALWAYS_ON),
 	/* USB, SDIO and eMMC hosts do not recover from a power cycle */
@@ -447,6 +475,7 @@ static int meson_secure_pwrc_probe(struct platform_device *pdev)
 		dom->pwrc = pwrc;
 		dom->index = match->domains[i].index;
 		dom->parent = match->domains[i].parent;
+		dom->verify_state = match->domains[i].verify_state;
 		dom->base.name = match->domains[i].name;
 		dom->base.flags = match->domains[i].flags;
 		dom->base.power_on = meson_secure_pwrc_on;
