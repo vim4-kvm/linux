@@ -62,12 +62,23 @@ struct aml_vdec_hw {
     void *dev, *map[1];
 };
 static int fail_at, bad_at, calls, pic_reads, on_error, off_error, off_calls;
+static unsigned long secure_result;
+static bool policy_set;
+struct arm_smccc_res { unsigned long a0; };
+static void arm_smccc_smc(unsigned int cmd, unsigned int id, int secure, int a,
+                         int b, int c, int d, int e, struct arm_smccc_res *res)
+{
+    assert(cmd == 0xb200000e && id == 13 && !secure);
+    assert(!calls);
+    res->a0 = secure_result; policy_set = !secure_result;
+}
 static const int registers[] = {
     DOS_SW_RESET0, DOS_MEM_PD_VDEC, DOS_GCLK_EN0, DOS_GCLK_EN0,
     GCLK_EN, GCLK_EN, MDEC_PIC_DC_CTRL
 };
 static int access_reg(int reg)
 {
+    assert(policy_set);
     assert(calls < 7 && registers[calls] == reg);
     calls++;
     if (reg == MDEC_PIC_DC_CTRL) pic_reads++;
@@ -103,6 +114,10 @@ int main(void)
     on_error = -EIO;
     assert(aml_vdec_t7_mdec_test(&hw) == -EIO && !calls && !off_calls);
     on_error = 0;
+    secure_result = (unsigned long)-1;
+    assert(aml_vdec_t7_mdec_test(&hw) == -EACCES);
+    assert(!calls && !pic_reads && off_calls == 1 && !hw.mdec_test_passed);
+    secure_result = 0;
     for (int i = 1; i <= 7; i++) {
         calls = pic_reads = off_calls = 0; fail_at = i;
         assert(aml_vdec_t7_mdec_test(&hw) == -EIO);
