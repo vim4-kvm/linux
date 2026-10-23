@@ -75,6 +75,51 @@ with tempfile.TemporaryDirectory(prefix='wave5-profile-') as directory:
                     str(source), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 
+# Check the actual picture-command packing, including simultaneous IDR and QP.
+write = hardware[hardware.index('\tvpu_write_reg(inst->dev, W5_CMD_ENC_PIC_PIC_PARAM,'):]
+write = write[:write.index(';') + 1]
+packing = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+typedef uint32_t u32;
+#define BIT(n) (1U<<(n))
+#define W5_CMD_ENC_PIC_PIC_PARAM 0
+struct vpu_instance { int dev; };
+struct enc_param { bool force_keyframe, force_qp; u32 qp_i, qp_p, qp_b; };
+static u32 command;
+static void vpu_write_reg(int dev,unsigned reg,u32 value)
+{ (void)dev; (void)reg; command=value; }
+'''
+packing_checks = r'''
+int main(void)
+{
+    struct vpu_instance inst={0};
+    struct enc_param option={0};
+    for(unsigned key=0;key<2;key++) for(unsigned enable=0;enable<2;enable++)
+        for(unsigned qp=0;qp<=51;qp++) {
+            option=(struct enc_param){key,enable,qp,51-qp,qp/2};
+            pack(&inst,&option);
+            assert(((command>>20)&1)==key && ((command>>21)&7)==(key?3:0));
+            assert(((command>>1)&1)==enable && !(command&1));
+            assert(((command>>2)&63)==(enable?qp:0));
+            assert(((command>>8)&63)==(enable?51-qp:0));
+            assert(((command>>14)&63)==(enable?qp/2:0));
+        }
+    puts("Wave5 fixed QP and simultaneous IDR command packing passed (208 cases)");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='wave5-picture-') as directory:
+    code = Path(directory) / 'picture.c'
+    binary = Path(directory) / 'picture'
+    wrapper = ('static void pack(struct vpu_instance *inst,struct enc_param *option) {\n' +
+               write + '\n}\n')
+    code.write_text(packing + wrapper + packing_checks)
+    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    str(code), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
 # Compile the complete setter too: separate extracted profile switches cannot
 # catch the shared-storage bug when both codec control sets are configured.
 api = (root / 'wave5-vpuapi.h').read_text()
