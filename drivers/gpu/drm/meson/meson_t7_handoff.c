@@ -33,6 +33,7 @@
 
 #include "meson_registers.h"
 #include "meson_t7_handoff.h"
+#include "meson_t7_modeset.h"
 
 #define HANDOFF_WIDTH	1920
 #define HANDOFF_HEIGHT	1080
@@ -60,9 +61,12 @@ struct meson_t7_handoff {
 	spinlock_t lock; /* Address publication and IRQ acknowledgment. */
 	wait_queue_head_t wait;
 	u32 pending_addr;
+	bool pending_enable;
 	u32 pending_format, pending_stride, pending_ctrl2;
 	u32 boot_format, boot_stride, boot_ctrl2;
 	bool linear_formats;
+	struct meson_t7_modeset *modeset;
+	bool native_modeset;
 	u32 requested, written, applied;
 	u32 vsync_count;
 	bool faulted;
@@ -75,6 +79,12 @@ static struct meson_t7_handoff *to_handoff(struct drm_device *drm)
 {
 	return container_of(drm, struct meson_t7_handoff, drm);
 }
+
+bool meson_t7_display_ready(struct drm_crtc *crtc)
+{
+	return !READ_ONCE(to_handoff(crtc->dev)->faulted);
+}
+EXPORT_SYMBOL_GPL(meson_t7_display_ready);
 
 /* Both interrupt orders are possible: do not complete until both have arrived. */
 static void meson_t7_handoff_rdma_complete(struct meson_t7_handoff *display)
@@ -121,12 +131,18 @@ static void meson_t7_handoff_rdma_arm(struct meson_t7_handoff *display)
 	table[5] = display->pending_ctrl2;
 	table[6] = VIU_OSD1_BLK1_CFG_W4;
 	table[7] = display->pending_addr >> 4;
+	if (display->native_modeset) {
+		table[8] = VIU_OSD1_CTRL_STAT;
+		table[9] = (readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT)) & ~BIT(0)) |
+			   (display->pending_enable ? BIT(0) : 0);
+	}
 	display->rdma_done = false;
 	display->armed_vsync = display->vsync_count;
 	dma_wmb();
 	writel(display->rdma_dma, display->rdma + RDMA_REG(RDMA_AHB_START_ADDR_1));
 	writel(0, display->rdma + RDMA_REG(T7_RDMA_START_MSB));
-	writel(display->rdma_dma + 31, display->rdma + RDMA_REG(RDMA_AHB_END_ADDR_1));
+	writel(display->rdma_dma + (display->native_modeset ? 39 : 31),
+	       display->rdma + RDMA_REG(RDMA_AHB_END_ADDR_1));
 	writel(0, display->rdma + RDMA_REG(T7_RDMA_END_MSB));
 	writel(1, display->rdma + RDMA_REG(RDMA_AUTO_SRC1_SEL));
 }
@@ -194,6 +210,7 @@ static void meson_t7_handoff_scanout(struct meson_t7_handoff *display,
 		display->pending_ctrl2 = fb ? display->boot_ctrl2 | BIT(14) : display->boot_ctrl2;
 	}
 	display->pending_addr = addr;
+	display->pending_enable = !!fb;
 	sequence = ++display->requested;
 	if (display->rdma)
 		meson_t7_handoff_rdma_arm(display);
@@ -224,6 +241,7 @@ static int meson_t7_handoff_plane_check(struct drm_plane *plane,
 	struct meson_t7_handoff *display = to_handoff(plane->dev);
 	struct drm_crtc_state *crtc_state = NULL;
 	dma_addr_t addr;
+	unsigned int width = HANDOFF_WIDTH, height = HANDOFF_HEIGHT;
 	int ret;
 
 	if (READ_ONCE(display->faulted))
@@ -238,15 +256,19 @@ static int meson_t7_handoff_plane_check(struct drm_plane *plane,
 		return ret;
 	if (!new->visible)
 		return 0;
+	if (display->native_modeset) {
+		width = crtc_state->adjusted_mode.hdisplay;
+		height = crtc_state->adjusted_mode.vdisplay;
+	}
 	if (new->src_x || new->src_y || new->crtc_x || new->crtc_y ||
 	    (new->fb->format->format != DRM_FORMAT_RGB888 &&
 	     (!display->linear_formats ||
 	      (new->fb->format->format != DRM_FORMAT_XRGB8888 &&
 	       new->fb->format->format != DRM_FORMAT_XBGR8888))) ||
-	    new->src_w != HANDOFF_WIDTH << 16 || new->src_h != HANDOFF_HEIGHT << 16 ||
-	    new->crtc_w != HANDOFF_WIDTH || new->crtc_h != HANDOFF_HEIGHT ||
-	    new->fb->width != HANDOFF_WIDTH || new->fb->height != HANDOFF_HEIGHT ||
-	    new->fb->pitches[0] < HANDOFF_WIDTH * new->fb->format->cpp[0] ||
+	    new->src_w != width << 16 || new->src_h != height << 16 ||
+	    (unsigned int)new->crtc_w != width || (unsigned int)new->crtc_h != height ||
+	    new->fb->width != width || new->fb->height != height ||
+	    new->fb->pitches[0] < width * new->fb->format->cpp[0] ||
 	    new->fb->pitches[0] > 0xfff * 16 || !IS_ALIGNED(new->fb->pitches[0], 32) ||
 	    (!display->linear_formats &&
 	     (new->fb->pitches[0] != HANDOFF_PITCH || new->fb->offsets[0])) ||
@@ -254,7 +276,7 @@ static int meson_t7_handoff_plane_check(struct drm_plane *plane,
 		return -EINVAL;
 	addr = drm_fb_dma_get_gem_addr(new->fb, new, 0);
 	if (!IS_ALIGNED(addr, 16) ||
-	    addr > U32_MAX - new->fb->pitches[0] * HANDOFF_HEIGHT + 1)
+	    addr > U32_MAX - new->fb->pitches[0] * height + 1)
 		return -ERANGE;
 	return 0;
 }
@@ -285,8 +307,10 @@ static int meson_t7_handoff_crtc_check(struct drm_crtc *crtc,
 				       struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *new = drm_atomic_get_new_crtc_state(state, crtc);
+	struct meson_t7_handoff *display = to_handoff(crtc->dev);
 
-	if (new->enable && meson_t7_handoff_mode_valid(&new->mode) != MODE_OK)
+	if (new->enable && (display->native_modeset ? meson_t7_mode_valid(&new->mode) :
+			   meson_t7_handoff_mode_valid(&new->mode)) != MODE_OK)
 		return -EINVAL;
 	return drm_atomic_add_affected_planes(state, crtc);
 }
@@ -317,6 +341,9 @@ static void meson_t7_handoff_flush(struct drm_crtc *crtc,
 	struct drm_crtc_state *old = drm_atomic_get_old_crtc_state(state, crtc);
 	bool vblank_ref = false;
 
+	/* Native enable programs the stopped pipe and completes the initial flip. */
+	if (display->native_modeset && drm_atomic_crtc_needs_modeset(crtc->state))
+		return;
 	if (crtc->state->active) {
 		/* Keep DRM sequence/timestamps running after the idle off-delay. */
 		if (old->active)
@@ -325,7 +352,8 @@ static void meson_t7_handoff_flush(struct drm_crtc *crtc,
 			meson_t7_handoff_scanout(display, plane->fb,
 						 drm_fb_dma_get_gem_addr(plane->fb, plane, 0));
 		else
-			meson_t7_handoff_scanout(display, NULL, HANDOFF_BOOT_ADDR);
+			meson_t7_handoff_scanout(display, NULL,
+					 display->native_modeset ? 0 : HANDOFF_BOOT_ADDR);
 	}
 	if (crtc->state->event && READ_ONCE(display->faulted))
 		meson_t7_handoff_abort_event(crtc);
@@ -342,12 +370,70 @@ static void meson_t7_handoff_flush(struct drm_crtc *crtc,
 static void meson_t7_handoff_enable(struct drm_crtc *crtc,
 				    struct drm_atomic_commit *state)
 {
+	struct meson_t7_handoff *display = to_handoff(crtc->dev);
+	struct drm_plane_state *plane = display->plane.state;
+	int ret;
+
+	if (display->native_modeset) {
+		/* Gate fetch before changing geometry; no stale boot-frame DMA at 4K. */
+		writel(readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT)) & ~BIT(0),
+		       display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
+		ret = meson_t7_modeset_enable(display->modeset, &crtc->state->adjusted_mode);
+		if (ret) {
+			WRITE_ONCE(display->faulted, true);
+			drm_err(crtc->dev, "ENC2 modeset failed: %d; restart required\n", ret);
+			if (crtc->state->event)
+				meson_t7_handoff_abort_event(crtc);
+			return;
+		}
+		writel((crtc->state->adjusted_mode.hdisplay - 1) << 16,
+		       display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W1));
+		writel((crtc->state->adjusted_mode.vdisplay - 1) << 16,
+		       display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W2));
+		writel((crtc->state->adjusted_mode.hdisplay - 1) << 16,
+		       display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W3));
+		writel((crtc->state->adjusted_mode.vdisplay - 1) << 16,
+		       display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W4));
+	}
 	drm_crtc_vblank_on(crtc);
+	if (display->native_modeset) {
+		meson_t7_handoff_scanout(display, plane->visible ? plane->fb : NULL,
+			plane->visible ? drm_fb_dma_get_gem_addr(plane->fb, plane, 0) : 0);
+		if (crtc->state->event) {
+			if (display->faulted) {
+				meson_t7_handoff_abort_event(crtc);
+			} else {
+				spin_lock_irq(&crtc->dev->event_lock);
+				drm_crtc_send_vblank_event(crtc, crtc->state->event);
+				crtc->state->event = NULL;
+				spin_unlock_irq(&crtc->dev->event_lock);
+			}
+		}
+	}
 }
 
 static void meson_t7_handoff_disable(struct drm_crtc *crtc,
 				     struct drm_atomic_commit *state)
 {
+	struct meson_t7_handoff *display = to_handoff(crtc->dev);
+
+	if (display->native_modeset) {
+		/* Blank at vsync and retire before stopping the encoder's interrupts. */
+		meson_t7_handoff_scanout(display, NULL, 0);
+		meson_t7_modeset_disable(display->modeset);
+		drm_crtc_vblank_off(crtc);
+		if (crtc->state->event) {
+			if (display->faulted) {
+				meson_t7_handoff_abort_event(crtc);
+			} else if (!crtc->state->active) {
+				spin_lock_irq(&crtc->dev->event_lock);
+				drm_crtc_send_vblank_event(crtc, crtc->state->event);
+				crtc->state->event = NULL;
+				spin_unlock_irq(&crtc->dev->event_lock);
+			}
+		}
+		return;
+	}
 	/* The reserved boot frame is never returned to the DMA allocator. */
 	meson_t7_handoff_scanout(to_handoff(crtc->dev), NULL, HANDOFF_BOOT_ADDR);
 	drm_crtc_vblank_off(crtc);
@@ -387,11 +473,13 @@ static int meson_t7_handoff_dumb_create(struct drm_file *file, struct drm_device
 {
 	struct meson_t7_handoff *display = to_handoff(drm);
 
-	if (args->width != HANDOFF_WIDTH || args->height != HANDOFF_HEIGHT ||
+	if (((!display->native_modeset &&
+	      (args->width != HANDOFF_WIDTH || args->height != HANDOFF_HEIGHT))) ||
+	    !args->width || args->width > 3840 || !args->height || args->height > 2160 ||
 	    (args->bpp != 24 && (!display->linear_formats || args->bpp != 32)))
 		return -EINVAL;
-	args->pitch = HANDOFF_WIDTH * (args->bpp / 8);
-	args->size = PAGE_ALIGN(args->pitch * HANDOFF_HEIGHT);
+	args->pitch = ALIGN(args->width * (args->bpp / 8), 32);
+	args->size = PAGE_ALIGN(args->pitch * args->height);
 	return drm_gem_dma_dumb_create_internal(file, drm, args);
 }
 
@@ -456,13 +544,25 @@ static int meson_t7_handoff_check_dt(struct device *dev)
 	struct reserved_mem *memory;
 	int ret;
 
-	ret = of_parse_phandle_with_args(dev->of_node, "clocks", "#clock-cells", 4, &pll);
-	if (ret)
-		return ret;
-	ret = of_device_is_compatible(pll.np, "amlogic,t7-hdmi-pll-ro") ? 0 : -EINVAL;
-	of_node_put(pll.np);
-	if (ret)
-		return dev_err_probe(dev, ret, "HDMI PLL provider must be read-only\n");
+	if (!of_device_is_compatible(dev->of_node, "amlogic,t7-display")) {
+		ret = of_parse_phandle_with_args(dev->of_node, "clocks", "#clock-cells", 4, &pll);
+		if (ret)
+			return ret;
+		ret = of_device_is_compatible(pll.np, "amlogic,t7-hdmi-pll-ro") ? 0 : -EINVAL;
+		of_node_put(pll.np);
+		if (ret)
+			return dev_err_probe(dev, ret, "HDMI PLL provider must be read-only\n");
+	} else {
+		for_each_of_allnodes(node) {
+			if (of_device_is_available(node) &&
+			    (of_device_is_compatible(node, "amlogic,t7-hdmi-pll-ro") ||
+			     of_device_is_compatible(node, "amlogic,t7-hdmi-pll"))) {
+				of_node_put(node);
+				return dev_err_probe(dev, -EBUSY,
+						     "Native display must own HDMI PLL\n");
+			}
+		}
+	}
 	for_each_compatible_node(node, NULL, "simple-framebuffer") {
 		if (of_device_is_available(node)) {
 			of_node_put(node);
@@ -506,7 +606,8 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	if (IS_ERR(display))
 		return PTR_ERR(display);
 	drm = &display->drm;
-	display->linear_formats = of_device_is_compatible(dev->of_node,
+	display->native_modeset = of_device_is_compatible(dev->of_node, "amlogic,t7-display");
+	display->linear_formats = display->native_modeset || of_device_is_compatible(dev->of_node,
 							"amlogic,t7-display-linear");
 	platform_set_drvdata(pdev, display);
 	spin_lock_init(&display->lock);
@@ -517,6 +618,8 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	ret = devm_clk_bulk_get_all_enabled(dev, &clocks);
 	if (ret < 0)
 		return ret;
+	if (display->native_modeset && (ret != 5 || clk_get_rate(clocks[4].clk) != 24000000))
+		return dev_err_probe(dev, -EINVAL, "Native PLL requires a 24MHz reference\n");
 	for (i = 0; i < 3; i++) {
 		struct device *domain = dev_pm_domain_attach_by_id(dev, i);
 
@@ -535,7 +638,8 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	if (IS_ERR(display->osd))
 		return PTR_ERR(display->osd);
 	/* The matching firmware selects ENC2: vendor VENC words have +0x800. */
-	display->venc = meson_t7_handoff_map(pdev, "venc", 0xff008db8, 0x108);
+	display->venc = meson_t7_handoff_map(pdev, "venc", 0xff008db8,
+					   display->native_modeset ? 0x608 : 0x108);
 	if (IS_ERR(display->venc))
 		return PTR_ERR(display->venc);
 	if (display->linear_formats) {
@@ -548,7 +652,7 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		for (i = 0; i < 7; i++)
 			if (readl(display->rdma + RDMA_REG(RDMA_AUTO_SRC1_SEL) + i * 4))
 				return dev_err_probe(dev, -EBUSY, "Firmware RDMA channel active\n");
-		display->rdma_table = dmam_alloc_coherent(dev, 32, &display->rdma_dma,
+		display->rdma_table = dmam_alloc_coherent(dev, 40, &display->rdma_dma,
 							GFP_KERNEL);
 		if (!display->rdma_table)
 			return -ENOMEM;
@@ -568,6 +672,12 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 				       "meson-t7-osd-rdma", display);
 		if (ret)
 			return ret;
+	}
+	if (display->native_modeset) {
+		display->modeset = meson_t7_modeset_init(pdev);
+		if (IS_ERR(display->modeset))
+			return dev_err_probe(dev, PTR_ERR(display->modeset),
+					     "No ENC2 timing resources\n");
 	}
 	ctrl = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
 	format = readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W0));
@@ -589,7 +699,8 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -ENODEV, "Firmware display contract does not match\n");
 	node = of_graph_get_remote_node(dev->of_node, 0, 0);
 	if (!node || !of_device_is_compatible(node, "amlogic,t7-hdmi-tx") ||
-	    !of_property_present(node, "amlogic,boot-handoff")) {
+	    (display->native_modeset ? !of_property_present(node, "amlogic,enc2-modeset") :
+	     !of_property_present(node, "amlogic,boot-handoff"))) {
 		of_node_put(node);
 		return dev_err_probe(dev, -EINVAL, "TX must use the boot-handoff bridge\n");
 	}
@@ -602,10 +713,10 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		return ret;
 	drm->mode_config.funcs = &meson_t7_handoff_mode_funcs;
 	drm->mode_config.helper_private = &meson_t7_handoff_mode_helpers;
-	drm->mode_config.min_width = HANDOFF_WIDTH;
-	drm->mode_config.max_width = HANDOFF_WIDTH;
-	drm->mode_config.min_height = HANDOFF_HEIGHT;
-	drm->mode_config.max_height = HANDOFF_HEIGHT;
+	drm->mode_config.min_width = display->native_modeset ? 640 : HANDOFF_WIDTH;
+	drm->mode_config.max_width = display->native_modeset ? 3840 : HANDOFF_WIDTH;
+	drm->mode_config.min_height = display->native_modeset ? 480 : HANDOFF_HEIGHT;
+	drm->mode_config.max_height = display->native_modeset ? 2160 : HANDOFF_HEIGHT;
 	ret = drm_universal_plane_init(drm, &display->plane, 1, &meson_t7_handoff_plane_funcs,
 				       formats, display->linear_formats ? ARRAY_SIZE(formats) : 1,
 				       modifiers,
@@ -670,6 +781,7 @@ static const struct dev_pm_ops meson_t7_handoff_pm = {
 static const struct of_device_id meson_t7_handoff_match[] = {
 	{ .compatible = "amlogic,t7-display-handoff" },
 	{ .compatible = "amlogic,t7-display-linear" },
+	{ .compatible = "amlogic,t7-display" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, meson_t7_handoff_match);

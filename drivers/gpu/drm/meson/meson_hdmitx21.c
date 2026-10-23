@@ -39,6 +39,7 @@
 
 #include "meson_drv.h"
 #include "meson_t7_handoff.h"
+#include "meson_t7_modeset.h"
 
 /* TOP registers (32-bit, byte offsets) */
 #define TOP_SW_RESET		0x000
@@ -110,6 +111,7 @@
 #define TPI_INFO_FSEL		0x6bf
 #define  TPI_INFO_FSEL_AVI	0
 #define  TPI_INFO_FSEL_AUDIO	2
+#define  TPI_INFO_FSEL_VENDOR	5
 #define TPI_INFO_B0		0x6c0
 #define TPI_INFO_EN		0x6df
 #define GCP_CNTL		0x6e1
@@ -189,6 +191,8 @@ struct meson_hdmitx21 {
 	enum drm_connector_status hpd_sample, hpd_reported;
 	bool hpd_polling;
 	bool boot_monitor;
+	bool enc2_modeset;
+	void __iomem *phy;
 };
 
 static inline struct meson_hdmitx21 *bridge_to_hdmitx(struct drm_bridge *bridge)
@@ -237,6 +241,8 @@ static u32 phy_read(struct meson_hdmitx21 *tx, u32 reg)
 {
 	u32 val = 0;
 
+	if (tx->phy)
+		return readl(tx->phy + reg - PHY_CTRL0);
 	regmap_read(tx->hhi, reg, &val);
 
 	return val;
@@ -244,6 +250,10 @@ static u32 phy_read(struct meson_hdmitx21 *tx, u32 reg)
 
 static void phy_write(struct meson_hdmitx21 *tx, u32 reg, u32 val)
 {
+	if (tx->phy) {
+		writel(val, tx->phy + reg - PHY_CTRL0);
+		return;
+	}
 	regmap_write(tx->hhi, reg, val);
 }
 
@@ -501,7 +511,6 @@ static void meson_hdmitx21_hw_init(struct meson_hdmitx21 *tx)
 	cor_update(tx, AON_CYP_CTL, 0x3, 0x2);
 	cor_update(tx, PCLK2TMDS_MISC0, 0x3, 0);
 	cor_update(tx, HBLANK_REKEY_CONTROL, BIT(6), BIT(6));
-	meson_hdmitx21_set_avmute(tx, false);
 
 	top_pulse(tx, TOP_SW_RESET_I2C);
 }
@@ -639,6 +648,21 @@ static void meson_hdmitx21_config(struct meson_hdmitx21 *tx,
 	cor_update(tx, PWD_SRST, 0x6, 0);
 
 	cor_update(tx, TPI_SC, TPI_SC_HDMI_MODE, hdmi_mode ? TPI_SC_HDMI_MODE : 0);
+}
+
+static void meson_hdmitx21_write_vendor(struct meson_hdmitx21 *tx,
+					struct drm_connector *connector,
+					const struct drm_display_mode *mode)
+{
+	struct hdmi_vendor_infoframe frame;
+	u8 buf[10];
+	ssize_t len;
+
+	if (drm_hdmi_vendor_infoframe_from_display_mode(&frame, connector, mode))
+		return;
+	len = hdmi_vendor_infoframe_pack(&frame, buf, sizeof(buf));
+	if (len > 0)
+		meson_hdmitx21_write_infoframe(tx, TPI_INFO_FSEL_VENDOR, buf, len);
 }
 
 /* Audio: two channel LPCM from I2S (TDM through tohdmitx) */
@@ -818,6 +842,8 @@ static int meson_hdmitx21_bridge_attach(struct drm_bridge *bridge,
 
 	if (!(flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR))
 		return -EINVAL;
+	if (tx->enc2_modeset)
+		return 0;
 
 	/* The HDMI PHY registers are in the analog control block of the VPU */
 	tx->hhi = priv->hhi;
@@ -834,11 +860,38 @@ meson_hdmitx21_bridge_mode_valid(struct drm_bridge *bridge,
 				 const struct drm_display_info *info,
 				 const struct drm_display_mode *mode)
 {
+	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
+	enum drm_mode_status status = MODE_OK;
+	const char *reason;
+
+	if (IS_ENABLED(CONFIG_DRM_MESON_T7_HANDOFF) && tx->enc2_modeset)
+		status = meson_t7_mode_valid(mode);
+	if (status != MODE_OK) {
+		if (status == MODE_NOCLOCK)
+			reason = "pixel clock outside 25.175..594MHz or VCO outside 3..6GHz";
+		else if (status == MODE_NO_INTERLACE || status == MODE_NO_DBLESCAN)
+			reason = "only progressive single-scan timing is implemented";
+		else
+			reason = "geometry/porches exceed ENC2 linear path limits";
+		drm_dbg_kms(bridge->dev, "ENC2 rejects " DRM_MODE_FMT ": %s (status=%d)\n",
+			    DRM_MODE_ARG(mode), reason, status);
+		return status;
+	}
 	/* Up to 600 MHz; above 340 MHz the sink must support scrambling */
 	if (mode->clock > 600000)
 		return MODE_CLOCK_HIGH;
-	if (mode->clock > 340000 && !info->hdmi.scdc.scrambling.supported)
+	if (mode->clock > 340000 &&
+	    (!info->hdmi.scdc.supported || !info->hdmi.scdc.scrambling.supported)) {
+		drm_dbg_kms(bridge->dev, "Reject >340MHz TMDS without sink SCDC/scrambling\n");
 		return MODE_CLOCK_HIGH;
+	}
+	if (info->max_tmds_clock && mode->clock > info->max_tmds_clock) {
+		drm_dbg_kms(bridge->dev, "Reject TMDS above sink limit %d kHz\n",
+			    info->max_tmds_clock);
+		return MODE_CLOCK_HIGH;
+	}
+	if (drm_mode_is_420_only(info, mode))
+		return MODE_BAD;
 
 	return MODE_OK;
 }
@@ -892,8 +945,8 @@ meson_hdmitx21_bridge_get_input_bus_fmts(struct drm_bridge *bridge,
 	if (!fmts)
 		return NULL;
 
-	/* The VENC sends YUV444, the controller converts it to RGB */
-	fmts[0] = MEDIA_BUS_FMT_YUV8_1X24;
+	/* This bridge configures both CSCs for RGB bypass. */
+	fmts[0] = MEDIA_BUS_FMT_RGB888_1X24;
 	*num_input_fmts = 1;
 
 	return fmts;
@@ -918,17 +971,29 @@ static void meson_hdmitx21_bridge_atomic_enable(struct drm_bridge *bridge,
 
 	mode = &crtc_state->adjusted_mode;
 	hdmi_mode = connector->display_info.is_hdmi;
+	if (IS_ENABLED(CONFIG_DRM_MESON_T7_HANDOFF) && tx->enc2_modeset &&
+	    !meson_t7_display_ready(crtc_state->crtc))
+		return;
 
 	scrambling = mode->clock > 340000;
 	if (connector->display_info.hdmi.scdc.supported &&
 	    meson_hdmitx21_ddc_write(tx, DDC_SCDC_ADDR, SCDC_TMDS_CONFIG,
-				     scrambling ? 0x03 : 0x00))
-		dev_warn(tx->dev, "SCDC write failed\n");
+				     scrambling ? 0x03 : 0x00)) {
+		dev_err(tx->dev, "SCDC write failed; TX remains muted\n");
+		meson_hdmitx21_audio_disconnect(tx);
+		meson_hdmitx21_set_avmute(tx, true);
+		meson_hdmitx21_phy_off(tx);
+		return;
+	}
 
 	meson_hdmitx21_set_avmute(tx, true);
+	if (tx->enc2_modeset)
+		meson_hdmitx21_hw_init(tx);
 	meson_hdmitx21_config(tx, mode, hdmi_mode, scrambling);
-	if (hdmi_mode)
+	if (hdmi_mode) {
 		meson_hdmitx21_write_avi(tx, connector, mode);
+		meson_hdmitx21_write_vendor(tx, connector, mode);
+	}
 	meson_hdmitx21_phy_on(tx, mode->clock);
 	cor_update(tx, TMDS_CTRL, BIT(3), BIT(3));
 	meson_hdmitx21_set_avmute(tx, false);
@@ -950,6 +1015,8 @@ static void meson_hdmitx21_bridge_atomic_disable(struct drm_bridge *bridge,
 	meson_hdmitx21_phy_off(tx);
 	mutex_lock(&tx->packet_lock);
 	cor_write(tx, TPI_INFO_FSEL, 0);
+	cor_write(tx, TPI_INFO_EN, 0);
+	cor_write(tx, TPI_INFO_FSEL, TPI_INFO_FSEL_VENDOR);
 	cor_write(tx, TPI_INFO_EN, 0);
 	mutex_unlock(&tx->packet_lock);
 }
@@ -1133,9 +1200,12 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	struct meson_hdmitx21 *tx;
 	struct resource *top, *cor;
 	bool monitor = of_property_present(dev->of_node, "amlogic,boot-monitor");
+	bool enc2 = of_property_present(dev->of_node, "amlogic,enc2-modeset");
 	u32 status, active, tpi;
 	int ret;
 
+	if (enc2 && !IS_ENABLED(CONFIG_DRM_MESON_T7_HANDOFF))
+		return -EOPNOTSUPP;
 	top = platform_get_resource_byname(pdev, IORESOURCE_MEM, "top");
 	cor = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cor");
 	if (!top || !cor || top->start != 0xfe300000 || cor->start != 0xfe380000 ||
@@ -1145,11 +1215,23 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	    !devm_request_mem_region(dev, cor->start, resource_size(cor), dev_name(dev)))
 		return -EBUSY;
 	tx = devm_drm_bridge_alloc(dev, struct meson_hdmitx21, bridge,
+				   enc2 ? &meson_hdmitx21_bridge_funcs :
 				   monitor ? &meson_hdmitx21_monitor_funcs :
 				   &meson_hdmitx21_boot_funcs);
 	if (IS_ERR(tx))
 		return PTR_ERR(tx);
 	tx->dev = dev;
+	tx->enc2_modeset = enc2;
+	monitor |= enc2;
+	if (enc2) {
+		struct resource *phy = platform_get_resource_byname(pdev, IORESOURCE_MEM, "phy");
+
+		if (!phy || phy->start != 0xfe008200 || resource_size(phy) != 0x18)
+			return -EINVAL;
+		tx->phy = devm_platform_ioremap_resource_byname(pdev, "phy");
+		if (IS_ERR(tx->phy))
+			return PTR_ERR(tx->phy);
+	}
 	mutex_init(&tx->audio_lock);
 	mutex_init(&tx->packet_lock);
 	tx->audio_muted = true;
@@ -1161,15 +1243,15 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	status = top_read(tx, TOP_STAT0);
 	active = top_read(tx, TOP_HV_ACTIVE);
 	tpi = cor_read(tx, TPI_SC);
-	dev_info(dev, "boot TX TOP_STAT0=%#x active=%#x TPI_SC=%#x (SMC read-only, fixed sink)\n",
-		 status, active, tpi);
+	dev_info(dev, "boot TX TOP_STAT0=%#x active=%#x TPI_SC=%#x (%s)\n",
+		 status, active, tpi, enc2 ? "ENC2 atomic modeset" : "firmware timing");
 	if (active != (1080 << 16 | 1920))
 		return dev_err_probe(dev, -ENODEV, "TX boot active area is not 1080p\n");
 	tx->bridge.of_node = dev->of_node;
 	tx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_MODES;
 	tx->bridge.type = DRM_MODE_CONNECTOR_HDMIA;
 	if (monitor) {
-		tx->boot_monitor = true;
+		tx->boot_monitor = !enc2;
 		tx->hpd = devm_gpiod_get(dev, "hpd", GPIOD_IN);
 		if (IS_ERR(tx->hpd))
 			return dev_err_probe(dev, PTR_ERR(tx->hpd), "No HPD GPIO\n");
@@ -1203,7 +1285,8 @@ static int meson_hdmitx21_probe(struct platform_device *pdev)
 	struct resource *top, *cor;
 	int ret;
 
-	if (of_property_present(dev->of_node, "amlogic,boot-handoff"))
+	if (of_property_present(dev->of_node, "amlogic,boot-handoff") ||
+	    of_property_present(dev->of_node, "amlogic,enc2-modeset"))
 		return meson_hdmitx21_boot_probe(pdev);
 
 	tx = devm_drm_bridge_alloc(dev, struct meson_hdmitx21, bridge,

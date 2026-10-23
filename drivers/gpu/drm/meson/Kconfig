@@ -17,13 +17,15 @@ config DRM_MESON
 	select DRM_DISPLAY_HDMI_CEC_NOTIFIER_HELPER if CEC_NOTIFIER
 
 config DRM_MESON_T7_HANDOFF
-	bool "Experimental T7 fixed boot display handoff"
+	bool "Experimental T7 split display controller"
 	depends on DRM_MESON=y && DRM_MESON_HDMITX21=y
 	help
 	  Take over a firmware-configured 1080p60 RGB888 OSD1 without changing
 	  VPP, VENC timing, PHY or PLL. Requires the dedicated display-m1 DTB.
 	  This built-in experiment has no suspend or driver unbind support.
-	  Only one linear OSD1 plane is exposed; audio and mode changes are absent.
+	  The display-m2 DTB enables ENC2 atomic modesetting, linear RGB scanout
+	  using vsync RDMA, and independent HDMI PCM audio. VDIN must use split
+	  capture resources. The normal meson VPU must remain disabled.
 
 config DRM_MESON_DW_HDMI
 	tristate "HDMI Synopsys Controller support for Amlogic Meson Display"

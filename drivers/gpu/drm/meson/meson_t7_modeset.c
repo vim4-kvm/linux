@@ -275,11 +275,31 @@ struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev)
 	struct platform_device *clock_device;
 	struct device_node *node;
 	unsigned int i;
+	static const struct {
+		const char *name;
+		u32 start, size;
+	} clock_regions[] = {
+		{ "pll", 0xfe0081c0, 0x20 },
+		{ "vid2", 0xfe0001e0, 0x20 },
+		{ "vid-div", 0xfe000204, 4 },
+	};
 
+	for (i = 0; i < ARRAY_SIZE(clock_regions); i++) {
+		struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+								   clock_regions[i].name);
+
+		if (!res || res->start != clock_regions[i].start ||
+		    resource_size(res) != clock_regions[i].size)
+			return ERR_PTR(-EINVAL);
+	}
 	hw = devm_kzalloc(&pdev->dev, sizeof(*hw), GFP_KERNEL);
 	if (!hw)
 		return ERR_PTR(-ENOMEM);
 	node = of_parse_phandle(pdev->dev.of_node, "amlogic,clock-controller", 0);
+	if (!node || !of_device_is_compatible(node, "amlogic,t7-peripherals-clkc")) {
+		of_node_put(node);
+		return ERR_PTR(-EINVAL);
+	}
 	clock_device = of_find_device_by_node(node);
 	of_node_put(node);
 	if (!clock_device)

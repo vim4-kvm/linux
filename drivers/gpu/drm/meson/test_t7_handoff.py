@@ -75,7 +75,7 @@ functions = source[source.index('static void meson_t7_handoff_rdma_complete'):
 functions += source[source.index('static int meson_t7_handoff_plane_check'):
                     source.index('static void meson_t7_handoff_plane_update')]
 functions += source[source.index('static void meson_t7_handoff_abort_event'):
-                    source.index('static void meson_t7_handoff_enable(')]
+                    source.index('static int meson_t7_handoff_enable_vblank(')]
 prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -97,7 +97,13 @@ struct drm_pending_event {
 };
 struct drm_pending_vblank_event { struct drm_pending_event base; };
 struct drm_plane_state;
-struct drm_crtc_state { bool active; struct drm_pending_vblank_event *event; };
+struct drm_crtc_state {
+    bool active, modeset;
+    struct {int hdisplay,vdisplay;} adjusted_mode;
+    struct drm_pending_vblank_event *event;
+};
+static bool drm_atomic_crtc_needs_modeset(struct drm_crtc_state *state)
+{return state->modeset;}
 struct drm_plane { struct drm_device *dev; struct drm_plane_state *state; };
 struct drm_crtc { struct drm_device *dev; struct drm_crtc_state *state; };
 struct drm_encoder { int unused; };
@@ -141,11 +147,27 @@ struct drm_atomic_commit {
 #define msecs_to_jiffies(value) (value)
 #define drm_err(...) ((void)0)
 static bool inject_timeout;
+static bool native_writes;
 static bool rdma_first;
 static unsigned int timeout_part;
 static u32 osd[32], venc[66];
-static u32 rdma[64], table[8];
+static u32 rdma[64], table[10];
 static unsigned int writes, vblanks;
+static bool fail_modeset;
+static unsigned int timing_stops;
+struct meson_t7_modeset;
+static int meson_t7_modeset_enable(struct meson_t7_modeset *hw, const void *mode)
+{
+    assert(!(osd[0] & 1)); /* Fetch must be blank before changing timing. */
+    return fail_modeset ? -ETIMEDOUT : 0;
+}
+static void meson_t7_modeset_disable(struct meson_t7_modeset *hw)
+{
+    assert(!(osd[0] & 1)); /* Blank RDMA completed before stopping vsync. */
+    timing_stops++;
+}
+static void drm_crtc_vblank_on(struct drm_crtc *crtc) {}
+static void drm_crtc_vblank_off(struct drm_crtc *crtc) {}
 static struct meson_t7_handoff *to_handoff(struct drm_device *drm);
 static struct drm_plane_state *drm_atomic_get_new_plane_state(
     struct drm_atomic_commit *state, struct drm_plane *plane) { return state->plane; }
@@ -188,7 +210,10 @@ static void writel(u32 value, void *address)
     }
     /* This function must never write a VDIN, VPP or arbitration register. */
     assert(address == &osd[4] || address == &osd[5] ||
-           address == &osd[11] || address == &osd[29]);
+           address == &osd[11] || address == &osd[29] ||
+           (native_writes && (address == &osd[0] || address == &osd[3] ||
+            ((uintptr_t)address >= (uintptr_t)&osd[12] &&
+             (uintptr_t)address <= (uintptr_t)&osd[14]))));
     *(u32 *)address = value;
     writes++;
 }
@@ -206,7 +231,7 @@ static void drm_framebuffer_put(struct drm_framebuffer *fb)
     if (display->rdma) { \
         assert(!meson_t7_handoff_rdma_irq(0, display)); \
         if (!inject_timeout || timeout_part == 2) { \
-            for (unsigned int i = 0; i < 8; i += 2) \
+            for (unsigned int i = 0; i < (display->native_modeset ? 10U : 8U); i += 2) \
                 writel(table[i + 1], osd + table[i] - VIU_OSD1_CTRL_STAT); \
             rdma[0x15] = RDMA_IRQ_STAT_CHAN1; \
             if (inject_timeout) meson_t7_handoff_rdma_irq(0, display); \
@@ -351,6 +376,29 @@ int main(void)
     meson_t7_handoff_flush(&display.crtc, &rmfb);
     assert(!running.event && cancelled == 2 && sent == previously_sent);
     puts("Latch failure: no successful page-flip event, error fence and released commit dependency passed");
+
+    native_writes=true; inject_timeout=false;
+    display.native_modeset=true; display.faulted=false; display.scanout=NULL;
+    running.adjusted_mode.hdisplay=3840; running.adjusted_mode.vdisplay=2160;
+    running.modeset=true; running.active=true;
+    struct drm_framebuffer uhd={.references=1,.format=&xrgb,.width=3840,.height=2160,
+                               .pitches={15360}};
+    display.plane.state->fb=&uhd; display.plane.state->visible=true;
+    previously_sent=sent; running.event=&event;
+    meson_t7_handoff_flush(&display.crtc,&rmfb);
+    assert(sent==previously_sent && running.event==&event);
+    meson_t7_handoff_enable(&display.crtc,&rmfb);
+    assert(sent==previously_sent+1 && !running.event && uhd.references==2 && (osd[0]&1));
+    assert(osd[VIU_OSD1_BLK0_CFG_W1 - VIU_OSD1_CTRL_STAT]==3839U<<16);
+    assert(osd[VIU_OSD1_BLK0_CFG_W2 - VIU_OSD1_CTRL_STAT]==2159U<<16);
+    running.active=false;
+    meson_t7_handoff_disable(&display.crtc,&rmfb);
+    assert(timing_stops==1 && uhd.references==1 && !display.scanout && !(osd[0]&1));
+    running.active=true; running.event=&event; fail_modeset=true;
+    previously_sent=sent;
+    meson_t7_handoff_enable(&display.crtc,&rmfb);
+    assert(display.faulted && !running.event && sent==previously_sent && uhd.references==1);
+    puts("Native atomic modeset: deferred initial flip, 4K geometry, blank/drain/stop and PLL failure passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
