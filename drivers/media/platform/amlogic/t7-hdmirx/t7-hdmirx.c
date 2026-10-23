@@ -1041,20 +1041,27 @@ static int t7_hdmirx_video_error(const char **reason, const char *value, int err
 static bool t7_hdmirx_tmds_valid(struct t7_hdmirx *rx)
 {
 	unsigned long reference = clk_get_rate(rx->clocks[T7_RX_METER].clk);
+	u32 sqo, cable_status, tmds_status;
 	u64 cable, tmds, delta;
+	bool valid;
 
 	/* Vendor T7 aml_get_tmds_valid_t7 uses SQO, matching recovered clocks
 	 * and alignment (checked by the caller), not the APLL lock bit. Keep
 	 * that bit for initial PLL acquisition, not ongoing source admission.
 	 */
-	if (!(readl(rx->top + T7_RX_TOP_MISC_STAT0) & BIT(0)))
-		return false;
-	cable = t7_hdmirx_meter_hz(readl(rx->top + T7_RX_TOP_METER_CABLE_STAT), reference);
-	tmds = t7_hdmirx_meter_hz(readl(rx->top + T7_RX_TOP_METER_HDMI_STAT), reference);
+	sqo = readl(rx->top + T7_RX_TOP_MISC_STAT0) & BIT(0);
+	cable_status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
+	tmds_status = readl(rx->top + T7_RX_TOP_METER_HDMI_STAT);
+	cable = t7_hdmirx_meter_hz(cable_status, reference);
+	tmds = t7_hdmirx_meter_hz(tmds_status, reference);
 	if (rx->uhd60)
 		cable *= 4;
 	delta = cable > tmds ? cable - tmds : tmds - cable;
-	return cable && tmds && delta <= 2000000;
+	valid = sqo && cable && tmds && delta <= 2000000;
+	if (!valid)
+		pr_info_ratelimited("t7-hdmirx TMDS admission: sqo=%u cable=%#x tmds=%#x reference=%lu ratio=%u\n",
+				    sqo, cable_status, tmds_status, reference, rx->uhd60 ? 4 : 1);
+	return valid;
 }
 
 static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reason)
