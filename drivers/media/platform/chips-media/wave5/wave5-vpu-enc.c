@@ -931,6 +931,9 @@ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_MPEG_VIDEO_BITRATE:
 		inst->bit_rate = ctrl->val;
 		break;
+	case V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY:
+		inst->quality = ctrl->val;
+		break;
 	case V4L2_CID_MPEG_VIDEO_BACKGROUND_DETECTION:
 		param->bg_detection = ctrl->val;
 		break;
@@ -1387,6 +1390,20 @@ static int wave5_set_vbv_size(struct enc_open_param *open_param,
 	return 0;
 }
 
+static void wave5_set_constant_quality(struct enc_wave_param *param,
+				       struct vpu_instance *inst)
+{
+	u32 qp;
+
+	if (inst->rc_mode != V4L2_MPEG_VIDEO_BITRATE_MODE_CQ)
+		return;
+	/* Normalize the standard quality scale to inverse QP, with RC disabled. */
+	qp = DIV_ROUND_CLOSEST((100 - inst->quality) * 51, 99);
+	param->intra_qp = qp;
+	param->fixed_qp_p = qp;
+	param->fixed_qp_b = qp;
+}
+
 static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 				   struct vpu_instance *inst)
 {
@@ -1468,6 +1485,7 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.intra_qp = input.intra_qp;
 	open_param->wave_param.fixed_qp_p = input.fixed_qp_p;
 	open_param->wave_param.fixed_qp_b = input.fixed_qp_b;
+	wave5_set_constant_quality(&open_param->wave_param, inst);
 	open_param->wave_param.min_qp_i = input.min_qp_i;
 	open_param->wave_param.max_qp_i = input.max_qp_i;
 	open_param->wave_param.min_qp_p = input.min_qp_p;
@@ -2111,6 +2129,8 @@ static int wave5_vpu_open_enc(struct file *filp)
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_BITRATE,
 			  0, 700000000, 1, 0);
+	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+			  V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY, 1, 100, 1, 50);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_GOP_SIZE,
 			  0, 2047, 1, 0);

@@ -873,6 +873,7 @@ struct vpu_instance {
 	unsigned int vbv_buf_size;
 	unsigned int h264_cpb_size;
 	unsigned int b_frames;
+	unsigned int quality;
 	unsigned int intra_refresh_period;
 	unsigned int rc_mode;
 	unsigned int rc_enable;
