@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Fixed 1080p60 handoff for the matching pd-handoff firmware, no MIPI. */
+#include "amlogic-t7-a311d2-khadas-vim4-display-m0.dts"
+
+/delete-node/ &hdmi_tx_out;
+
+/ {
+	display@ff006840 {
+		compatible = "amlogic,t7-display-handoff";
+		reg = <0x0 0xff006840 0x0 0x80>,
+		      <0x0 0xff006db8 0x0 0x108>;
+		reg-names = "osd1", "venc";
+		memory-region = <&{/reserved-memory/framebuffer@3f800000}>;
+		interrupts = <GIC_SPI 197 IRQ_TYPE_EDGE_RISING>;
+		clocks = <&clkc_periphs CLKID_SYS_VPU_INTR>,
+			 <&clkc_periphs CLKID_VPU>, <&clkc_periphs CLKID_VAPB>,
+			 <&clkc_periphs CLKID_SYS_HDMITX_APB>, <&hdmi CLKID_HDMI_PLL>;
+		power-domains = <&pwrc PWRC_T7_VPU_HDMI_ID>,
+				<&pwrc PWRC_T7_VI_CLK1_ID>, <&pwrc PWRC_T7_VI_CLK2_ID>;
+
+		port {
+			display_m1_out: endpoint {
+				remote-endpoint = <&hdmi_tx_in>;
+			};
+		};
+	};
+};
+
+&vdin_test {
+	/* Preserve the platform/sysfs name used by the installed KVM services. */
+	amlogic,split-vcbus;
+};
+
+&{/chosen/framebuffer@3fdeec00} {
+	status = "disabled";
+};
+
+&hdmi_tx {
+	amlogic,boot-handoff;
+	/delete-property/ resets;
+	/delete-property/ reset-names;
+	/delete-property/ #sound-dai-cells;
+};
+
+&hdmi {
+	/* Both registration and enable references must preserve the boot PLL. */
+	compatible = "amlogic,t7-hdmi-pll-ro";
+};
+
+&hdmi_tx_in {
+	remote-endpoint = <&display_m1_out>;
+};
