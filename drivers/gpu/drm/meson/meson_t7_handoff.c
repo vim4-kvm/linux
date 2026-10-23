@@ -874,6 +874,34 @@ static int meson_t7_handoff_check_dt(struct device *dev)
 	return 0;
 }
 
+static int meson_t7_handoff_boot_check(struct meson_t7_handoff *display)
+{
+	u32 ctrl = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
+	u32 format = readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W0));
+	u32 unpack = readl(display->osd + OSD_REG(VIU_OSD1_MALI_UNPACK_CTRL));
+	u32 htotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_PXCNT));
+	u32 vtotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_LNCNT));
+
+	/* Linear OSD ownership does not include the Mali decoder or its DMA. */
+	if (format & BIT(30) || unpack & BIT(31))
+		return -EBUSY;
+	/* RGB888 little endian, linear, 1920x1080 with the matching boot frame. */
+	if ((ctrl & 5) != 5 || (format & 0xffff) != 0x8700 ||
+	    readl(display->osd + OSD_REG(VIU_OSD1_BLK1_CFG_W4)) != HANDOFF_BOOT_ADDR >> 4 ||
+	    readl(display->osd + OSD_REG(VIU_OSD1_BLK2_CFG_W4)) != HANDOFF_PITCH >> 4 ||
+	    readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W1)) != (HANDOFF_WIDTH - 1) << 16 ||
+	    readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W2)) != (HANDOFF_HEIGHT - 1) << 16 ||
+	    readl(display->venc + VENC_REG(ENCP_VIDEO_EN)) != 1 ||
+	    htotal != 2199 || vtotal != 1124)
+		return -ENODEV;
+	display->boot_format = format;
+	display->boot_stride = readl(display->osd + OSD_REG(VIU_OSD1_BLK2_CFG_W4));
+	display->boot_ctrl2 = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT2));
+	drm_info(&display->drm, "boot OSD ctrl=%#x format=%#x ENC2 totals=%u/%u\n",
+		 ctrl, format, htotal, vtotal);
+	return 0;
+}
+
 static int meson_t7_handoff_probe(struct platform_device *pdev)
 {
 	static const u32 formats[] = { DRM_FORMAT_RGB888, DRM_FORMAT_XRGB8888,
@@ -887,7 +915,6 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	struct clk_bulk_data *clocks;
 	struct device_node *node;
 	unsigned int i;
-	u32 ctrl, format, htotal, vtotal;
 	int ret, irq;
 
 	ret = meson_t7_handoff_check_dt(dev);
@@ -959,6 +986,10 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 					   display->native_modeset ? 0x608 : 0x108);
 	if (IS_ERR(display->venc))
 		return PTR_ERR(display->venc);
+	/* Reject an incompatible fetch path before changing the hardware RDMA channel. */
+	ret = meson_t7_handoff_boot_check(display);
+	if (ret)
+		return dev_err_probe(dev, ret, "Firmware display contract does not match\n");
 	if (display->linear_formats) {
 		u32 control;
 
@@ -997,24 +1028,6 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(display->modeset),
 					     "No ENC2 timing resources\n");
 	}
-	ctrl = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
-	format = readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W0));
-	display->boot_format = format;
-	display->boot_stride = readl(display->osd + OSD_REG(VIU_OSD1_BLK2_CFG_W4));
-	display->boot_ctrl2 = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT2));
-	htotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_PXCNT));
-	vtotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_LNCNT));
-	dev_info(dev, "boot OSD ctrl=%#x format=%#x ENC2 totals=%u/%u\n",
-		 ctrl, format, htotal, vtotal);
-	/* RGB888 little endian, linear, 1920x1080 with the matching boot frame. */
-	if ((ctrl & 5) != 5 || (format & 0xffff) != 0x8700 ||
-	    readl(display->osd + OSD_REG(VIU_OSD1_BLK1_CFG_W4)) != HANDOFF_BOOT_ADDR >> 4 ||
-	    readl(display->osd + OSD_REG(VIU_OSD1_BLK2_CFG_W4)) != HANDOFF_PITCH >> 4 ||
-	    readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W1)) != (HANDOFF_WIDTH - 1) << 16 ||
-	    readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W2)) != (HANDOFF_HEIGHT - 1) << 16 ||
-	    readl(display->venc + VENC_REG(ENCP_VIDEO_EN)) != 1 ||
-	    htotal != 2199 || vtotal != 1124)
-		return dev_err_probe(dev, -ENODEV, "Firmware display contract does not match\n");
 	node = of_graph_get_remote_node(dev->of_node, 0, 0);
 	if (!node || !of_device_is_compatible(node, "amlogic,t7-hdmi-tx") ||
 	    (display->native_modeset ? !of_property_present(node, "amlogic,enc2-modeset") :

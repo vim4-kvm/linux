@@ -1441,6 +1441,7 @@ F:	drivers/gpu/drm/meson/meson_t7_fb.h
 F:	drivers/gpu/drm/meson/meson_t7_handoff.*
 F:	drivers/gpu/drm/meson/meson_t7_layers.*
 F:	drivers/gpu/drm/meson/meson_t7_scanout.h
+F:	drivers/gpu/drm/meson/test_t7_boot.py
 F:	drivers/gpu/drm/meson/test_t7_fb.py
 F:	drivers/gpu/drm/meson/test_t7_handoff.py
 F:	drivers/gpu/drm/meson/test_t7_layers.py
