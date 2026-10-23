@@ -1454,6 +1454,7 @@ S:	Odd Fixes
 F:	Documentation/devicetree/bindings/media/amlogic,t7-hdmirx.yaml
 F:	Documentation/devicetree/bindings/media/amlogic,t7-vdin-test.yaml
 F:	drivers/media/platform/amlogic/t7-hdmirx/
+F:	scripts/vim4/
 
 AMLOGIC T7 JPEG ENCODER
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
