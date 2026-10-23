@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 
 source = Path(__file__).with_name('axg-toddr.c').read_text()
-functions = source[source.index('static int t7_toddr_dai_hw_params'):
+functions = source[source.index('static int t7_toddr_pcm_format'):
                    source.index('static const struct snd_soc_dai_ops t7_toddr_ops')]
 enum_start = source.index('static const struct soc_enum t7_toddr_sel_enum')
 enum = source[enum_start:source.index('\n};', enum_start) + 3]
@@ -28,16 +28,21 @@ typedef uint32_t u32;
 #define CTRL0_TODDR_MSB_POS GENMASK(12,8)
 #define CTRL0_TODDR_LSB_POS GENMASK(7,3)
 #define SNDRV_PCM_FORMAT_S16_LE 2
+#define SNDRV_PCM_FORMAT_S8 0
+#define SNDRV_PCM_FORMAT_S24_LE 6
+#define SNDRV_PCM_FORMAT_S32_LE 10
+#define SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE 18
 struct regmap { u32 ctrl0, ctrl1; };
 struct axg_fifo { struct regmap *map; u32 *chsync; };
 struct snd_soc_dai { struct axg_fifo *fifo; };
 struct snd_pcm_substream { int unused; };
-struct snd_pcm_hw_params { int format; unsigned int channels; };
+struct snd_pcm_hw_params { int format; unsigned int channels, width; };
 struct soc_enum { u32 reg, shift_l, shift_r, items; const char *const *texts; u32 mask; };
 #define params_format(p) ((p)->format)
 #define params_channels(p) ((p)->channels)
+#define params_width(p) ((p)->width)
 static bool fail_read, fail_write;
-static unsigned int generic_calls, shutdowns;
+static unsigned int shutdowns;
 static struct axg_fifo *snd_soc_dai_get_drvdata(struct snd_soc_dai *dai) { return dai->fifo; }
 static int regmap_read(struct regmap *map, unsigned int reg, u32 *value) {
     assert(reg==FIFO_CTRL1); if (fail_read) return -EIO; *value=map->ctrl1; return 0;
@@ -48,9 +53,6 @@ static int regmap_update_bits(struct regmap *map, unsigned int reg, u32 mask, u3
 }
 static u32 readl(u32 *p) { return *p; }
 static void writel(u32 value,u32 *p) { *p=value; }
-static int axg_toddr_dai_hw_params(struct snd_pcm_substream *ss,struct snd_pcm_hw_params *p,struct snd_soc_dai *dai) {
-    generic_calls++; return 0;
-}
 static void axg_toddr_dai_shutdown(struct snd_pcm_substream *ss,struct snd_soc_dai *dai) { shutdowns++; }
 '''
 checks = r'''
@@ -59,7 +61,7 @@ int main(void) {
     u32 sync=0x123400ab;
     struct axg_fifo fifo={.map=&map,.chsync=&sync};
     struct snd_soc_dai dai={.fifo=&fifo};
-    struct snd_pcm_hw_params params={.format=2,.channels=2};
+    struct snd_pcm_hw_params params={.format=2,.channels=2,.width=16};
     u32 mask=t7_toddr_sel_enum.mask << t7_toddr_sel_enum.shift_l;
     map.ctrl1=(map.ctrl1&~mask) | (8U << t7_toddr_sel_enum.shift_l);
     assert((map.ctrl1 & 0x7c000000)==0x20000000);
@@ -76,12 +78,24 @@ int main(void) {
     u32 fields=CTRL0_TODDR_TYPE|CTRL0_TODDR_MSB_POS|CTRL0_TODDR_LSB_POS;
     assert((map.ctrl0&fields)==((27U<<8)|(12U<<3)));
     assert((map.ctrl0&~fields)==(original&~fields));
-    assert(sync==0x92340001 && !generic_calls);
+    assert(sync==0x92340001);
     t7_toddr_dai_shutdown(NULL,&dai);
     assert(sync==0x12340001 && shutdowns==1);
     map.ctrl1=0;params.channels=8;
-    assert(!t7_toddr_dai_hw_params(NULL,&params,&dai) && generic_calls==1);
+    assert(!t7_toddr_dai_hw_params(NULL,&params,&dai));
     assert((sync&0x800000ff)==0x80000007);
+    assert((map.ctrl0 & fields) == ((31U<<8)|(16U<<3)));
+    params.format=SNDRV_PCM_FORMAT_S24_LE;params.width=24;
+    assert(!t7_toddr_dai_hw_params(NULL,&params,&dai));
+    assert((map.ctrl0 & fields) == ((4U<<13)|(31U<<8)|(8U<<3)));
+    params.format=SNDRV_PCM_FORMAT_S32_LE;params.width=32;
+    assert(!t7_toddr_dai_hw_params(NULL,&params,&dai));
+    assert((map.ctrl0 & fields) == (31U<<8));
+    map.ctrl1=3U<<26;
+    assert(t7_toddr_dai_hw_params(NULL,&params,&dai)==-EINVAL);
+    params.format=SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE;
+    assert(!t7_toddr_dai_hw_params(NULL,&params,&dai));
+    assert((map.ctrl0 & fields) == ((3U<<13)|(27U<<8)|(4U<<3)));
     puts("T7 selector isolation, S16 cropping and channel sync passed");
 }
 '''

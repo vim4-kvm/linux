@@ -326,6 +326,44 @@ static const struct axg_fifo_match_data sm1_toddr_match_data = {
 	.dai_drv		= &g12a_toddr_dai_drv
 };
 
+static int t7_toddr_pcm_format(struct axg_fifo *fifo,
+			       struct snd_pcm_hw_params *params,
+			       unsigned int source)
+{
+	unsigned int width = params_width(params);
+	unsigned int type, msb = 31, lsb;
+
+	if (source == 3) {
+		/* Preserve the IEC958 subframe, including its non-audio bits. */
+		if (params_format(params) != SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE)
+			return -EINVAL;
+		type = 3;
+		msb = 27;
+		lsb = 4;
+	} else {
+		switch (params_format(params)) {
+		case SNDRV_PCM_FORMAT_S8:
+		case SNDRV_PCM_FORMAT_S16_LE:
+		case SNDRV_PCM_FORMAT_S32_LE:
+			type = 0;
+			break;
+		case SNDRV_PCM_FORMAT_S24_LE:
+			type = 4;
+			break;
+		default:
+			return -EINVAL;
+		}
+		lsb = 32 - width;
+	}
+
+	return regmap_update_bits(fifo->map, FIFO_CTRL0,
+				  CTRL0_TODDR_TYPE | CTRL0_TODDR_MSB_POS |
+				  CTRL0_TODDR_LSB_POS,
+				  FIELD_PREP(CTRL0_TODDR_TYPE, type) |
+				  FIELD_PREP(CTRL0_TODDR_MSB_POS, msb) |
+				  FIELD_PREP(CTRL0_TODDR_LSB_POS, lsb));
+}
+
 static int t7_toddr_dai_hw_params(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *params,
 				struct snd_soc_dai *dai)
@@ -350,7 +388,7 @@ static int t7_toddr_dai_hw_params(struct snd_pcm_substream *substream,
 			FIELD_PREP(CTRL0_TODDR_MSB_POS, 27) |
 			FIELD_PREP(CTRL0_TODDR_LSB_POS, 12));
 	} else {
-		ret = axg_toddr_dai_hw_params(substream, params, dai);
+		ret = t7_toddr_pcm_format(fifo, params, source);
 	}
 	if (ret)
 		return ret;
