@@ -1,22 +1,46 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
-/* Sink monitoring experiment. Video timing remains the fixed firmware mode. */
+/* Experimental ENC2 modesetting with split capture/display resources. */
 #include "amlogic-t7-a311d2-khadas-vim4-display-m1.dts"
 
 &{/display@ff006840} {
-	compatible = "amlogic,t7-display-linear";
+	compatible = "amlogic,t7-display";
 	reg = <0x0 0xff006840 0x0 0x80>,
-	      <0x0 0xff008db8 0x0 0x108>,
-	      <0x0 0xff004400 0x0 0x100>;
-	reg-names = "osd1", "venc", "rdma";
+	      <0x0 0xff008db8 0x0 0x608>,
+	      <0x0 0xff004400 0x0 0x100>,
+	      <0x0 0xfe0081c0 0x0 0x20>,
+	      <0x0 0xfe0001e0 0x0 0x20>,
+	      <0x0 0xfe000204 0x0 0x4>,
+	      <0x0 0xff0077c4 0x0 0x18>,
+	      <0x0 0xff00e6c0 0x0 0x44>,
+	      <0x0 0xff016820 0x0 0x4>,
+	      <0x0 0xff007484 0x0 0x4>,
+	      <0x0 0xff007694 0x0 0x4>,
+	      <0x0 0xff009c6c 0x0 0x4>;
+	reg-names = "osd1", "venc", "rdma", "pll", "vid2", "vid-div",
+		    "vpp", "blend", "scaler", "post-size", "out-size", "hdmi-setting";
+	amlogic,clock-controller = <&clkc_periphs>;
+	clocks = <&clkc_periphs CLKID_SYS_VPU_INTR>,
+		 <&clkc_periphs CLKID_VPU>, <&clkc_periphs CLKID_VAPB>,
+		 <&clkc_periphs CLKID_SYS_HDMITX_APB>, <&scmi_clk CLKID_HDMI_PLL_OSC>;
 	interrupts = <GIC_SPI 197 IRQ_TYPE_EDGE_RISING>,
 		     <GIC_SPI 215 IRQ_TYPE_EDGE_RISING>;
 };
 
 &hdmi_tx {
-	amlogic,boot-monitor;
+	/delete-property/ amlogic,boot-handoff;
+	amlogic,enc2-modeset;
+	reg = <0x0 0x300000 0x0 0x10000>,
+	      <0x0 0x380000 0x0 0x10000>,
+	      <0x0 0x8200 0x0 0x18>;
+	reg-names = "top", "cor", "phy";
 	#sound-dai-cells = <0>;
 	pinctrl-0 = <&hdmitx_ddc_pins>;
 	pinctrl-names = "default";
+};
+
+&hdmi {
+	/* The native display owns all HDMI PLL registers, including OD fields. */
+	status = "disabled";
 };
 
 / {
