@@ -36,7 +36,7 @@ typedef uint32_t u32;
 struct regmap { u32 regs[16]; };
 struct axg_tdm_iface { unsigned int fmt, slots, slot_width; };
 struct axg_tdm_stream { struct axg_tdm_iface *iface; unsigned int channels; u32 *mask; };
-struct axg_tdm_formatter_hw { unsigned int skew_offset; bool slot_num; };
+struct axg_tdm_formatter_hw { unsigned int skew_offset, slot_num_mask; };
 static int regmap_update_bits(struct regmap *m, unsigned int r, u32 mask, u32 val) {
     assert(r < sizeof(m->regs) && !(r % 4));
     m->regs[r / 4] = (m->regs[r / 4] & ~mask) | (val & mask); return 0;
@@ -53,7 +53,7 @@ int main(void) {
     struct axg_tdm_iface iface = {.fmt = SND_SOC_DAIFMT_I2S, .slots = 2, .slot_width = 32};
     u32 mask[4] = {3, 3, 3, 3};
     struct axg_tdm_stream stream = {.iface = &iface, .channels = 6, .mask = mask};
-    struct axg_tdm_formatter_hw hw = {.skew_offset = 3, .slot_num = true};
+    struct axg_tdm_formatter_hw hw = {.skew_offset = 3, .slot_num_mask = GENMASK(12, 8)};
     for (unsigned int slots = 2; slots <= 32; slots *= 2) {
         iface.slots = slots;
         map.regs[0] = 0xb1bfffff;
@@ -67,7 +67,16 @@ int main(void) {
         assert(map.regs[2] == 3 && map.regs[3] == 3);
         assert(map.regs[4] == 3 && map.regs[5] == 0);
     }
-    hw.slot_num = false;
+    hw.slot_num_mask = GENMASK(11, 8);
+    iface.slots = 16;
+    map.regs[0] = BIT(12);
+    assert(!axg_tdmin_prepare(&map, &hw, &stream));
+    assert((map.regs[0] & 0x1f00) == 0x1f00);
+    iface.slots = 32;
+    u32 saved = map.regs[0];
+    assert(axg_tdmin_prepare(&map, &hw, &stream) == -EINVAL);
+    assert(map.regs[0] == saved);
+    hw.slot_num_mask = 0;
     map.regs[0] = 0x00001a00;
     iface.fmt = SND_SOC_DAIFMT_DSP_A;
     iface.slot_width = 16;

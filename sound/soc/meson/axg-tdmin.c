@@ -116,6 +116,9 @@ static int axg_tdmin_prepare(struct regmap *map,
 {
 	unsigned int val, skew = quirks->skew_offset;
 
+	if (quirks->slot_num_mask && ts->iface->slots - 1 > (quirks->slot_num_mask >> 8))
+		return -EINVAL;
+
 	/* Set stream skew */
 	switch (ts->iface->fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
 	case SND_SOC_DAIFMT_I2S:
@@ -160,8 +163,8 @@ static int axg_tdmin_prepare(struct regmap *map,
 			    TDMIN_CTRL_I2S_MODE | TDMIN_CTRL_LSB_FIRST |
 			    TDMIN_CTRL_BITNUM_MASK), val);
 
-	if (quirks->slot_num)
-		regmap_update_bits(map, TDMIN_CTRL, T7_TDMIN_CTRL_SLOTNUM_MASK,
+	if (quirks->slot_num_mask)
+		regmap_update_bits(map, TDMIN_CTRL, quirks->slot_num_mask,
 				   T7_TDMIN_CTRL_SLOTNUM(ts->iface->slots - 1));
 
 	/* Set static swap mask configuration */
@@ -244,7 +247,17 @@ static const struct axg_tdm_formatter_driver t7_tdmin_drv = {
 	.ops = &axg_tdmin_ops,
 	.quirks = &(const struct axg_tdm_formatter_hw) {
 		.skew_offset = 3,
-		.slot_num = true,
+		.slot_num_mask = T7_TDMIN_CTRL_SLOTNUM_MASK,
+	},
+};
+
+static const struct axg_tdm_formatter_driver t7_tdmin_lb_drv = {
+	.component_drv = &axg_tdmin_component_drv,
+	.regmap_cfg = &axg_tdmin_regmap_cfg,
+	.ops = &axg_tdmin_ops,
+	.quirks = &(const struct axg_tdm_formatter_hw) {
+		.skew_offset = 3,
+		.slot_num_mask = GENMASK(11, 8),
 	},
 };
 
@@ -264,6 +277,9 @@ static const struct of_device_id axg_tdmin_of_match[] = {
 	}, {
 		.compatible = "amlogic,t7-tdmin-d",
 		.data = &t7_tdmin_drv,
+	}, {
+		.compatible = "amlogic,t7-tdmin-lb",
+		.data = &t7_tdmin_lb_drv,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, axg_tdmin_of_match);
