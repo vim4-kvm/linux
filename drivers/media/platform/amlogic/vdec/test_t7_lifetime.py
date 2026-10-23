@@ -49,17 +49,54 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_apb_clocks_are_held_before_dos_and_unwound_on_failure(self):
+        functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
+            "t7_clocks_on", "t7_clocks_off"))
+        run_c(COMMON + """
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+struct aml_vdec_hw { int apb_gates[2], gates[2]; bool clocks_held, apb_held; };
+static struct aml_vdec_hw hw;
+static int held, attempts, fail_at;
+static int clk_bulk_prepare_enable(int n, void *gates)
+{
+    assert(n == 2 && gates == (held ? hw.gates : hw.apb_gates));
+    if (++attempts == fail_at) return -EIO;
+    held++; return 0;
+}
+static void clk_bulk_disable_unprepare(int n, void *gates)
+{
+    assert(n == 2 && held && gates == (held == 2 ? hw.gates : hw.apb_gates));
+    held--;
+}
+""" + functions + """
+int main(void)
+{
+    for (fail_at = 1; fail_at <= 2; fail_at++) {
+        attempts = 0;
+        assert(t7_clocks_on(&hw) == -EIO && !held && !hw.clocks_held && !hw.apb_held);
+        t7_clocks_off(&hw);
+        assert(!held);
+    }
+    fail_at = attempts = 0;
+    assert(!t7_clocks_on(&hw) && held == 2 && hw.clocks_held && hw.apb_held);
+    t7_clocks_off(&hw);
+    assert(!held && !hw.clocks_held && !hw.apb_held);
+    t7_clocks_off(&hw);
+    return 0;
+}
+""")
+
     def test_physical_clock_guard_rejects_closed_gates_and_wrong_recipe(self):
         run_c(COMMON + """
 #define dev_info(...) ((void)0)
 #define dev_err(...) ((void)0)
 struct aml_vdec_hw { void *dev, *clkctrl; };
-static u32 values[3];
+static u32 values[4];
 static int reads, fail_at;
 static int regmap_read(void *map, int reg, u32 *value)
 {
-    static const int offsets[] = {0x44, 0x140, 0x148};
-    assert(reads < 3 && reg == offsets[reads]);
+    static const int offsets[] = {0x44, 0x4c, 0x140, 0x148};
+    assert(reads < 4 && reg == offsets[reads]);
     *value = values[reads++];
     return fail_at == reads ? -EIO : 0;
 }
@@ -68,23 +105,29 @@ int main(void)
 {
     struct aml_vdec_hw hw = {0};
     /* Captured vendor active state, including independent HCODEC selection. */
-    values[0] = 0xffffffff; values[1] = 0x100; values[2] = 0x80000000;
-    assert(!t7_clock_preflight(&hw) && reads == 3);
+    values[0] = 0xffffffff; values[1] = BIT(19) | BIT(20);
+    values[2] = 0x100; values[3] = 0x80000000;
+    assert(!t7_clock_preflight(&hw) && reads == 4);
     values[0] &= ~BIT(1); reads = 0;
     assert(t7_clock_preflight(&hw) == -EHOSTDOWN);
     values[0] |= BIT(1);
+    for (int bit = 19; bit <= 20; bit++) {
+        values[1] ^= BIT(bit); reads = 0;
+        assert(t7_clock_preflight(&hw) == -EHOSTDOWN);
+        values[1] ^= BIT(bit);
+    }
     /* Gate off, alternate parent, or divider are insufficient at 800 MHz. */
     const u32 bad[] = {0, 0x300, 0x101};
     for (unsigned int i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
-        values[1] = bad[i]; reads = 0;
-        assert(t7_clock_preflight(&hw) == -EHOSTDOWN && reads == 3);
+        values[2] = bad[i]; reads = 0;
+        assert(t7_clock_preflight(&hw) == -EHOSTDOWN && reads == 4);
     }
     /* An enabled unselected p0 cannot hide a disabled selected p1. */
-    values[1] = 0x7fff0100; values[2] |= BIT(15); reads = 0;
+    values[2] = 0x7fff0100; values[3] |= BIT(15); reads = 0;
     assert(t7_clock_preflight(&hw) == -EHOSTDOWN);
-    values[1] = 0; values[2] |= BIT(8); reads = 0;
+    values[2] = 0; values[3] |= BIT(8); reads = 0;
     assert(!t7_clock_preflight(&hw));
-    for (fail_at = 1; fail_at <= 3; fail_at++) {
+    for (fail_at = 1; fail_at <= 4; fail_at++) {
         reads = 0;
         assert(t7_clock_preflight(&hw) == -EIO && reads == fail_at);
     }
@@ -94,9 +137,11 @@ int main(void)
 
     def test_parent_is_owned_before_top_access_and_child_power_and_released_last(self):
         functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
-            "t7_power_off", "t7_probe_begin", "t7_probe_domain_on"))
+            "t7_clocks_on", "t7_clocks_off", "t7_power_off",
+            "t7_probe_begin", "t7_probe_domain_on"))
         run_c(COMMON + """
 typedef int32_t s32;
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define VDEC_1 0
 #define VDEC_MUX 1
 #define PWRC_T7_DOS_VDEC_ID 4
@@ -109,15 +154,28 @@ struct aml_vdec_hw {
     void *dev, *nic3_dev;
     struct pm *pm;
     struct clk_bulk_data gates[2];
-    bool clocks_held, nic3_held, powered, faulted;
+    struct clk_bulk_data apb_gates[2];
+    bool clocks_held, apb_held, nic3_held, powered, faulted;
 };
 static int clocks, parent_refs, child_refs, fail_parent, fail_child, fail_off;
+static int apb_refs;
+static void *apb_gates;
 static int state = 1, secure_error;
 static bool en0_programmed;
 static int clk_bulk_prepare_enable(int n, void *gates)
-{ assert(!clocks); clocks++; return 0; }
+{
+    assert(n == 2 && !clocks);
+    if (gates == apb_gates) { assert(!apb_refs); apb_refs++; }
+    else { assert(apb_refs == 1); clocks++; }
+    return 0;
+}
 static void clk_bulk_disable_unprepare(int n, void *gates)
-{ assert(clocks == 1); clocks--; }
+{
+    assert(n == 2 && apb_refs == 1);
+    if (gates == apb_gates) {
+        assert(!clocks && !parent_refs && !child_refs); apb_refs--;
+    } else { assert(clocks == 1); clocks--; }
+}
 static int clk_set_rate(void *clk, int rate)
 { assert(en0_programmed && clocks && parent_refs && !child_refs); return 0; }
 static int pm_runtime_resume_and_get(void *dev)
@@ -135,7 +193,7 @@ static int pm_runtime_resume_and_get(void *dev)
 }
 static int pm_runtime_put_sync_suspend(void *dev)
 {
-    assert(!clocks);
+    assert(!clocks && apb_refs == 1);
     if (dev == (void *)1) {
         assert(parent_refs == 1 && !child_refs); parent_refs--;
     } else {
@@ -160,11 +218,12 @@ int main(void)
 {
     struct pm pm = { .pd_data = {{ .dev = (void *)2 }} };
     struct aml_vdec_hw hw = { .nic3_dev = (void *)1, .pm = &pm };
+    apb_gates = hw.apb_gates;
     assert(!t7_probe_begin(&hw) && hw.clocks_held && hw.nic3_held && !hw.powered);
     en0_programmed = true;
     assert(!t7_probe_domain_on(&hw) && hw.powered);
     assert(!t7_power_off(&hw) && !clocks && !parent_refs && !child_refs);
-    assert(!hw.powered && !hw.nic3_held && !hw.clocks_held);
+    assert(!hw.powered && !hw.nic3_held && !hw.clocks_held && !hw.apb_held && !apb_refs);
     fail_parent = 1;
     assert(t7_probe_begin(&hw) == -EIO && !hw.nic3_held);
     assert(!t7_power_off(&hw) && !clocks && !parent_refs && !child_refs);
@@ -363,6 +422,10 @@ static int clk_bulk_prepare_enable(int n, void *gates)
 { assert(phase == 0); phase = 1; clocks++; return 0; }
 static void clk_bulk_disable_unprepare(int n, void *gates)
 { assert(clocks == 1); clocks--; phase = 3; }
+static int t7_clocks_on(struct aml_vdec_hw *hw)
+{ int ret = clk_bulk_prepare_enable(2, hw->gates); hw->clocks_held = !ret; return ret; }
+static void t7_clocks_off(struct aml_vdec_hw *hw)
+{ if (hw->clocks_held) clk_bulk_disable_unprepare(2, hw->gates); hw->clocks_held = false; }
 static int pm_runtime_resume_and_get(void *dev)
 { assert(phase == 1); phase = 2; if (pm_error) return pm_error; refs++; return 0; }
 static int pm_runtime_put_sync_suspend(void *dev)
