@@ -7,6 +7,7 @@
 
 #include <linux/iopoll.h>
 #include <linux/bitfield.h>
+#include <linux/ktime.h>
 #include "wave5-vpu.h"
 #include "wave5.h"
 #include "wave5-regdefine.h"
@@ -129,25 +130,49 @@ static void _wave5_print_reg_err(struct vpu_device *vpu_dev, u32 reg_fail_reason
 	}
 }
 
-static int wave5_wait_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 val)
+static int wave5_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 *data,
+			   ktime_t deadline)
 {
 	u32 ctrl;
+	s64 remaining;
 	int ret;
+
+	remaining = ktime_us_delta(deadline, ktime_get());
+	/* A zero read_poll_timeout() timeout would disable its deadline. */
+	if (remaining <= 0)
+		return -ETIMEDOUT;
 
 	ctrl = addr & 0xffff;
 	wave5_vdi_write_register(vpu_dev, W5_VPU_FIO_CTRL_ADDR, ctrl);
 	ret = read_poll_timeout(wave5_vdi_read_register, ctrl, ctrl & FIO_CTRL_READY,
-				0, FIO_TIMEOUT, false, vpu_dev, W5_VPU_FIO_CTRL_ADDR);
+				10, remaining, false, vpu_dev, W5_VPU_FIO_CTRL_ADDR);
 	if (ret)
 		return ret;
 
-	if (wave5_vdi_read_register(vpu_dev, W5_VPU_FIO_DATA) != val)
-		return -ETIMEDOUT;
-
+	*data = wave5_vdi_read_register(vpu_dev, W5_VPU_FIO_DATA);
 	return 0;
 }
 
-static void wave5_fio_writel(struct vpu_device *vpu_dev, unsigned int addr, unsigned int data)
+static int wave5_wait_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 val)
+{
+	ktime_t deadline = ktime_add_us(ktime_get(), FIO_TIMEOUT);
+	u32 data;
+	int ret;
+
+	/* FIO_READY completes one indirect read, not the bus transaction drain. */
+	do {
+		ret = wave5_fio_readl(vpu_dev, addr, &data, deadline);
+		if (ret)
+			return ret;
+		if (data == val)
+			return 0;
+		usleep_range(10, 20);
+	} while (ktime_before(ktime_get(), deadline));
+
+	return -ETIMEDOUT;
+}
+
+static int wave5_fio_writel(struct vpu_device *vpu_dev, unsigned int addr, unsigned int data)
 {
 	int ret;
 	unsigned int ctrl;
@@ -156,11 +181,12 @@ static void wave5_fio_writel(struct vpu_device *vpu_dev, unsigned int addr, unsi
 	ctrl = FIELD_GET(FASTIO_ADDRESS_MASK, addr);
 	ctrl |= FIO_CTRL_WRITE;
 	wave5_vdi_write_register(vpu_dev, W5_VPU_FIO_CTRL_ADDR, ctrl);
-	ret = read_poll_timeout(wave5_vdi_read_register, ctrl, ctrl & FIO_CTRL_READY, 0,
+	ret = read_poll_timeout(wave5_vdi_read_register, ctrl, ctrl & FIO_CTRL_READY, 10,
 				FIO_TIMEOUT, false, vpu_dev, W5_VPU_FIO_CTRL_ADDR);
 	if (ret)
 		dev_dbg_ratelimited(vpu_dev->dev, "FIO write timeout: addr=0x%x data=%x\n",
 				    ctrl, data);
+	return ret;
 }
 
 static int wave5_wait_bus_busy(struct vpu_device *vpu_dev, unsigned int addr)
@@ -434,7 +460,7 @@ int wave5_vpu_init(struct device *dev, u8 *fw, size_t size)
 	struct vpu_buf *common_vb;
 	dma_addr_t code_base, temp_base;
 	u32 code_size, temp_size;
-	u32 i, reg_val, reason_code;
+	u32 i, reg_val;
 	int ret;
 	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
 
@@ -482,8 +508,12 @@ int wave5_vpu_init(struct device *dev, u8 *fw, size_t size)
 	vpu_write_reg(vpu_dev, W5_HW_OPTION, 0);
 
 	if (vpu_dev->product_code != WAVE515_CODE) {
-		wave5_fio_writel(vpu_dev, W5_BACKBONE_PROC_EXT_ADDR, 0);
-		wave5_fio_writel(vpu_dev, W5_BACKBONE_AXI_PARAM, 0);
+		ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_PROC_EXT_ADDR, 0);
+		if (ret)
+			return ret;
+		ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_AXI_PARAM, 0);
+		if (ret)
+			return ret;
 		vpu_write_reg(vpu_dev, W5_SEC_AXI_PARAM, 0);
 	}
 
@@ -497,7 +527,9 @@ int wave5_vpu_init(struct device *dev, u8 *fw, size_t size)
 			   (WAVE5_FBC_C_AXI_ID << 8) |
 			   (WAVE5_PRI_AXI_ID << 4) |
 			   WAVE5_SEC_AXI_ID);
-		wave5_fio_writel(vpu_dev, W5_BACKBONE_PROG_AXI_ID, reg_val);
+		ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_PROG_AXI_ID, reg_val);
+		if (ret)
+			return ret;
 	}
 
 	if (vpu_dev->product_code == WAVE515_CODE) {
@@ -527,7 +559,7 @@ int wave5_vpu_init(struct device *dev, u8 *fw, size_t size)
 		return ret;
 	}
 
-	ret = wave5_vpu_firmware_command_queue_error_check(vpu_dev, &reason_code);
+	ret = wave5_vpu_firmware_command_queue_error_check(vpu_dev, NULL);
 	if (ret)
 		return ret;
 
@@ -1122,7 +1154,7 @@ int wave5_vpu_re_init(struct device *dev, u8 *fw, size_t size)
 	struct vpu_buf *common_vb;
 	dma_addr_t code_base, temp_base;
 	dma_addr_t old_code_base, temp_size;
-	u32 code_size, reason_code;
+	u32 code_size;
 	u32 reg_val;
 	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
 
@@ -1176,8 +1208,12 @@ int wave5_vpu_re_init(struct device *dev, u8 *fw, size_t size)
 		vpu_write_reg(vpu_dev, W5_HW_OPTION, 0);
 
 		if (vpu_dev->product_code != WAVE515_CODE) {
-			wave5_fio_writel(vpu_dev, W5_BACKBONE_PROC_EXT_ADDR, 0);
-			wave5_fio_writel(vpu_dev, W5_BACKBONE_AXI_PARAM, 0);
+			ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_PROC_EXT_ADDR, 0);
+			if (ret)
+				return ret;
+			ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_AXI_PARAM, 0);
+			if (ret)
+				return ret;
 			vpu_write_reg(vpu_dev, W5_SEC_AXI_PARAM, 0);
 		}
 
@@ -1191,7 +1227,9 @@ int wave5_vpu_re_init(struct device *dev, u8 *fw, size_t size)
 					(WAVE5_FBC_C_AXI_ID << 8) |
 					(WAVE5_PRI_AXI_ID << 4) |
 					WAVE5_SEC_AXI_ID);
-			wave5_fio_writel(vpu_dev, W5_BACKBONE_PROG_AXI_ID, reg_val);
+			ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_PROG_AXI_ID, reg_val);
+			if (ret)
+				return ret;
 		}
 
 		if (vpu_dev->product_code == WAVE515_CODE) {
@@ -1227,7 +1265,7 @@ int wave5_vpu_re_init(struct device *dev, u8 *fw, size_t size)
 			return ret;
 		}
 
-		ret = wave5_vpu_firmware_command_queue_error_check(vpu_dev, &reason_code);
+		ret = wave5_vpu_firmware_command_queue_error_check(vpu_dev, NULL);
 		if (ret)
 			return ret;
 	}
@@ -1241,7 +1279,7 @@ int wave5_vpu_sleep_wake(struct device *dev, bool i_sleep_wake, const uint16_t *
 	u32 reg_val;
 	struct vpu_buf *common_vb;
 	dma_addr_t code_base, temp_base;
-	u32 code_size, temp_size, reason_code;
+	u32 code_size, temp_size;
 	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
 	int ret;
 
@@ -1264,7 +1302,7 @@ int wave5_vpu_sleep_wake(struct device *dev, bool i_sleep_wake, const uint16_t *
 		if (ret)
 			return ret;
 
-		ret = wave5_vpu_firmware_command_queue_error_check(vpu_dev, &reason_code);
+		ret = wave5_vpu_firmware_command_queue_error_check(vpu_dev, NULL);
 		if (ret)
 			return ret;
 	} else { /* restore */
@@ -1301,8 +1339,12 @@ int wave5_vpu_sleep_wake(struct device *dev, bool i_sleep_wake, const uint16_t *
 		vpu_write_reg(vpu_dev, W5_HW_OPTION, 0);
 
 		if (vpu_dev->product_code != WAVE515_CODE) {
-			wave5_fio_writel(vpu_dev, W5_BACKBONE_PROC_EXT_ADDR, 0);
-			wave5_fio_writel(vpu_dev, W5_BACKBONE_AXI_PARAM, 0);
+			ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_PROC_EXT_ADDR, 0);
+			if (ret)
+				return ret;
+			ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_AXI_PARAM, 0);
+			if (ret)
+				return ret;
 			vpu_write_reg(vpu_dev, W5_SEC_AXI_PARAM, 0);
 		}
 
@@ -1318,7 +1360,9 @@ int wave5_vpu_sleep_wake(struct device *dev, bool i_sleep_wake, const uint16_t *
 					(WAVE5_FBC_C_AXI_ID << 8) |
 					(WAVE5_PRI_AXI_ID << 4) |
 					WAVE5_SEC_AXI_ID);
-			wave5_fio_writel(vpu_dev, W5_BACKBONE_PROG_AXI_ID, reg_val);
+			ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_PROG_AXI_ID, reg_val);
+			if (ret)
+				return ret;
 		}
 
 		if (vpu_dev->product_code == WAVE515_CODE) {
@@ -1355,7 +1399,7 @@ int wave5_vpu_sleep_wake(struct device *dev, bool i_sleep_wake, const uint16_t *
 			return ret;
 		}
 
-		return wave5_vpu_firmware_command_queue_error_check(vpu_dev, &reason_code);
+		return wave5_vpu_firmware_command_queue_error_check(vpu_dev, NULL);
 	}
 
 	return 0;
@@ -1363,85 +1407,98 @@ int wave5_vpu_sleep_wake(struct device *dev, bool i_sleep_wake, const uint16_t *
 
 int wave5_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 {
-	u32 val = 0;
-	int ret = 0;
+	u32 val;
+	int ret;
 	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
 	struct vpu_attr *p_attr = &vpu_dev->attr;
+
+	if (!vpu_dev->reset_mask)
+		return -EINVAL;
+
+	switch (reset_mode) {
+	case SW_RESET_ON_BOOT:
+	case SW_RESET_FORCE:
+	case SW_RESET_SAFETY:
+		break;
+	default:
+		return -EINVAL;
+	}
+
 	/* VPU doesn't send response. force to set BUSY flag to 0. */
 	vpu_write_reg(vpu_dev, W5_VPU_BUSY_STATUS, 0);
 
-	if (reset_mode == SW_RESET_SAFETY) {
+	if (reset_mode == SW_RESET_SAFETY && !vpu_dev->legacy_firmware) {
 		ret = wave5_vpu_sleep_wake(dev, true, NULL, 0);
 		if (ret)
 			return ret;
 	}
 
 	val = vpu_read_reg(vpu_dev, W5_VPU_RET_VPU_CONFIG0);
-	if ((val >> 16) & 0x1)
-		p_attr->support_backbone = true;
-	if ((val >> 22) & 0x1)
-		p_attr->support_vcore_backbone = true;
-	if ((val >> 28) & 0x1)
-		p_attr->support_vcpu_backbone = true;
+	p_attr->support_backbone = !!(val & W521_FEATURE_BACKBONE);
+	p_attr->support_vcore_backbone = !!(val & W521_FEATURE_VCORE_BACKBONE);
+	p_attr->support_vcpu_backbone = !!(val & W521_FEATURE_VCPU_BACKBONE);
 
-	/* waiting for completion of bus transaction */
+	/*
+	 * Do not re-enable requests when stopping the bus or resetting fails.
+	 * Neither failure proves DMA completion: the caller must retain memory.
+	 */
 	if (p_attr->support_backbone) {
 		dev_dbg(dev, "%s: backbone supported\n", __func__);
 
 		if (p_attr->support_vcore_backbone) {
 			if (p_attr->support_vcpu_backbone) {
 				/* step1 : disable request */
-				wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCPU, 0xFF);
+				ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCPU, 0xFF);
+				if (ret)
+					return ret;
 
 				/* step2 : waiting for completion of bus transaction */
 				ret = wave5_wait_vcpu_bus_busy(vpu_dev,
 							       W5_BACKBONE_BUS_STATUS_VCPU);
-				if (ret) {
-					wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCPU, 0x00);
+				if (ret)
 					return ret;
-				}
 			}
 			/* step1 : disable request */
-			wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCORE0, 0x7);
+			ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCORE0, 0x7);
+			if (ret)
+				return ret;
 
 			/* step2 : waiting for completion of bus transaction */
-			if (wave5_wait_bus_busy(vpu_dev, W5_BACKBONE_BUS_STATUS_VCORE0)) {
-				wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCORE0, 0x00);
-				return -EBUSY;
-			}
+			ret = wave5_wait_bus_busy(vpu_dev, W5_BACKBONE_BUS_STATUS_VCORE0);
+			if (ret)
+				return ret;
 		} else {
 			/* step1 : disable request */
-			wave5_fio_writel(vpu_dev, W5_COMBINED_BACKBONE_BUS_CTRL, 0x7);
+			ret = wave5_fio_writel(vpu_dev, W5_COMBINED_BACKBONE_BUS_CTRL, 0x7);
+			if (ret)
+				return ret;
 
 			/* step2 : waiting for completion of bus transaction */
-			if (wave5_wait_bus_busy(vpu_dev, W5_COMBINED_BACKBONE_BUS_STATUS)) {
-				wave5_fio_writel(vpu_dev, W5_COMBINED_BACKBONE_BUS_CTRL, 0x00);
-				return -EBUSY;
-			}
+			ret = wave5_wait_bus_busy(vpu_dev, W5_COMBINED_BACKBONE_BUS_STATUS);
+			if (ret)
+				return ret;
 		}
 	} else {
 		dev_dbg(dev, "%s: backbone NOT supported\n", __func__);
 		/* step1 : disable request */
-		wave5_fio_writel(vpu_dev, W5_GDI_BUS_CTRL, 0x100);
+		ret = wave5_fio_writel(vpu_dev, W5_GDI_BUS_CTRL, 0x100);
+		if (ret)
+			return ret;
 
 		/* step2 : waiting for completion of bus transaction */
 		ret = wave5_wait_bus_busy(vpu_dev, W5_GDI_BUS_STATUS);
-		if (ret) {
-			wave5_fio_writel(vpu_dev, W5_GDI_BUS_CTRL, 0x00);
+		if (ret)
 			return ret;
-		}
 	}
 
-	switch (reset_mode) {
-	case SW_RESET_ON_BOOT:
-	case SW_RESET_FORCE:
-	case SW_RESET_SAFETY:
-		val = vpu_dev->reset_mask;
-		break;
-	default:
-		return -EINVAL;
+	/* The T7 firmware's safety sequence drains the bus before SLEEP. */
+	if (reset_mode == SW_RESET_SAFETY && vpu_dev->legacy_firmware) {
+		ret = wave5_vpu_sleep_wake(dev, true, NULL, 0);
+		if (ret)
+			return ret;
 	}
 
+	val = vpu_dev->reset_mask;
 	if (val) {
 		vpu_write_reg(vpu_dev, W5_VPU_RESET_REQ, val);
 
@@ -1455,15 +1512,20 @@ int wave5_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 	/* step3 : must clear GDI_BUS_CTRL after done SW_RESET */
 	if (p_attr->support_backbone) {
 		if (p_attr->support_vcore_backbone) {
-			if (p_attr->support_vcpu_backbone)
-				wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCPU, 0x00);
-			wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCORE0, 0x00);
+			if (p_attr->support_vcpu_backbone) {
+				ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCPU, 0x00);
+				if (ret)
+					return ret;
+			}
+			ret = wave5_fio_writel(vpu_dev, W5_BACKBONE_BUS_CTRL_VCORE0, 0x00);
 		} else {
-			wave5_fio_writel(vpu_dev, W5_COMBINED_BACKBONE_BUS_CTRL, 0x00);
+			ret = wave5_fio_writel(vpu_dev, W5_COMBINED_BACKBONE_BUS_CTRL, 0x00);
 		}
 	} else {
-		wave5_fio_writel(vpu_dev, W5_GDI_BUS_CTRL, 0x00);
+		ret = wave5_fio_writel(vpu_dev, W5_GDI_BUS_CTRL, 0x00);
 	}
+	if (ret)
+		return ret;
 	if (reset_mode == SW_RESET_SAFETY || reset_mode == SW_RESET_FORCE)
 		ret = wave5_vpu_sleep_wake(dev, false, NULL, 0);
 
