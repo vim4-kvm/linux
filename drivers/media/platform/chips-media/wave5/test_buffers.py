@@ -337,3 +337,74 @@ with tempfile.TemporaryDirectory(prefix='wave5-lookahead-') as directory:
                     '-Wno-unused-parameter', '-Wno-unused-function',
                     '-fsanitize=address,undefined', str(code), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
+
+# Execute the API layer too: userspace indices and corrupt firmware source
+# indices must not index beyond the per-instance timestamp table.
+api = Path(__file__).with_name('wave5-vpuapi.c').read_text()
+api_functions = api[api.index('static int wave5_check_enc_param('):
+                    api.index('int wave5_vpu_enc_give_command(')]
+api_mock = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <errno.h>
+typedef uint32_t u32;
+typedef uint64_t u64;
+#define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
+#define W_HEVC_ENC 2
+struct enc_param { void *source_frame; u32 src_idx; bool src_end_flag;
+    u64 pts, pic_stream_buffer_addr, pic_stream_buffer_size; };
+struct enc_output_info { int recon_frame_index, enc_src_idx; u64 pts; };
+struct enc_info { struct { unsigned bit_rate; } open_param; unsigned stride; u64 pts_map[32]; };
+struct codec_info { struct enc_info enc_info; };
+struct vpu_device { unsigned hw_lock; };
+struct vpu_instance { struct vpu_device *dev; struct codec_info *codec_info; unsigned std; };
+static struct enc_output_info report;
+static unsigned commands;
+static int mutex_lock_interruptible(unsigned *lock) { assert(!*lock); *lock=1; return 0; }
+static void mutex_unlock(unsigned *lock) { assert(*lock); *lock=0; }
+static int wave5_vpu_encode(struct vpu_instance *inst,struct enc_param *param,u32 *reason)
+{ (void)inst; (void)param; (void)reason; commands++; return 0; }
+static int wave5_vpu_enc_get_result(struct vpu_instance *inst,struct enc_output_info *info)
+{ (void)inst; *info=report; return 0; }
+'''
+api_checks = r'''
+int main(void)
+{
+    struct vpu_device dev={0};
+    struct codec_info codec={.enc_info.stride=1920};
+    struct vpu_instance inst={.dev=&dev,.codec_info=&codec,.std=W_HEVC_ENC};
+    struct enc_param param={.source_frame=&codec,.src_idx=31,.pts=1234,
+        .pic_stream_buffer_addr=4096,.pic_stream_buffer_size=4096};
+    u32 reason=0;
+    assert(!wave5_vpu_enc_start_one_frame(&inst,&param,&reason));
+    assert(codec.enc_info.pts_map[31]==1234 && commands==1 && !dev.hw_lock);
+    param.src_idx=32;
+    assert(wave5_vpu_enc_start_one_frame(&inst,&param,&reason)==-EINVAL);
+    param.src_idx=UINT32_MAX;
+    assert(wave5_vpu_enc_start_one_frame(&inst,&param,&reason)==-EINVAL && commands==1);
+    param.src_end_flag=true;
+    assert(!wave5_vpu_enc_start_one_frame(&inst,&param,&reason) && commands==2);
+    assert(codec.enc_info.pts_map[31]==1234);
+    struct enc_output_info result;
+    const int indices[]={-1,0,31,32,INT32_MAX};
+    for(unsigned i=0;i<ARRAY_SIZE(indices);i++) {
+        report=(struct enc_output_info){.recon_frame_index=0,.enc_src_idx=indices[i]};
+        bool valid=indices[i]>=0 && indices[i]<32;
+        assert(wave5_vpu_enc_get_output_info(&inst,&result)==(valid?0:-EIO));
+        assert(result.pts==(indices[i]==31?1234:0) && !dev.hw_lock);
+    }
+    report=(struct enc_output_info){.recon_frame_index=-2,.enc_src_idx=INT32_MAX,.pts=99};
+    assert(!wave5_vpu_enc_get_output_info(&inst,&result) && !result.pts);
+    puts("Wave5 source index boundaries, drain and timestamp ownership passed");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='wave5-indices-') as directory:
+    code = Path(directory) / 'indices.c'
+    binary = Path(directory) / 'indices'
+    code.write_text(api_mock + api_functions + api_checks)
+    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    '-fsanitize=address,undefined',
+                    str(code), '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)

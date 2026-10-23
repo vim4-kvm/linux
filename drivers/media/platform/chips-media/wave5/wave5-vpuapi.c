@@ -881,6 +881,8 @@ static int wave5_check_enc_param(struct vpu_instance *inst, struct enc_param *pa
 
 	if (!param->source_frame)
 		return -EINVAL;
+	if (!param->src_end_flag && param->src_idx >= ARRAY_SIZE(p_enc_info->pts_map))
+		return -EINVAL;
 
 	if (p_enc_info->open_param.bit_rate == 0 && inst->std == W_HEVC_ENC) {
 		if (param->pic_stream_buffer_addr % 16 || param->pic_stream_buffer_size == 0)
@@ -911,7 +913,8 @@ int wave5_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *p
 	if (ret)
 		return ret;
 
-	p_enc_info->pts_map[param->src_idx] = param->pts;
+	if (!param->src_end_flag)
+		p_enc_info->pts_map[param->src_idx] = param->pts;
 
 	ret = wave5_vpu_encode(inst, param, fail_res);
 
@@ -936,8 +939,15 @@ int wave5_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_i
 		goto unlock;
 	}
 
-	if (info->recon_frame_index >= 0)
+	info->pts = 0;
+	if (info->recon_frame_index >= 0) {
+		if (info->enc_src_idx < 0 ||
+		    (u32)info->enc_src_idx >= ARRAY_SIZE(p_enc_info->pts_map)) {
+			ret = -EIO;
+			goto unlock;
+		}
 		info->pts = p_enc_info->pts_map[info->enc_src_idx];
+	}
 
 unlock:
 	mutex_unlock(&vpu_dev->hw_lock);

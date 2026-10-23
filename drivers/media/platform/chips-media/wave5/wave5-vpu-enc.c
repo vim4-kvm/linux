@@ -1824,6 +1824,9 @@ static void wave5_set_default_format(struct vpu_instance *inst,
 
 static int wave5_vpu_enc_queue_init(void *priv, struct vb2_queue *src_vq, struct vb2_queue *dst_vq)
 {
+	struct vpu_instance *inst = priv;
+
+	src_vq->max_num_buffers = ARRAY_SIZE(inst->codec_info->enc_info.pts_map);
 	return wave5_vpu_queue_init(priv, src_vq, dst_vq, &wave5_vpu_enc_vb2_ops);
 }
 
