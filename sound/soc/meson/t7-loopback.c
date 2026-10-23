@@ -76,6 +76,8 @@ static int t7_loopback_event(struct snd_soc_dapm_widget *w,
 
 	guard(mutex)(&lb->lock);
 	if (event == SND_SOC_DAPM_PRE_PMD) {
+		if (!lb->powered)
+			return 0;
 		ret = t7_loopback_stop(lb->map);
 		regcache_cache_only(lb->map, true);
 		clk_disable_unprepare(lb->pclk);

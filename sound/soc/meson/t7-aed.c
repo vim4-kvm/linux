@@ -182,6 +182,8 @@ static int t7_aed_event(struct snd_soc_dapm_widget *w,
 
 	guard(mutex)(&aed->lock);
 	if (event == SND_SOC_DAPM_PRE_PMD) {
+		if (!aed->powered)
+			return 0;
 		ret = t7_aed_stop(aed->map);
 		regcache_cache_only(aed->map, true);
 		clk_bulk_disable_unprepare(ARRAY_SIZE(aed->clocks), aed->clocks);

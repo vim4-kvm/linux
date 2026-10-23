@@ -25,6 +25,7 @@ struct t7_vad {
 	struct regmap *map;
 	struct clk_bulk_data clocks[2];
 	atomic_t events;
+	bool powered;
 };
 
 static int t7_vad_stop(struct regmap *map)
@@ -95,9 +96,12 @@ static int t7_vad_event(struct snd_soc_dapm_widget *w,
 	int ret;
 
 	if (event == SND_SOC_DAPM_PRE_PMD) {
+		if (!vad->powered)
+			return 0;
 		ret = t7_vad_stop(vad->map);
 		regcache_cache_only(vad->map, true);
 		clk_bulk_disable_unprepare(ARRAY_SIZE(vad->clocks), vad->clocks);
+		vad->powered = false;
 		return ret;
 	}
 	ret = clk_set_rate(vad->clocks[1].clk, 25000000);
@@ -112,6 +116,8 @@ static int t7_vad_event(struct snd_soc_dapm_widget *w,
 		t7_vad_stop(vad->map);
 		regcache_cache_only(vad->map, true);
 		clk_bulk_disable_unprepare(ARRAY_SIZE(vad->clocks), vad->clocks);
+	} else {
+		vad->powered = true;
 	}
 	return ret;
 }
@@ -235,11 +241,15 @@ static int t7_vad_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "failed to request voice IRQ\n");
 	device_set_wakeup_capable(dev, true);
 	ret = dev_pm_set_wake_irq(dev, irq);
-	if (ret)
+	if (ret) {
+		device_set_wakeup_capable(dev, false);
 		return ret;
+	}
 	ret = devm_snd_soc_register_component(dev, &t7_vad_component, NULL, 0);
-	if (ret)
+	if (ret) {
 		dev_pm_clear_wake_irq(dev);
+		device_set_wakeup_capable(dev, false);
+	}
 	return ret;
 }
 

@@ -161,6 +161,8 @@ static int t7_asrc_event(struct snd_soc_dapm_widget *w,
 
 	guard(mutex)(&asrc->lock);
 	if (event == SND_SOC_DAPM_PRE_PMD) {
+		if (!asrc->powered)
+			return 0;
 		ret = t7_asrc_stop(asrc->map);
 		regcache_cache_only(asrc->map, true);
 		clk_bulk_disable_unprepare(ARRAY_SIZE(asrc->clocks), asrc->clocks);
