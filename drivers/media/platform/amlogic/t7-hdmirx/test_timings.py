@@ -46,6 +46,7 @@ struct device { void *data; };
 stubs = r'''
 static u8 core[0x8000], top[0x4000], phy[0x100];
 static unsigned int period_reads, change_read, changed_period;
+static unsigned int measurement_reads, corrupt_measurement;
 static bool lose_signal;
 static void word(unsigned int reg, unsigned int value) {
     core[reg] = value; core[reg+1] = value >> 8;
@@ -55,6 +56,8 @@ static void period(unsigned int value) {
     core[T7_RX_COR_FRAME_TICKS+2] = value >> 16;
 }
 static u8 readb(void *address) {
+    if (address == core + T7_RX_COR_WIDTH && ++measurement_reads == corrupt_measurement)
+        period(changed_period);
     if (address == core + T7_RX_COR_FRAME_TICKS && ++period_reads == change_read) {
         period(changed_period);
         if (lose_signal) memset(top + T7_RX_TOP_TMDS_ALIGN_STAT, 0, 4);
@@ -219,14 +222,14 @@ int main(void) {
      * Saturation at that middle read must not become a false source loss.
      */
     for (unsigned int read=3;read<=5;read+=2) {
-        measured_mode(&modes[0]); period_reads=0; change_read=read;
+        measured_mode(&modes[0]); measurement_reads=0; corrupt_measurement=read;
         changed_period=0xffffff; timing=untouched;
         interval=(struct v4l2_fract){123,456};
         assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-EAGAIN);
         assert(!memcmp(&timing,&untouched,sizeof(timing)));
         assert(interval.numerator==123 && interval.denominator==456);
     }
-    change_read=0; measured_mode(&modes[0]);
+    corrupt_measurement=0; measured_mode(&modes[0]);
     assert(!t7_hdmirx_query_timings(&dev,&timing,&interval));
     measured_mode(&modes[1]);
     assert(t7_hdmirx_check_video_now(&dev)==-ENOLINK);
