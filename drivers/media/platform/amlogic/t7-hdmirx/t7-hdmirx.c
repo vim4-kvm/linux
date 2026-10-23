@@ -1078,8 +1078,13 @@ static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reas
 	if (rx->dynamic_modes) {
 		ret = t7_hdmirx_measure_live(rx, yuv420, &measured);
 		if (!ret && rx->link && rx->link->users &&
-		    !t7_hdmirx_same_measurement(&measured, &rx->lease_mode))
+		    !t7_hdmirx_same_measurement(&measured, &rx->lease_mode)) {
+			pr_info_ratelimited("t7-hdmirx lease timing changed: measured=%ux%u/%u lease=%ux%u/%u\n",
+					    measured.width, measured.height, measured.ticks,
+					    rx->lease_mode.width, rx->lease_mode.height,
+					    rx->lease_mode.ticks);
 			return t7_hdmirx_video_error(reason, "lease-timing", -ENOLINK);
+		}
 		return t7_hdmirx_video_error(reason, "measurement", ret);
 	}
 	if (t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH) != (yuv420 ? 1920 : rx->uhd60 ? 3840 : 1920) ||
@@ -1955,6 +1960,7 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	bool sampled = false;
 	u32 previous_pll;
 	struct t7_hdmirx_color color;
+	const char *reason = "video-status";
 	int ret;
 
 	mutex_lock(&link->lock);
@@ -1962,7 +1968,7 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	if (rx->dynamic_modes && rx->core_active && !link->users)
 		writeb(readb(rx->cor + T7_RX_COR_AUDIO_PACKET) & BIT(0) ? 6 : 0,
 		       rx->cor + T7_RX_COR_PREAMBLE);
-	ret = t7_hdmirx_video_status(rx);
+	ret = t7_hdmirx_video_status_reason(rx, &reason);
 	if (ret == -EAGAIN) {
 		/* One torn snapshot is harmless. A stuck FDET can change on every
 		 * read indefinitely; after a second, qualify clocks and recover PCS.
@@ -1994,6 +2000,10 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		WRITE_ONCE(link->ready, !ret);
 		goto out;
 	}
+	if (READ_ONCE(link->ready))
+		pr_info_ratelimited("t7-hdmirx link readiness revoked: reason=%s error=%d retries=%u users=%u configured=%u\n",
+				    reason, ret, link->timing_retries,
+				    link->users, link->configured);
 	WRITE_ONCE(link->ready, false);
 	/* A live or quarantined MIF owns its receiver until DMA is safe. */
 	if (link->users) {

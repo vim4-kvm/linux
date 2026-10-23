@@ -35,6 +35,7 @@ typedef uint64_t u64;
 #define WRITE_ONCE(place, value) ((place) = (value))
 #define WARN_ON(condition) (condition)
 #define EXPORT_SYMBOL_GPL(name)
+#define pr_info_ratelimited(...) ((void)0)
 #define msecs_to_jiffies(value) (value)
 #define container_of(p,t,m) ((t *)((char *)(p) - offsetof(t,m)))
 #define to_delayed_work(p) container_of(p,struct delayed_work,work)
@@ -75,6 +76,11 @@ static int t7_hdmirx_video_status(struct t7_hdmirx *rx)
     if (unstable_timings) return -EAGAIN;
     if (unsupported_signal) return -ERANGE;
     return signal_valid && (!rx->dynamic_modes || rx->uhd60==hdmi2) ? 0 : -ENOLINK;
+}
+static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reason)
+{
+    *reason = "simulated-source";
+    return t7_hdmirx_video_status(rx);
 }
 static int t7_hdmirx_check_video(struct device *dev)
 {
