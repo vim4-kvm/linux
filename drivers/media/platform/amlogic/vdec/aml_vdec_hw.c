@@ -655,8 +655,20 @@ int aml_vdec_t7_power_test(struct aml_vdec_hw *hw)
 
 static int t7_prepare_mdec(struct aml_vdec_hw *hw)
 {
+	struct arm_smccc_res result;
 	u32 reset, mem_pd, gates;
 	int ret;
+
+	/*
+	 * vdec_prepare_run() calls tee_config_device_state(VDEC=13, secure=0)
+	 * before H.264 run() enters amvdec_enable(). This is the normal-memory
+	 * access policy, not firmware loading or a replacement power switch.
+	 * Fail closed if BL32 rejects it; never guess protected register writes.
+	 */
+	arm_smccc_smc(0xb200000e, 13, 0, 0, 0, 0, 0, 0, &result);
+	dev_info(hw->dev, "pre-MDEC: CONFIG_DEVICE_SECURE(13,0) a0=%#lx\n", result.a0);
+	if (result.a0)
+		return -EACCES;
 
 	/*
 	 * T7 vdec-pm-pd skips dos_local_config(): secure power-on owns RAM,
