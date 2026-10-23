@@ -47,6 +47,9 @@ properties:
       - description: OSD routing fields, ff006834/8
       - description: OSD2 linear MIF address and stride, ff006990/c
       - description: OSD2 Mali unpack control, ff006af4/4
+      - description: OSD1 constant color control, ff006b7c/4
+      - description: OSD2 constant color control, ff006b3c/4
+      - description: OSD3 constant color control, ff00f680/4
   reg-names:
     minItems: 12
     items:
@@ -69,6 +72,9 @@ properties:
       - const: osd-paths
       - const: osd2-address
       - const: osd2-unpack
+      - const: dimm1
+      - const: dimm2
+      - const: dimm3
   amlogic,managed-osd-sram:
     type: boolean
     description: |
@@ -127,9 +133,9 @@ allOf:
     then:
       properties:
         reg:
-          minItems: 19
+          minItems: 22
         reg-names:
-          minItems: 19
+          minItems: 22
         power-domains:
           minItems: 10
     else:
