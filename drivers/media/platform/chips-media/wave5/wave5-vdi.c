@@ -80,6 +80,8 @@ void wave5_vdi_write_register(struct vpu_device *vpu_dev, u32 addr, u32 data)
 {
 	if (wave5_vpu_isolated(vpu_dev))
 		return;
+	if (addr == W5_COMMAND)
+		WRITE_ONCE(vpu_dev->last_command, data);
 	writel(data, vpu_dev->vdb_register + addr);
 }
 

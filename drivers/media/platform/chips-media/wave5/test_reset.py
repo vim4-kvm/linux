@@ -44,6 +44,7 @@ typedef uintptr_t dma_addr_t;
 #define dev_err(...) ((void)0)
 #define dev_dbg_ratelimited(...) ((void)0)
 #define PRINT_REG_ERR(...) ((void)0)
+#define READ_ONCE(v) (v)
 #define barrier() ((void)0)
 #define cpu_relax() ((void)0)
 #define might_sleep_if(x) ((void)(x))
@@ -55,7 +56,7 @@ struct vpu_attr {
 };
 struct vpu_device {
     struct vpu_attr attr;
-    u32 product_code, bus_idle_value, reset_mask;
+    u32 product_code, bus_idle_value, reset_mask, last_command;
     bool legacy_firmware;
     struct vpu_buf common_mem, sram_buf;
 };
