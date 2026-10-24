@@ -2411,11 +2411,23 @@ static const struct of_device_id t7_hdmirx_match[] = {
 };
 MODULE_DEVICE_TABLE(of, t7_hdmirx_match);
 
+static int t7_hdmirx_prepare(struct device *dev)
+{
+	/* RX clocks, PHY and audio context cannot yet be restored after sleep. */
+	dev_err_ratelimited(dev, "System sleep requires receiver context restore\n");
+	return -EBUSY;
+}
+
+static const struct dev_pm_ops t7_hdmirx_pm_ops = {
+	.prepare = t7_hdmirx_prepare,
+};
+
 static struct platform_driver t7_hdmirx_driver = {
 	.probe = t7_hdmirx_probe,
 	.driver = {
 		.name = "t7-hdmirx",
 		.of_match_table = t7_hdmirx_match,
+		.pm = pm_sleep_ptr(&t7_hdmirx_pm_ops),
 	},
 };
 

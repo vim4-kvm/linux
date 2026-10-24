@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/* Unverified CPU power-down and GPU cooling; explicit test profile only. */
+#include "amlogic-t7-a311d2-khadas-vim4-display-m0.dts"
+
+&cpu_sleep {
+	status = "okay";
+};
+
+&gpu_thermal {
+	cooling-maps {
+		map-gpu {
+			trip = <&gpu_passive>;
+			cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+		};
+	};
+};

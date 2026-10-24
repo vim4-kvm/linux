@@ -84,6 +84,8 @@ class Tree:
                         refs.append((provider, tuple(values[:count])))
                         del values[:count]
                     canonical[key] = refs
+                elif re.fullmatch(r'pinctrl-\d+', key):
+                    canonical[key] = [self.handles[handle] for handle in cells(value)]
                 elif key == 'remote-endpoint':
                     canonical[key] = self.handles[cells(value)[0]]
                 else:
