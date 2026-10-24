@@ -85,16 +85,24 @@ static struct drm_connector_state *drm_atomic_get_old_connector_state(void *s,vo
 static bool drm_connector_atomic_hdr_metadata_equal(const struct drm_connector_state *a,
     const struct drm_connector_state *b) {return a->hdr_output_metadata==b->hdr_output_metadata;}
 static u8 packets[8][31],enable[8];
+static u8 controls[0x1000];
+static bool drop_csc_write;
 static unsigned int bank,locked;
 static void mutex_lock(int *lock) {assert(!locked);locked=1;}
 static void mutex_unlock(int *lock) {assert(locked);locked=0;}
 static void cor_write(struct meson_hdmitx21 *t,u32 reg,u8 value) {
+    if(reg<0x6bf || reg>0x6df) {
+        assert(!locked);
+        if(reg!=0xd20 || !drop_csc_write) controls[reg]=value;
+        return;
+    }
     assert(locked);
     if(reg==0x6bf) {assert(value<8);bank=value;}
     else if(reg==0x6df) enable[bank]=value;
     else {assert(reg>=0x6c0 && reg<0x6df);packets[bank][reg-0x6c0]=value;}
 }
 static u8 cor_read(struct meson_hdmitx21 *t,u32 reg) {
+    if(reg<0x6bf || reg>0x6df) {assert(!locked);return controls[reg];}
     assert(locked);
     if(reg==0x6bf) return bank;
     if(reg==0x6df) return enable[bank];
@@ -108,7 +116,7 @@ program += '\n' + header[header.index('struct meson_t7_clock {'):
 program += function(clock, 'meson_t7_link_clock_calculate')
 for name in ['meson_hdmitx21_bridge_atomic_check', 'meson_hdmitx21_write_infoframe',
              'meson_hdmitx21_write_hdr_infoframe', 'meson_hdmitx21_clear_hdr_infoframe',
-             'meson_hdmitx21_read_packet']:
+             'meson_hdmitx21_read_packet', 'cor_update', 'meson_hdmitx21_config_color']:
     program += '\n' + function(source, name)
 program += r'''
 int main(void) {
@@ -116,6 +124,18 @@ int main(void) {
     struct drm_connector_state conn={.connector=&connector,
         .hdmi={.output_bpc=8,.tmds_char_rate=148500000}};
     struct drm_crtc_state crtc={.crtc=&connector,.adjusted_mode={148500,1920,2200}};
+    assert(!meson_hdmitx21_config_color(&tx,&conn));
+    controls[CSC0_CTRL]=0;drop_csc_write=true;
+    assert(meson_hdmitx21_config_color(&tx,&conn)==-EIO);
+    conn.hdmi.output_format=DRM_OUTPUT_COLOR_FORMAT_YCBCR444;
+    assert(!meson_hdmitx21_config_color(&tx,&conn));
+    conn.hdmi.output_bpc=10;
+    assert(!meson_hdmitx21_config_color(&tx,&conn));
+    assert(controls[P2T_CTRL]==0x81 && (controls[GCP_CNTL]&1));
+    conn.hdmi.output_bpc=8;
+    assert(!meson_hdmitx21_config_color(&tx,&conn));
+    assert(!controls[P2T_CTRL] && !(controls[GCP_CNTL]&1));
+    conn.hdmi.output_format=DRM_OUTPUT_COLOR_FORMAT_RGB444;drop_csc_write=false;
     assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn) && affected);
     assert(conn.hdmi.infoframes.avi.data.avi.quantization_range==HDMI_QUANTIZATION_RANGE_FULL);
     conn.hdmi.broadcast_rgb=DRM_HDMI_BROADCAST_RGB_LIMITED;

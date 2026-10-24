@@ -783,8 +783,8 @@ static int meson_hdmitx21_clear_audio_infoframe(struct drm_bridge *bridge)
 	return meson_hdmitx21_write_audio_infoframe(bridge, NULL, 0);
 }
 
-static void meson_hdmitx21_config_color(struct meson_hdmitx21 *tx,
-					const struct drm_connector_state *conn)
+static int meson_hdmitx21_config_color(struct meson_hdmitx21 *tx,
+				       const struct drm_connector_state *conn)
 {
 	bool deep = conn->hdmi.output_bpc == 10;
 	bool rgb = conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_RGB444;
@@ -796,6 +796,13 @@ static void meson_hdmitx21_config_color(struct meson_hdmitx21 *tx,
 	 * full. BT.2020 therefore uses YUV transport, bypassing this preset.
 	 */
 	cor_write(tx, CSC0_CTRL, rgb ? 0x65 : 0);
+	/* A gated or unavailable conversion must not send YUV under an RGB AVI. */
+	if (cor_read(tx, CSC0_CTRL) != (rgb ? 0x65 : 0) ||
+	    cor_read(tx, P2T_CTRL) != (deep ? BIT(7) | 1 : 0) ||
+	    (cor_read(tx, GCP_CNTL) & BIT(0)) != deep)
+		return -EIO;
+
+	return 0;
 }
 
 static void meson_hdmitx21_write_vendor(struct meson_hdmitx21 *tx,
@@ -1257,7 +1264,12 @@ static void meson_hdmitx21_bridge_atomic_enable(struct drm_bridge *bridge,
 		meson_hdmitx21_hw_init(tx);
 	meson_hdmitx21_config(tx, mode, hdmi_mode, scrambling);
 	if (tx->atomic_color) {
-		meson_hdmitx21_config_color(tx, conn);
+		if (meson_hdmitx21_config_color(tx, conn)) {
+			dev_err(tx->dev, "Color configuration readback failed; TX remains muted\n");
+			meson_hdmitx21_audio_disconnect(tx);
+			meson_hdmitx21_phy_off(tx);
+			return;
+		}
 		if (drm_atomic_helper_connector_hdmi_update_infoframes(connector, state)) {
 			dev_err(tx->dev, "InfoFrame update failed; TX remains muted\n");
 			return;
