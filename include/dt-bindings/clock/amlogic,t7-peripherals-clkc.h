@@ -291,5 +291,19 @@
 #define CLKID_VDEC_1_DIV			282
 #define CLKID_VDEC_1			283
 #define CLKID_VDEC			284
+#define CLKID_HEVCF_0_SEL			285
+#define CLKID_HEVCF_0_DIV			286
+#define CLKID_HEVCF_0			287
+#define CLKID_HEVCF_1_SEL			288
+#define CLKID_HEVCF_1_DIV			289
+#define CLKID_HEVCF_1			290
+#define CLKID_HEVCF			291
+#define CLKID_HEVCB_0_SEL			292
+#define CLKID_HEVCB_0_DIV			293
+#define CLKID_HEVCB_0			294
+#define CLKID_HEVCB_1_SEL			295
+#define CLKID_HEVCB_1_DIV			296
+#define CLKID_HEVCB_1			297
+#define CLKID_HEVCB			298
 
 #endif /* __T7_PERIPHERALS_CLKC_H */
