@@ -22,7 +22,7 @@ struct meson_t7_window {
 struct meson_t7_modeset {
 	struct regmap *clkctrl;
 	void __iomem *pll, *vid2, *vid_div;
-	struct meson_t7_window vcbus[10];
+	struct meson_t7_window vcbus[11];
 };
 
 int meson_t7_clock_calculate(unsigned int pixel_khz, struct meson_t7_clock *clock)
@@ -297,12 +297,48 @@ static void meson_t7_osd_matrix(struct meson_t7_modeset *hw, bool bt2020)
 	meson_t7_write(hw, 0x391d, 1);
 }
 
+static void meson_t7_osd_sdr(struct meson_t7_modeset *hw)
+{
+	/* common_drivers set_hdr2_v0.c: HDR_BYPASS | RGB_OSD, T7 VPP0.
+	 * Keep the vendor rgb2ycbcr_709 coefficients and matrix-only sequence.
+	 * OSD3_HDR belongs to VPP1; T7 has no OSD2 HDR core. Neither is touched.
+	 * Caller has drained all OSD fetches and holds their SRAM until reboot.
+	 */
+	static const u32 input[] = {
+		0x00ba0273, 0x003f1f99, 0x1ea701c0, 0x01c01e69, 0x00001fd7,
+	};
+	static const u32 identity[] = {
+		0x04000000, 0, 0x04000000, 0, 0x00000400,
+	};
+	unsigned int i;
+
+	meson_t7_write(hw, 0x38db, 0);
+	meson_t7_write(hw, 0x38dc, 0);
+	/* Core/LUT/gamut processing is off. Matrix-I remains independently on. */
+	meson_t7_write(hw, 0x38a0, BIT(16) | BIT(15) | BIT(14));
+	meson_t7_write(hw, 0x38a1, 0);
+	for (i = 0; i < ARRAY_SIZE(input); i++) {
+		meson_t7_write(hw, 0x38a2 + i, input[i]);
+		meson_t7_write(hw, 0x38ae + i, identity[i]);
+	}
+	meson_t7_write(hw, 0x38aa, (64 << 16) | 512);
+	meson_t7_write(hw, 0x38ab, 512);
+	meson_t7_write(hw, 0x38ac, 0);
+	meson_t7_write(hw, 0x38ad, 0);
+	meson_t7_write(hw, 0x38b6, 0);
+	meson_t7_write(hw, 0x38b7, 0);
+	meson_t7_write(hw, 0x38b8, 0);
+	meson_t7_write(hw, 0x38b9, 0);
+	meson_t7_write(hw, 0x38db, 1);
+}
+
 static void meson_t7_output_matrix(struct meson_t7_modeset *hw,
 				   const struct drm_connector_state *conn)
 {
 	bool rgb = conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_RGB444;
 	bool limited = conn->hdmi.is_limited_range;
-	/* POST2 follows the BT.709 limited blend domain. Coefficients have ten
+	/* common_drivers set_hdr2_v0.c:mtx_setting(MATRIX_YUV709_RGB).
+	 * POST2 follows the BT.709 limited blend domain. Coefficients have ten
 	 * fractional bits; pre/post offsets are in the ten-bit pixel domain.
 	 * Program while ENC2 and fetch are disabled, enable only after all words.
 	 */
@@ -346,8 +382,10 @@ int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
 	if (ret)
 		return ret;
 	meson_t7_modeset_disable(hw);
-	if (conn)
+	if (conn) {
+		meson_t7_osd_sdr(hw);
 		meson_t7_output_matrix(hw, conn);
+	}
 	ret = meson_t7_pll_set(hw, &link.pll, link.tmds_khz > 340000);
 	if (ret)
 		return ret;
@@ -365,7 +403,8 @@ int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
 			(yuv420 ? (4 << 5) | BIT(20) : 0));
 	meson_t7_write(hw, 0x2743, (2 << 22) | (bpc == 8 ? BIT(10) : 0) |
 			(2 << 2) | (yuv420 ? 2 : 0));
-	meson_t7_osd_matrix(hw, conn && conn->colorspace == DRM_MODE_COLORIMETRY_BT2020_YCC);
+	if (!conn)
+		meson_t7_osd_matrix(hw, false);
 	/* Single unscaled OSD1, all size encodings match the vendor VPP path. */
 	meson_t7_write(hw, 0x5a08, 0);
 	meson_t7_write(hw, VIU_OSD_BLEND_DIN0_SCOPE_H, (mode->hdisplay - 1) << 16);
@@ -397,6 +436,7 @@ struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev)
 		{ "hdmi-format", 0x2743, 0x2743 },
 		{ "osd-matrix", 0x3910, 0x391d },
 		{ "post2-matrix", 0x39a0, 0x39ad },
+		{ "osd-hdr", 0x38a0, 0x38dc },
 	};
 	struct meson_t7_modeset *hw;
 	struct platform_device *clock_device;
@@ -456,7 +496,7 @@ struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev)
 		u32 first = windows[i].first, last = windows[i].last;
 
 		/* Legacy M1/M2 DTs do not select atomic HDMI colour. */
-		if (!res && i == 9) {
+		if (!res && i >= 9) {
 			if (of_property_read_bool(pdev->dev.of_node, "amlogic,managed-osd-sram"))
 				return ERR_PTR(-EINVAL);
 			continue;

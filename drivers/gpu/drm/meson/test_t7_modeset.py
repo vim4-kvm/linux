@@ -63,6 +63,7 @@ typedef uint32_t u32;
 typedef uint8_t u8;
 typedef uint16_t u16;
 #define BIT(n) (1U << (n))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define GENMASK(h,l) ((~0U << (l)) & (~0U >> (31-(h))))
 #define min(a,b) ((a)<(b)?(a):(b))
 #define DIV_ROUND_CLOSEST(a,b) (((a)+(b)/2)/(b))
@@ -140,7 +141,7 @@ driver_names = ('meson_t7_clock_calculate', 'meson_t7_link_clock_calculate',
                 'meson_t7_mode_valid', 'meson_t7_pll_lock',
                 'meson_t7_pll_recipe', 'meson_t7_pll_set', 'meson_t7_video_clock',
                 'meson_t7_venc_set', 'meson_t7_modeset_disable', 'meson_t7_osd_matrix',
-                'meson_t7_output_matrix', 'meson_t7_modeset_enable')
+                'meson_t7_osd_sdr', 'meson_t7_output_matrix', 'meson_t7_modeset_enable')
 vendor_names = ('set_hpll_hclk_v1', 'set_hpll_hclk_v2', 'set_hpll_hclk_v3',
                 't7_auto_set_hpll')
 other_registers = '\n'.join(re.findall(r'^#define\s+(?:VPU_HDMI_SETTING|VIU_OSD_BLEND_\w+|'
@@ -149,6 +150,9 @@ other_registers = '\n'.join(re.findall(r'^#define\s+(?:VPU_HDMI_SETTING|VIU_OSD_
 body = preamble + defines + '\n' + other_registers + '\n' + pll_defines + '\n' + vic_defines
 body += '\n' + clock_type + '\n' + link_type
 body += '\n' + '\n'.join(function(source, name) for name in driver_names)
+hdr_source = (args.vendor / 'drivers/media/enhancement/amvecm/set_hdr2_v0.c').read_text()
+hdr_coeff = re.search(r'int rgb2ycbcr_709\[MTX_NUM_PARAM\] = \{(.*?)\};', hdr_source, re.S)[1]
+body += '\nstatic const int vendor_hdr709[] = {' + hdr_coeff + '};\n'
 body += '\n' + '\n'.join(function(hw_t7, name) for name in vendor_names)
 body += '\n' + function(clk_source, 't7_calc_pixel_clk_hpll_vco_od')
 body += '\n' + function(venc_source, 'config_tv_enc_calc')
@@ -250,6 +254,15 @@ for(int gamut=0;gamut<2;gamut++) {
     assert(actual_regs[0x3914]==(m[11]&0x1fff));
     assert(actual_regs[0x3919]==((m[18]<<16)|m[19]) && actual_regs[0x391a]==m[20]);
 }
+meson_t7_osd_sdr(&hw);
+for(int i=0;i<4;i++)
+    assert(actual_regs[0x38a2+i]==(((vendor_hdr709[2*i]&0x1fff)<<16)|
+                                  (vendor_hdr709[2*i+1]&0x1fff)));
+assert(actual_regs[0x38a6]==(vendor_hdr709[8]&0x1fff));
+assert(actual_regs[0x38aa]==0x00400200 && actual_regs[0x38ab]==512);
+assert(actual_regs[0x38ac]==0 && actual_regs[0x38ad]==0);
+assert(actual_regs[0x38a0]==(BIT(16)|BIT(15)|BIT(14)));
+assert(actual_regs[0x38db]==1 && actual_regs[0x38dc]==0);
 for(int bpc=8;bpc<=10;bpc+=2)
     for(int y420=0;y420<2;y420++) {
         struct drm_display_mode mode={594000,3840,4016,4104,4400,2160,2168,2178,2250,0};
