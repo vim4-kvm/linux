@@ -632,6 +632,26 @@ static int t7_hdmirx_phy_pll(struct t7_hdmirx *rx)
 	return -ETIMEDOUT;
 }
 
+static void t7_hdmirx_phy_calibrate_gain(struct t7_hdmirx *rx)
+{
+	u32 taps, gain = 0;
+	unsigned int lane;
+
+	/* Select the settled DFE tap0 values before enabling CDR lock detection.
+	 * T7's vendor PHY uses high gain only for lanes whose tap0 is below 0x12;
+	 * retaining the table's all-lane gain bypasses this cable calibration.
+	 */
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD4, BIT(18), 0);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD3, GENMASK(31, 30), 0);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, GENMASK(30, 28), 0);
+	usleep_range(100, 110);
+	taps = readl(rx->phy + T7_RX_PHY_DCHD_STAT);
+	for (lane = 0; lane < 3; lane++)
+		if (((taps >> (lane * 8)) & 0xff) < 0x12)
+			gain |= BIT(12 + lane);
+	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHA0, GENMASK(14, 12), gain);
+}
+
 static void t7_hdmirx_phy_equalize(struct t7_hdmirx *rx)
 {
 	/* 10-bit CDR mode, then release the CDR/EQ reset and free-running gate. */
@@ -650,6 +670,8 @@ static void t7_hdmirx_phy_equalize(struct t7_hdmirx *rx)
 	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, BIT(26), 0);
 	usleep_range(10, 20);
 	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD2, BIT(26), BIT(26));
+	usleep_range(100, 110);
+	t7_hdmirx_phy_calibrate_gain(rx);
 	usleep_range(100, 110);
 	t7_hdmirx_phy_update(rx, T7_RX_PHY_DCHD0, BIT(28), BIT(28));
 }

@@ -53,6 +53,9 @@ static bool one_shot_meter;
 static u32 next_meter;
 static unsigned int meter_restarts;
 static unsigned int delays, meter_reads, pll_attempts, writes;
+static bool calibration_probe;
+static u32 calibration_taps;
+static unsigned int tap_reads;
 static u32 raw_read(void *address)
 {
     u32 value;
@@ -68,6 +71,15 @@ static bool bounded(void *address)
 static u32 readl(void *address)
 {
     assert(bounded(address));
+    if (calibration_probe && address == phy + T7_RX_PHY_DCHD_STAT) {
+        assert(!(raw_read(phy + T7_RX_PHY_DCHD4) & BIT(18)));
+        assert(!(raw_read(phy + T7_RX_PHY_DCHD3) & GENMASK(31, 30)));
+        assert(!(raw_read(phy + T7_RX_PHY_DCHD2) & GENMASK(30, 28)));
+        assert(raw_read(phy + T7_RX_PHY_DCHD2) & BIT(26));
+        assert(!(raw_read(phy + T7_RX_PHY_DCHD0) & BIT(28)));
+        tap_reads++;
+        return calibration_taps;
+    }
     if (address == top + T7_RX_TOP_METER_CABLE_STAT) {
         meter_reads++;
         if (delayed_source && meter_reads <= 200) return 0;
@@ -111,6 +123,7 @@ static void reset(void)
     lock_pll = jitter = delayed_source = false;
     one_shot_meter = false; next_meter = meter_restarts = 0;
     delays = meter_reads = pll_attempts = writes = 0;
+    calibration_probe = false; calibration_taps = tap_reads = 0;
     writel(BIT(21) | BIT(1), top + T7_RX_TOP_HPD_PWR5V);
 }
 '''
@@ -163,6 +176,26 @@ int main(void)
     before = writes;
     t7_hdmirx_phy_stop(&receiver);
     assert(writes == before);
+    /* Each lane is independent, including the exact tap0 gain threshold.
+     * A stale debug selector must not turn EQ/eye results into a gain decision.
+     */
+    for (i = 0; i < 8; i++) {
+        reset(); calibration_probe = true;
+        calibration_taps = ((i & 1) ? 0x11 : 0x12) |
+                           (((i & 2) ? 0x00 : 0xff) << 8) |
+                           (((i & 4) ? 0x11 : 0x12) << 16);
+        writel(0x5a5affff, phy + T7_RX_PHY_DCHA0);
+        writel(~0U, phy + T7_RX_PHY_DCHD2);
+        writel(~0U, phy + T7_RX_PHY_DCHD3);
+        writel(~0U, phy + T7_RX_PHY_DCHD4);
+        t7_hdmirx_phy_equalize(&receiver);
+        assert(tap_reads == 1);
+        assert(raw_read(phy + T7_RX_PHY_DCHA0) ==
+               ((0x5a5affff & ~GENMASK(14, 12)) | (i << 12)));
+        assert(raw_read(phy + T7_RX_PHY_DCHD3) == ~GENMASK(31, 30));
+        assert(raw_read(phy + T7_RX_PHY_DCHD4) == ~BIT(18));
+        assert(raw_read(phy + T7_RX_PHY_DCHD0) & BIT(28));
+    }
     /* A valid-looking but unstable input must never reach PLL programming. */
     reset(); jitter = true;
     assert(t7_hdmirx_wait_cable(&receiver, 24000000) == -ETIMEDOUT);
