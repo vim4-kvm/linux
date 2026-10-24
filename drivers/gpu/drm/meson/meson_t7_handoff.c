@@ -1198,6 +1198,8 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		if (ret)
 			return dev_err_probe(dev, ret, "Cannot safely acquire OSD SRAM\n");
 	}
+	/* This also enables the bridge connector's HPD callbacks. */
+	drmm_kms_helper_poll_init(drm);
 	return drm_dev_register(drm, 0);
 }
 

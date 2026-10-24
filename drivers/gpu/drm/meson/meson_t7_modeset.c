@@ -21,7 +21,7 @@ struct meson_t7_window {
 struct meson_t7_modeset {
 	struct regmap *clkctrl;
 	void __iomem *pll, *vid2, *vid_div;
-	struct meson_t7_window vcbus[7];
+	struct meson_t7_window vcbus[9];
 };
 
 int meson_t7_clock_calculate(unsigned int pixel_khz, struct meson_t7_clock *clock)
@@ -267,6 +267,24 @@ void meson_t7_modeset_disable(struct meson_t7_modeset *hw)
 	meson_t7_write(hw, ENCP_VIDEO_EN, 0);
 }
 
+static void meson_t7_osd_matrix(struct meson_t7_modeset *hw)
+{
+	/* T7 osd_hw.c: RGB709_to_YUV709l_coeff, after the OSD blend. */
+	static const int coeff[9] = { 186, 627, 63, -103, -345, 448, 448, -407, -41 };
+	unsigned int i;
+
+	meson_t7_write(hw, 0x391b, 0);
+	meson_t7_write(hw, 0x391c, 0);
+	for (i = 0; i < 4; i++)
+		meson_t7_write(hw, 0x3910 + i,
+			       ((coeff[2 * i] & 0x1fff) << 16) | (coeff[2 * i + 1] & 0x1fff));
+	meson_t7_write(hw, 0x3914, coeff[8] & 0x1fff);
+	meson_t7_write(hw, 0x3918, 0);
+	meson_t7_write(hw, 0x3919, (64 << 16) | 512);
+	meson_t7_write(hw, 0x391a, 512);
+	meson_t7_write(hw, 0x391d, 1);
+}
+
 int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
 			   const struct drm_display_mode *mode)
 {
@@ -289,7 +307,10 @@ int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
 	meson_t7_write(hw, 0x1cef, 1);
 	meson_t7_write(hw, VPU_HDMI_SETTING, BIT(1) |
 			((mode->flags & DRM_MODE_FLAG_PHSYNC) ? BIT(2) : 0) |
-			((mode->flags & DRM_MODE_FLAG_PVSYNC) ? BIT(3) : 0));
+			((mode->flags & DRM_MODE_FLAG_PVSYNC) ? BIT(3) : 0) | (3 << 16));
+	/* VENC YCbCr -> formatter CrYCb; TX expects limited YUV444, 8-bit. */
+	meson_t7_write(hw, 0x2743, (2 << 22) | BIT(10) | (2 << 2));
+	meson_t7_osd_matrix(hw);
 	/* Single unscaled OSD1, all size encodings match the vendor VPP path. */
 	meson_t7_write(hw, 0x5a08, 0);
 	meson_t7_write(hw, VIU_OSD_BLEND_DIN0_SCOPE_H, (mode->hdisplay - 1) << 16);
@@ -318,6 +339,8 @@ struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev)
 		{ "post-size", VPP_POSTBLEND_H_SIZE, VPP_POSTBLEND_H_SIZE },
 		{ "out-size", 0x1da5, 0x1da5 },
 		{ "hdmi-setting", VPU_HDMI_SETTING, VPU_HDMI_SETTING },
+		{ "hdmi-format", 0x2743, 0x2743 },
+		{ "osd-matrix", 0x3910, 0x391d },
 	};
 	struct meson_t7_modeset *hw;
 	struct platform_device *clock_device;

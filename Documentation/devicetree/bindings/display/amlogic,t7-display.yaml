@@ -27,6 +27,9 @@ properties:
     const: amlogic,t7-display
   reg:
     minItems: 12
+    oneOf:
+      - maxItems: 12
+      - minItems: 14
     items:
       - description: OSD1, ff006840/80
       - description: ENC2 timing, ff008db8/608
@@ -40,6 +43,8 @@ properties:
       - description: VPP postblend size, ff007484/4
       - description: VPP output size, ff007694/4
       - description: HDMI mapping and sync polarity, ff009c6c/4
+      - description: HDMI chroma formatter, ff009d0c/4
+      - description: VPP0 OSD blend RGB to YUV matrix, ff00e440/38
       - description: OSD2 control and MIF, ff0068c0/80
       - description: OSD3 control and MIF, ff00f600/80
       - description: OSD2 scaler, ff016900/38
@@ -72,6 +77,9 @@ properties:
       - description: vd3-afbc, ff012500/4
   reg-names:
     minItems: 12
+    oneOf:
+      - maxItems: 12
+      - minItems: 14
     items:
       - const: osd1
       - const: venc
@@ -85,6 +93,8 @@ properties:
       - const: post-size
       - const: out-size
       - const: hdmi-setting
+      - const: hdmi-format
+      - const: osd-matrix
       - const: osd2
       - const: osd3
       - const: scaler2

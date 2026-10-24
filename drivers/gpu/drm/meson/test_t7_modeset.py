@@ -76,11 +76,12 @@ struct drm_display_mode {
 };
 struct hdmi_timing {
     int vic,h_total,h_blank,h_front,h_sync,h_back,h_active;
-    int v_total,v_front,v_sync,v_back,v_active;
+    int v_total,v_front,v_sync,v_back,v_active,h_pol,v_pol;
 };
 struct hdmi_format_para { struct hdmi_timing timing; int cs; };
 struct chip_data {int chip_type;};
-struct hdmitx_dev { struct {struct hdmi_format_para fmt_para;} tx_comm; int frl_rate,dsc_en;
+struct hdmitx_dev { struct {struct hdmi_format_para fmt_para; int enc_idx;} tx_comm;
+    int frl_rate,dsc_en;
     struct {struct chip_data *chip_data;} tx_hw;};
 static struct hdmitx_dev device;
 static struct hdmitx_dev *get_hdmitx21_device(void) {return &device;}
@@ -124,7 +125,8 @@ vics = set(re.findall(r'HDMI_\d+_\w+', function(hw_t7, 'set_hpll_hclk_v1')))
 vic_defines = '\n'.join(f'#define {vic} {vic.split("_")[1]}' for vic in sorted(vics))
 driver_names = ('meson_t7_clock_calculate', 'meson_t7_mode_valid', 'meson_t7_pll_lock',
                 'meson_t7_pll_recipe', 'meson_t7_pll_set', 'meson_t7_video_clock',
-                'meson_t7_venc_set', 'meson_t7_modeset_disable', 'meson_t7_modeset_enable')
+                'meson_t7_venc_set', 'meson_t7_modeset_disable', 'meson_t7_osd_matrix',
+                'meson_t7_modeset_enable')
 vendor_names = ('set_hpll_hclk_v1', 'set_hpll_hclk_v2', 'set_hpll_hclk_v3',
                 't7_auto_set_hpll')
 other_registers = '\n'.join(re.findall(r'^#define\s+(?:VPU_HDMI_SETTING|VIU_OSD_BLEND_\w+|'
@@ -142,6 +144,40 @@ for name, word in re.findall(r'^#define (CLKCTRL_\w+)\s+CLKCTRL_REG_ADDR\((0x[0-
                              video_registers, re.M):
     body += f'\n#define {name} {int(word, 16) * 4}\n'
 body += '\n#define MESON_CPU_ID_S5 8\n' + function(video_source, 'enable_crt_video_hdmi')
+osd_vendor = (args.vendor / 'drivers/media/osd/osd_hw.c').read_text()
+osd_registers = (args.vendor / 'drivers/media/osd/osd_reg.h').read_text()
+body += '\n' + '\n'.join(re.findall(r'^#define VPP_OSD1_MATRIX_\w+\s+0x[0-9a-f]+',
+                                    osd_registers, re.M))
+body += '\n#define MATRIX_5x3_COEF_SIZE 24\n'
+body += '#define COEFF_NORM(a) ((int)((((a)*2048.0)+1)/2))\n'
+body += '#define COEFF_NORM_NE(a) ((int)((((a)*2048.0)-1)/2))\n'
+body += re.search(r'static int RGB709_to_YUV709l_coeff\[[^]]+\] = \{.*?\n};',
+                  osd_vendor, re.S)[0]
+body += '\n#define osd_reg_write hd21_write_reg\n#define osd_reg_set_bits hd21_set_reg_bits\n'
+body += function(osd_vendor, 'set_vpp_osd1_rgb2yuv')
+fmt = video_source.split('case MESON_CPU_ID_T7:\n\tcase MESON_CPU_ID_S5:\n\tdefault:', 1)[1]
+fmt = fmt.split('\n\t\tif (hdev->frl_rate', 1)[0]
+mapping = re.search(r'case MESON_CPU_ID_T7:\n\t\tif \(hdev->tx_comm.enc_idx == 0\).*?'
+                    r'\n\t\tbreak;', video_source, re.S)[0].split(':\n', 1)[1]
+mapping = mapping.rsplit('break;', 1)[0]
+body += r'''
+#define HDMI_COLORSPACE_RGB 0
+#define HDMI_COLORSPACE_YUV422 1
+#define TX_INPUT_COLOR_FORMAT 2
+#define COLORDEPTH_24B 4
+static u32 vendor_format(void) {
+    struct {int cs,cd;} data={2,4},*para=&data;
+    u32 data32;
+'''
+body += fmt + '\nreturn data32;}\n'
+body += r'''
+static u32 vendor_mapping(void) {
+    struct hdmitx_dev *hdev=&device;
+    struct hdmi_format_para *para=&device.tx_comm.fmt_para;
+    u32 data32=0;
+    hdev->tx_comm.enc_idx=2;
+'''
+body += mapping + '\nreturn data32;}\n'
 body += '\nint main(void) { struct meson_t7_modeset hw={.pll=pll,.vid2=video,.vid_div=&divider};\n'
 body += '''struct chip_data chip={.chip_type=7};device.tx_hw.chip_data=&chip;
 enable_crt_video_hdmi(1,0,2);meson_t7_video_clock(&hw);
@@ -174,6 +210,10 @@ for name, vic, pixel, h, hs, he, ht, v, vs, ve, vt in modes:
            actual_regs[ENCP_VIDEO_MAX_PXCNT],actual_regs[ENCP_VIDEO_MAX_LNCNT]);
     assert(!meson_t7_modeset_enable(&hw,&mode));
     assert(actual_regs[ENCP_VIDEO_EN]==1);
+    assert(actual_regs[VPU_HDMI_SETTING]==vendor_mapping());
+    assert(actual_regs[0x2743]==vendor_format());
+    memset(vendor_regs,0,sizeof(vendor_regs));set_vpp_osd1_rgb2yuv(true);
+    assert(!memcmp(actual_regs+0x3910,vendor_regs+0x3910,14*sizeof(u32)));
     assert(actual_regs[VPP_OSD1_IN_SIZE]==({v}U<<16|{h}));
     meson_t7_modeset_disable(&hw); assert(actual_regs[ENCP_VIDEO_EN]==0);
     fail_lock=true; assert(meson_t7_pll_set(&hw,&clock,false)==-ETIMEDOUT); fail_lock=false;
@@ -345,7 +385,7 @@ if args.dtb:
         r'\{\s*(0x[0-9a-f]+),\s*(0x[0-9a-f]+)\s*}', region_text)]
     cells = [int(cell, 16) for cell in prop('/display@ff006840', 'reg', 'x').split()]
     display = [(cells[i + 1], cells[i + 3]) for i in range(0, len(cells), 4)]
-    assert len(display) == 12 and capture
+    assert len(display) == 14 and capture
     for start, size in display:
         for other, length in capture:
             assert max(start, other) >= min(start + size, other + length)
