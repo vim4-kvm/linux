@@ -16,6 +16,7 @@ import time
 
 TEST_DIRS = (
     'drivers/gpu/drm/meson',
+    'drivers/media/cec/platform/meson',
     'drivers/media/platform/amlogic/t7-hdmirx',
     'drivers/media/platform/amlogic/t7-jpeg',
     'drivers/media/platform/amlogic/vdec',

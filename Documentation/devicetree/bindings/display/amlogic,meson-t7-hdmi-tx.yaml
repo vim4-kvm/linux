@@ -27,6 +27,13 @@ properties:
       normal meson VPU initialization. This bridge exclusively owns the PHY.
       Cannot be combined with boot-handoff or boot-monitor.
 
+  amlogic,atomic-color:
+    type: boolean
+    description: |
+      Experimental HDMI state-helper profile. The paired display must own
+      the VPP0 OSD matrix and HDMI chroma downsampler, in addition to ENC2.
+      Enables RGB/YUV444/YUV420, 8/10-bit and HDR static metadata transport.
+
   amlogic,boot-handoff:
     type: boolean
     description: |
@@ -116,6 +123,12 @@ required:
 additionalProperties: false
 
 allOf:
+  - if:
+      required:
+        - amlogic,atomic-color
+    then:
+      required:
+        - amlogic,enc2-modeset
   - if:
       required:
         - amlogic,enc2-modeset

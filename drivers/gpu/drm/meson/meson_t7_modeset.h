@@ -7,6 +7,7 @@
 struct platform_device;
 struct meson_t7_modeset;
 struct drm_crtc;
+struct drm_connector_state;
 
 struct meson_t7_clock {
 	u32 vco, m, frac;
@@ -14,12 +15,24 @@ struct meson_t7_clock {
 	bool fractional;
 };
 
+struct meson_t7_link_clock {
+	struct meson_t7_clock pll;
+	u32 tmds_khz;
+	u16 shift;
+	u8 shift_sel, od3, pixel_div;
+};
+
+int meson_t7_link_clock_calculate(unsigned int pixel_khz, unsigned int bpc,
+				  bool yuv420, struct meson_t7_link_clock *link);
+
 int meson_t7_clock_calculate(unsigned int pixel_khz, struct meson_t7_clock *clock);
 enum drm_mode_status meson_t7_mode_valid(const struct drm_display_mode *mode);
 struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev);
 int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
-			   const struct drm_display_mode *mode);
+			   const struct drm_display_mode *mode,
+			   const struct drm_connector_state *conn);
 void meson_t7_modeset_disable(struct meson_t7_modeset *hw);
 bool meson_t7_display_ready(struct drm_crtc *crtc);
+unsigned long meson_t7_display_clock_rate(struct drm_crtc *crtc);
 
 #endif
