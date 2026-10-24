@@ -11,6 +11,7 @@ obj-$(CONFIG_DRM_MESON_T7_HANDOFF) += meson_t7_layers.o
 obj-$(CONFIG_DRM_MESON_T7_HANDOFF) += meson_t7_video.o
 obj-$(CONFIG_DRM_MESON_T7_HANDOFF) += meson_t7_video_pps.o
 obj-$(CONFIG_DRM_MESON_T7_HANDOFF) += meson_t7_video_kms.o
+obj-$(CONFIG_DRM_MESON_T7_HANDOFF) += meson_t7_video_sync.o
 obj-$(CONFIG_DRM_MESON_DW_HDMI) += meson_dw_hdmi.o
 obj-$(CONFIG_DRM_MESON_DW_MIPI_DSI) += meson_dw_mipi_dsi.o
 obj-$(CONFIG_DRM_MESON_HDMITX21) += meson_hdmitx21.o

@@ -1551,8 +1551,10 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	tpi = cor_read(tx, TPI_SC);
 	dev_info(dev, "boot TX TOP_STAT0=%#x active=%#x TPI_SC=%#x (%s)\n",
 		 status, active, tpi, enc2 ? "ENC2 atomic modeset" : "firmware timing");
-	if (active != (1080 << 16 | 1920))
-		return dev_err_probe(dev, -ENODEV, "TX boot active area is not 1080p\n");
+	/* Only native ENC2 reprograms timing/PLL; the read-only path inherits it. */
+	if (active != (1080 << 16 | 1920) &&
+	    (!enc2 || active != (720 << 16 | 1280)))
+		return dev_err_probe(dev, -ENODEV, "Unsupported TX boot active area\n");
 	tx->bridge.of_node = dev->of_node;
 	tx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_MODES;
 	tx->bridge.type = DRM_MODE_CONNECTOR_HDMIA;

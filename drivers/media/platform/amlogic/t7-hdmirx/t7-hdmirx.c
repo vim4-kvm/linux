@@ -954,9 +954,23 @@ static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *co
 	return 0;
 }
 
-static void t7_hdmirx_read_measurement(struct t7_hdmirx *rx,
-				     struct t7_hdmirx_measurement *m)
+static bool t7_hdmirx_same_measurement(const struct t7_hdmirx_measurement *a,
+				       const struct t7_hdmirx_measurement *b)
 {
+	struct t7_hdmirx_measurement left = *a, right = *b;
+	u32 delta = a->ticks > b->ticks ? a->ticks - b->ticks : b->ticks - a->ticks;
+
+	left.ticks = 0;
+	right.ticks = 0;
+	/* Meter quantization is a few ticks; 60 versus 59.94 remains a change. */
+	return !memcmp(&left, &right, sizeof(left)) && delta <= a->ticks / 2000;
+}
+
+static int t7_hdmirx_read_measurement(struct t7_hdmirx *rx,
+				      struct t7_hdmirx_measurement *m)
+{
+	u32 upper, low, after;
+
 	*m = (struct t7_hdmirx_measurement) {
 		.width = t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH),
 		.height = t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT),
@@ -968,24 +982,27 @@ static void t7_hdmirx_read_measurement(struct t7_hdmirx *rx,
 		.vhigh = t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH),
 		.vfront = t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT),
 		.vback = t7_hdmirx_core_read16(rx, T7_RX_COR_VBACK),
-		.ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
-			 (readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16),
 		.polarity = readb(rx->cor + T7_RX_COR_FRAME_STATUS),
 	};
+	/* Byte-addressed period counters can cross a carry during MMIO reads.
+	 * Prove a coherent 24-bit value separately from inter-frame quantization.
+	 */
+	upper = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS + 1);
+	low = readb(rx->cor + T7_RX_COR_FRAME_TICKS);
+	after = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS + 1);
+	if (upper != after)
+		return -EAGAIN;
+	m->ticks = (upper << 8) | low;
+	return 0;
 }
 
-static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
-			     struct t7_hdmirx_measurement *m)
+static int t7_hdmirx_validate_measurement(struct t7_hdmirx *rx, bool yuv420,
+					  const struct t7_hdmirx_measurement *m)
 {
-	struct t7_hdmirx_measurement again;
 	u32 hsync, vsync, reference = clk_get_rate(rx->clocks[T7_RX_PCLK].clk);
 	u32 scale = yuv420 ? 2 : 1;
 	u64 pixelclock;
 
-	t7_hdmirx_read_measurement(rx, m);
-	t7_hdmirx_read_measurement(rx, &again);
-	if (memcmp(m, &again, sizeof(*m)))
-		return -EAGAIN;
 	/* FDET polarity bits select the pulse, not the much longer idle level. */
 	hsync = m->polarity & BIT(0) ? m->hhigh : m->hlow;
 	vsync = m->polarity & BIT(1) ? m->vhigh : m->vlow;
@@ -995,8 +1012,15 @@ static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
 	    (m->width & 1) || !m->ticks ||
 	    m->ticks < reference / 120 || m->ticks > reference / 20 ||
 	    m->width + m->hfront + hsync + m->hback != m->hlow + m->hhigh ||
-	    m->height + m->vfront + vsync + m->vback != m->vlow + m->vhigh)
+	    m->height + m->vfront + vsync + m->vback != m->vlow + m->vhigh) {
+		if (rx->link && READ_ONCE(rx->link->ready))
+			pr_info_ratelimited("t7-hdmirx invalid qualified FDET: %ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
+					    m->width, m->height, m->ticks,
+					    m->hlow, m->hhigh, m->hfront, m->hback,
+					    m->vlow, m->vhigh, m->vfront, m->vback,
+					    m->polarity);
 		return -ERANGE;
+	}
 	pixelclock = div_u64((u64)reference * (m->hlow + m->hhigh) * scale *
 			    (m->vlow + m->vhigh), m->ticks);
 	if (pixelclock < 24000000 || pixelclock > 600000000)
@@ -1004,15 +1028,40 @@ static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
 	return 0;
 }
 
-static bool t7_hdmirx_same_measurement(const struct t7_hdmirx_measurement *a,
-				      const struct t7_hdmirx_measurement *b)
+static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
+			     struct t7_hdmirx_measurement *m)
 {
-	struct t7_hdmirx_measurement left = *a, right = *b;
-	u32 delta = a->ticks > b->ticks ? a->ticks - b->ticks : b->ticks - a->ticks;
+	struct t7_hdmirx_measurement again;
+	int ret;
 
-	left.ticks = right.ticks = 0;
-	/* Meter quantization is a few ticks; 60 versus 59.94 remains a change. */
-	return !memcmp(&left, &right, sizeof(left)) && delta <= a->ticks / 2000;
+	ret = t7_hdmirx_read_measurement(rx, m);
+	if (ret)
+		return ret;
+	ret = t7_hdmirx_read_measurement(rx, &again);
+	if (ret)
+		return ret;
+	/* Use the existing lease tolerance for independently coherent periods;
+	 * every geometry and polarity field must still match exactly.
+	 */
+	if (!t7_hdmirx_same_measurement(m, &again)) {
+		if (rx->link && READ_ONCE(rx->link->ready))
+			pr_info_ratelimited("t7-hdmirx unstable FDET: first=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x second=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
+					    m->width, m->height, m->ticks,
+					    m->hlow, m->hhigh, m->hfront, m->hback,
+					    m->vlow, m->vhigh, m->vfront, m->vback, m->polarity,
+					    again.width, again.height, again.ticks,
+					    again.hlow, again.hhigh, again.hfront, again.hback,
+					    again.vlow, again.vhigh, again.vfront, again.vback,
+					    again.polarity);
+		return -EAGAIN;
+	}
+	ret = t7_hdmirx_validate_measurement(rx, yuv420, m);
+	if (ret)
+		return ret;
+	ret = t7_hdmirx_validate_measurement(rx, yuv420, &again);
+	if (!ret)
+		*m = again;
+	return ret;
 }
 
 static int t7_hdmirx_measure_live(struct t7_hdmirx *rx, bool yuv420,
@@ -1043,28 +1092,44 @@ static int t7_hdmirx_tmds_status(struct t7_hdmirx *rx)
 	unsigned long reference = clk_get_rate(rx->clocks[T7_RX_METER].clk);
 	u32 sqo, cable_status, tmds_status;
 	u64 cable, tmds, delta;
+	unsigned int attempt, wait_us;
 	int ret;
 
+	if (!reference)
+		return -EAGAIN;
+	wait_us = div_u64((u64)T7_RX_METER_REF_CYCLES * 1000000 + reference - 1,
+			  reference);
 	/* Vendor T7 aml_get_tmds_valid_t7 uses SQO, matching recovered clocks
 	 * and alignment (checked by the caller), not the APLL lock bit. Keep
 	 * that bit for initial PLL acquisition, not ongoing source admission.
 	 */
-	sqo = readl(rx->top + T7_RX_TOP_MISC_STAT0) & BIT(0);
-	cable_status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
-	tmds_status = readl(rx->top + T7_RX_TOP_METER_HDMI_STAT);
-	/* A TOP meter can briefly clear VALID while retaining the matching count.
-	 * That is an unavailable measurement, not proof of a lost recovered clock.
-	 * Retry the frame; the link worker bounds persistent measurement failures.
-	 */
-	if (sqo && (!(cable_status & T7_RX_METER_VALID) ||
-		    !(tmds_status & T7_RX_METER_VALID)))
-		return -EAGAIN;
+	for (attempt = 0; ; attempt++) {
+		if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
+		    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
+			return -ENOLINK;
+		sqo = readl(rx->top + T7_RX_TOP_MISC_STAT0) & BIT(0);
+		cable_status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
+		tmds_status = readl(rx->top + T7_RX_TOP_METER_HDMI_STAT);
+		if (!sqo || ((cable_status & T7_RX_METER_VALID) &&
+			     (tmds_status & T7_RX_METER_VALID)))
+			break;
+		/* Observed VALID gaps span three windows with stable recovered clocks.
+		 * Allow one more window for sample phase, never an entire frame or
+		 * retained counts without VALID. Check physical loss on every attempt.
+		 */
+		if (attempt == 4)
+			return -EAGAIN;
+		usleep_range(wait_us, wait_us + 50);
+	}
 	cable = t7_hdmirx_meter_hz(cable_status, reference);
 	tmds = t7_hdmirx_meter_hz(tmds_status, reference);
 	if (rx->uhd60)
 		cable *= 4;
 	delta = cable > tmds ? cable - tmds : tmds - cable;
 	ret = sqo && cable && tmds && delta <= 2000000 ? 0 : -ENOLINK;
+	if (!ret && attempt)
+		pr_info_ratelimited("t7-hdmirx TMDS measurement ready after %u windows: cable=%#x tmds=%#x\n",
+				    attempt, cable_status, tmds_status);
 	if (ret)
 		pr_info_ratelimited("t7-hdmirx TMDS admission: sqo=%u cable=%#x tmds=%#x reference=%lu ratio=%u\n",
 				    sqo, cable_status, tmds_status, reference, rx->uhd60 ? 4 : 1);
@@ -1117,10 +1182,20 @@ static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reas
 		ret = t7_hdmirx_measure_live(rx, yuv420, &measured);
 		if (!ret && rx->link && rx->link->users &&
 		    !t7_hdmirx_same_measurement(&measured, &rx->lease_mode)) {
-			pr_info_ratelimited("t7-hdmirx lease timing changed: measured=%ux%u/%u lease=%ux%u/%u\n",
+			pr_info_ratelimited("t7-hdmirx lease timing changed: measured=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x lease=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
 					    measured.width, measured.height, measured.ticks,
+					    measured.hlow, measured.hhigh,
+					    measured.hfront, measured.hback,
+					    measured.vlow, measured.vhigh,
+					    measured.vfront, measured.vback,
+					    measured.polarity,
 					    rx->lease_mode.width, rx->lease_mode.height,
-					    rx->lease_mode.ticks);
+					    rx->lease_mode.ticks,
+					    rx->lease_mode.hlow, rx->lease_mode.hhigh,
+					    rx->lease_mode.hfront, rx->lease_mode.hback,
+					    rx->lease_mode.vlow, rx->lease_mode.vhigh,
+					    rx->lease_mode.vfront, rx->lease_mode.vback,
+					    rx->lease_mode.polarity);
 			return t7_hdmirx_video_error(reason, "lease-timing", -ENOLINK);
 		}
 		return t7_hdmirx_video_error(reason, "measurement", ret);
@@ -1154,8 +1229,11 @@ int t7_hdmirx_check_capture(struct device *dev, const char **reason)
 	if (rx && rx->link && !READ_ONCE(rx->link->ready))
 		return t7_hdmirx_video_error(reason, "link-not-ready", -ENOLINK);
 	ret = t7_hdmirx_video_status_reason(rx, reason);
-	if (ret && ret != -EAGAIN && rx && rx->core_active && rx->phy_active)
-		dev_info_ratelimited(dev, "capture check: %s error=%d width=%u height=%u ticks=%u lease=%ux%u/%u pll=%u align=%u\n",
+	/* EAGAIN also produces an ERROR buffer. Record it before the asynchronous
+	 * recovery worker can change the state; do not mistake it for a lost link.
+	 */
+	if (ret && rx && rx->core_active && rx->phy_active)
+		dev_info_ratelimited(dev, "capture check: %s error=%d width=%u height=%u ticks=%u lease=%ux%u/%u pll=%u align=%u sqo=%u cable=%#x tmds=%#x ratio=%u\n",
 				     *reason, ret, t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH),
 				     t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT),
 				     t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
@@ -1163,7 +1241,11 @@ int t7_hdmirx_check_capture(struct device *dev, const char **reason)
 				     rx->lease_mode.width, rx->lease_mode.height,
 				     rx->lease_mode.ticks,
 				     !!(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK),
-				     !!(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)));
+				     !!(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)),
+				     readl(rx->top + T7_RX_TOP_MISC_STAT0) & 1,
+				     readl(rx->top + T7_RX_TOP_METER_CABLE_STAT),
+				     readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
+				     rx->uhd60 ? 4 : 1);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_check_capture);
@@ -2052,9 +2134,15 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		goto out;
 	}
 	if (READ_ONCE(link->ready))
-		pr_info_ratelimited("t7-hdmirx link readiness revoked: reason=%s error=%d retries=%u users=%u configured=%u\n",
+		pr_info_ratelimited("t7-hdmirx link readiness revoked: reason=%s error=%d retries=%u users=%u configured=%u pll=%u sqo=%u align=%u cable=%#x tmds=%#x sample=%u previous=%u ratio=%u\n",
 				    reason, ret, link->timing_retries,
-				    link->users, link->configured);
+				    link->users, link->configured,
+				    !!(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK),
+				    readl(rx->top + T7_RX_TOP_MISC_STAT0) & 1,
+				    readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & 1,
+				    readl(rx->top + T7_RX_TOP_METER_CABLE_STAT),
+				    readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
+				    cable, link->previous_cable, rx->uhd60 ? 4 : 1);
 	WRITE_ONCE(link->ready, false);
 	/* A live or quarantined MIF owns its receiver until DMA is safe. */
 	if (link->users) {

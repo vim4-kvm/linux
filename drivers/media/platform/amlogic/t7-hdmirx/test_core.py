@@ -54,6 +54,7 @@ mmio = r'''
 static u8 core[0x8000], top[0x4000];
 static bool allowed, changed, smc_error, readback_error;
 static unsigned int writes, pcs_resets, stability_waits;
+static unsigned int meter_waits, meter_ready_at, meter_loss_at;
 static u8 readb(void *address)
 {
     if (readback_error && address == core + T7_RX_COR_SYS_CTRL) return 0;
@@ -92,6 +93,15 @@ static void usleep_range(unsigned int low, unsigned int high)
     assert(high >= low);
     if (low == 20000) stability_waits++;
     if (low == 20000 && changed) core[0x188e] = 0;
+    if (low < 1000) {
+        meter_waits++;
+        if (meter_waits == meter_ready_at) {
+            u32 value = T7_RX_METER_VALID | 16384;
+            memcpy(top + T7_RX_TOP_METER_HDMI_STAT, &value, 4);
+        }
+        if (meter_waits == meter_loss_at)
+            memset(top + T7_RX_TOP_TMDS_ALIGN_STAT, 0, 4);
+    }
 }
 static void word(unsigned int address, unsigned int value)
 {
@@ -231,14 +241,29 @@ int main(void)
     rx.link=&lease;rx.lease_yuv=true;rx.lease_hdr=true;rx.lease_420=true;
     assert(t7_hdmirx_video_status(&rx)==-ENOLINK); /* HDR -> SDR, same geometry */
     rx.lease_hdr=false;assert(!t7_hdmirx_video_status(&rx));
-    /* The recovered link stays present while a TOP measurement is unavailable.
-     * Capture must retry a frame, while genuine loss must still stop the queue.
+    /* A measurement can complete while the same READY frame remains owned.
+     * Do not publish ERROR merely for reading during a meter update. Never
+     * accept stale counts, hide loss while waiting, or wait without a bound.
      */
     const char *reason;
     lease.ready=true;
+    for (unsigned int window=1;window<=4;window++) {
+        writel(16384,top+T7_RX_TOP_METER_HDMI_STAT);
+        meter_waits=0;meter_ready_at=window;
+        assert(!t7_hdmirx_check_capture(&dev,&reason));
+        assert(meter_waits==window);
+    }
     writel(16384,top+T7_RX_TOP_METER_HDMI_STAT);
+    meter_waits=0;meter_ready_at=5;
     assert(t7_hdmirx_check_capture(&dev,&reason)==-EAGAIN);
+    assert(meter_waits==4);
     assert(!strcmp(reason,"tmds-measurement"));
+    meter_waits=0;meter_ready_at=1;meter_loss_at=1;
+    assert(t7_hdmirx_check_capture(&dev,&reason)==-ENOLINK);
+    assert(meter_waits==1);
+    writel(1,top+T7_RX_TOP_TMDS_ALIGN_STAT);
+    meter_ready_at=0;meter_loss_at=0;
+    writel(16384,top+T7_RX_TOP_METER_HDMI_STAT);
     writel(0,top+T7_RX_TOP_MISC_STAT0);
     assert(t7_hdmirx_check_capture(&dev,&reason)==-ENOLINK);
     writel(1,top+T7_RX_TOP_MISC_STAT0);

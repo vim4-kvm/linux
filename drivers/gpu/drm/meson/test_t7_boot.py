@@ -11,6 +11,10 @@ directory = Path(__file__).resolve().parent
 source = (directory / 'meson_t7_handoff.c').read_text()
 function = source[source.index('static int meson_t7_handoff_boot_check('):
                   source.index('static int meson_t7_handoff_probe(')]
+tx_source = (directory / 'meson_hdmitx21.c').read_text()
+tx_probe = tx_source[tx_source.index('static int meson_hdmitx21_boot_probe('):
+                     tx_source.index('static int meson_hdmitx21_probe(')]
+tx_guard = tx_probe[tx_probe.index('if (active != '):tx_probe.index('tx->bridge.of_node')]
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 registers = (directory / 'meson_registers.h').read_text()
 registers = re.sub(r'^#include[^\n]*\n', '', registers, flags=re.M)
@@ -35,10 +39,14 @@ typedef uint32_t u32;
 #define drm_info(...) ((void)0)
 struct meson_t7_handoff {
     void *osd, *venc;
+    bool native_modeset, managed_sram;
     u32 boot_format, boot_stride, boot_ctrl2;
 };
 static u32 readl(void *p) {return *(u32 *)p;}
+#define dev_err_probe(dev, error, ...) ((void)(dev), (error))
 '''
+tx_function = ('static int tx_boot(u32 active, bool enc2) { void *dev=NULL;(void)enc2;\n' +
+               tx_guard + 'return 0; }\n')
 checks = r'''
 int main(void)
 {
@@ -78,12 +86,56 @@ int main(void)
         venc[timing[i]-VENC_INTCTRL]^=1;
     }
     assert(!meson_t7_handoff_boot_check(&display));
-    puts("Boot takeover: linear contract, AFBC/unpack refusal and nine fetch/timing mismatches passed");
+    /* The no-EDID timing is safe only with full native SRAM ownership. */
+    venc[ENCP_VIDEO_MAX_PXCNT-VENC_INTCTRL]=1649;
+    venc[ENCP_VIDEO_MAX_LNCNT-VENC_INTCTRL]=749;
+    assert(meson_t7_handoff_boot_check(&display)==-ENODEV);
+    display.native_modeset=true;
+    assert(meson_t7_handoff_boot_check(&display)==-ENODEV);
+    display.native_modeset=false;display.managed_sram=true;
+    assert(meson_t7_handoff_boot_check(&display)==-ENODEV);
+    display.native_modeset=true;
+    assert(!meson_t7_handoff_boot_check(&display));
+    /* Actual no-EDID firmware uses the first of the two reserved frames. */
+    osd[VIU_OSD1_BLK1_CFG_W4-VIU_OSD1_CTRL_STAT]=HANDOFF_BOOT_FALLBACK_ADDR>>4;
+    assert(!meson_t7_handoff_boot_check(&display));
+    venc[ENCP_VIDEO_MAX_PXCNT-VENC_INTCTRL]=2199;
+    venc[ENCP_VIDEO_MAX_LNCNT-VENC_INTCTRL]=1124;
+    assert(meson_t7_handoff_boot_check(&display)==-ENODEV);
+    venc[ENCP_VIDEO_MAX_PXCNT-VENC_INTCTRL]=1649;
+    venc[ENCP_VIDEO_MAX_LNCNT-VENC_INTCTRL]=749;
+    memcpy(saved,osd,sizeof(osd));
+    /* The exception must not bypass any of the nine fetch/timing guards. */
+    for (unsigned int i=0;i<sizeof(fetch)/sizeof(fetch[0]);i++) {
+        osd[fetch[i]-VIU_OSD1_CTRL_STAT]^=1;
+        assert(meson_t7_handoff_boot_check(&display)==-ENODEV);
+        memcpy(osd,saved,sizeof(osd));
+    }
+    for (unsigned int i=0;i<sizeof(timing)/sizeof(timing[0]);i++) {
+        venc[timing[i]-VENC_INTCTRL]^=1;
+        assert(meson_t7_handoff_boot_check(&display)==-ENODEV);
+        venc[timing[i]-VENC_INTCTRL]^=1;
+    }
+    osd[VIU_OSD1_BLK0_CFG_W0-VIU_OSD1_CTRL_STAT]|=BIT(30);
+    assert(meson_t7_handoff_boot_check(&display)==-EBUSY);
+    memcpy(osd,saved,sizeof(osd));
+    osd[VIU_OSD1_MALI_UNPACK_CTRL-VIU_OSD1_CTRL_STAT]=BIT(31);
+    assert(meson_t7_handoff_boot_check(&display)==-EBUSY);
+    assert(!tx_boot(1080U<<16|1920,false));
+    assert(tx_boot(720U<<16|1280,false)==-ENODEV);
+    assert(!tx_boot(720U<<16|1280,true));
+    const u32 invalid_active[]={0,480U<<16|640,720U<<16|1920,
+        1080U<<16|1280,2160U<<16|3840};
+    for (unsigned int i=0;i<sizeof(invalid_active)/sizeof(invalid_active[0]);i++) {
+        assert(tx_boot(invalid_active[i],true)==-ENODEV);
+        assert(tx_boot(invalid_active[i],false)==-ENODEV);
+    }
+    puts("Boot takeover: native 720p fallback and unchanged fetch/AFBC/legacy guards passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     path = Path(directory)
-    (path / 'boot.c').write_text(prefix + registers + defines + '\n' + function + checks)
+    (path / 'boot.c').write_text(prefix + registers + defines + '\n' + function + tx_function + checks)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     str(path / 'boot.c'), '-o', str(path / 'boot')], check=True)
     subprocess.run([str(path / 'boot')], check=True)

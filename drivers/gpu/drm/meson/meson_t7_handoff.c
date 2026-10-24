@@ -46,6 +46,7 @@
 #define HANDOFF_HEIGHT	1080
 #define HANDOFF_PITCH	5760
 #define HANDOFF_BOOT_ADDR	0x3fdeec00
+#define HANDOFF_BOOT_FALLBACK_ADDR	0x3f800000
 #define HANDOFF_FORMAT_MASK	0x0f3c
 #define OSD_REG(reg)	(((reg) - VIU_OSD1_CTRL_STAT) * 4)
 #define VENC_REG(reg)	(((reg) - VENC_INTCTRL) * 4)
@@ -89,6 +90,7 @@ struct meson_t7_handoff {
 	bool faulted;
 	/* Keep DMA memory alive even if the display interrupt stops. */
 	struct meson_t7_scanout buffers;
+	struct meson_t7_scanout_readers readers;
 };
 
 static struct meson_t7_handoff *to_handoff(struct drm_device *drm)
@@ -126,6 +128,17 @@ static u32 meson_t7_osd_reflect(u32 format, unsigned int rotation)
 	if (rotation & DRM_MODE_REFLECT_Y)
 		format |= BIT(29);
 	return format;
+}
+
+static void meson_t7_handoff_fault(struct meson_t7_handoff *display)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&display->lock, flags);
+	WRITE_ONCE(display->faulted, true);
+	display->readers.faulted = true;
+	spin_unlock_irqrestore(&display->lock, flags);
+	meson_t7_scanout_retire(&display->buffers, false);
 }
 
 /* Both interrupt orders are possible: do not complete until both have arrived. */
@@ -221,6 +234,7 @@ static irqreturn_t meson_t7_handoff_irq(int irq, void *data)
 		display->written = display->requested;
 	}
 vblank:
+	meson_t7_scanout_readers_vsync(&display->readers, display->vsync_count);
 	spin_unlock_irqrestore(&display->lock, flags);
 	wake_up(&display->wait);
 	return IRQ_HANDLED;
@@ -228,26 +242,47 @@ vblank:
 
 static void meson_t7_handoff_finish(struct meson_t7_handoff *display, u32 sequence, bool slow)
 {
+	unsigned long flags;
 	u32 start;
+	unsigned int i;
+	bool ready, defer = slow;
 
 	if (!wait_event_timeout(display->wait,
 				READ_ONCE(display->applied) == sequence,
 				msecs_to_jiffies(100))) {
-		WRITE_ONCE(display->faulted, true);
-		meson_t7_scanout_retire(&display->buffers, false);
+		meson_t7_handoff_fault(display);
 		drm_err(&display->drm, "OSD latch timeout; DMA buffers pinned until reboot\n");
 		return;
 	}
-	meson_t7_scanout_advance(&display->buffers, true, slow);
+	spin_lock_irqsave(&display->lock, flags);
+	ready = meson_t7_scanout_readers_ready(&display->readers, display->vsync_count);
+	spin_unlock_irqrestore(&display->lock, flags);
+	if (!ready) {
+		meson_t7_handoff_fault(display);
+		drm_err(&display->drm, "Scanout retirement boundary missing; DMA buffers pinned\n");
+		return;
+	}
+	/* Pipeline address-only video commits without shortening FB ownership. */
+	for (i = MESON_T7_OSD_LAYERS; i < MESON_T7_MAX_LAYERS; i++)
+		if (display->buffers.active[i] || display->buffers.pending[i])
+			defer = true;
+	meson_t7_scanout_advance(&display->buffers, true, defer);
+	/* Preserve the original post-reference-update drain reference point. */
+	spin_lock_irqsave(&display->lock, flags);
+	start = display->vsync_count;
+	ready = meson_t7_scanout_readers_advance(&display->readers, start);
+	spin_unlock_irqrestore(&display->lock, flags);
+	if (!ready) {
+		meson_t7_handoff_fault(display);
+		return;
+	}
 	if (!slow)
 		return;
 	/* Do not signal a reusable old buffer until a long RDMA's fetches drain. */
-	start = READ_ONCE(display->vsync_count);
 	if (!wait_event_timeout(display->wait,
 				READ_ONCE(display->vsync_count) != start,
 				msecs_to_jiffies(100))) {
-		WRITE_ONCE(display->faulted, true);
-		meson_t7_scanout_retire(&display->buffers, false);
+		meson_t7_handoff_fault(display);
 		drm_err(&display->drm, "OSD drain timeout; DMA buffers pinned until reboot\n");
 		return;
 	}
@@ -334,6 +369,30 @@ static void meson_t7_handoff_layer_state(struct drm_plane_state *state,
 	};
 }
 
+static bool meson_t7_handoff_acquire_layers(struct meson_t7_handoff *display,
+					    struct drm_atomic_commit *commit, bool blank,
+					    struct drm_framebuffer **next)
+{
+	struct dma_fence *readers[MESON_T7_MAX_LAYERS] = {};
+	unsigned long flags;
+	int ret, acquire;
+
+	if (meson_t7_scanout_acquire(&display->buffers, next))
+		return false;
+	ret = meson_t7_video_collect_readers(display->video, commit, blank,
+					     readers + MESON_T7_OSD_LAYERS);
+	spin_lock_irqsave(&display->lock, flags);
+	acquire = meson_t7_scanout_readers_acquire(&display->readers, readers);
+	spin_unlock_irqrestore(&display->lock, flags);
+	if (ret || acquire) {
+		meson_t7_handoff_fault(display);
+		drm_err(&display->drm, "Video reader ownership failed: %d; DMA buffers pinned\n",
+			ret ? ret : acquire);
+		return false;
+	}
+	return true;
+}
+
 static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 					    struct drm_atomic_commit *commit, bool blank)
 {
@@ -347,7 +406,7 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 	u32 sequence;
 	int bytes;
 	int video_bytes;
-	bool slow, video_update, video_reconfigure = false;
+	bool slow, video_update, video_reconfigure = false, osd_empty = true;
 
 	if (READ_ONCE(display->faulted))
 		return;
@@ -359,16 +418,18 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 			meson_t7_handoff_layer_state(state, &layers[i]);
 			next[i] = state->fb;
 		}
+		if (layers[i].enabled || display->layers[i].enabled)
+			osd_empty = false;
 	}
 	if (meson_t7_video_collect(display->video, commit, blank, next + MESON_T7_OSD_LAYERS))
 		return;
 	video_update = meson_t7_video_in_use(display->video, commit);
-	if (meson_t7_scanout_acquire(&display->buffers, next))
+	if (!meson_t7_handoff_acquire_layers(display, commit, blank, next))
 		return;
 	bytes = display->layers_valid ?
 		meson_t7_osd_layers_flip(display->rdma_table, MESON_T7_RDMA_PAIRS,
 					 layers, display->layers) : 0;
-	slow = !bytes;
+	slow = !bytes && !(display->layers_valid && osd_empty && video_update);
 	if (slow)
 		bytes = meson_t7_osd_layers_build(display->rdma_table, MESON_T7_RDMA_PAIRS,
 						  layers, mode->hdisplay, mode->vdisplay,
@@ -384,13 +445,12 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 							   layers,
 							   video_table,
 							   MESON_T7_VIDEO_KMS_PAIRS);
-		/* Video address writes also retain the previous frame for one full scan. */
-		slow = true;
+		/* Only an isolated video's three address words use the pipelined path. */
+		slow |= video_reconfigure || !osd_empty || video_bytes != 3 * 2 * sizeof(u32);
 		bytes = video_bytes < 0 ? video_bytes : bytes + video_bytes;
 	}
 	if (bytes < 0) {
-		WRITE_ONCE(display->faulted, true);
-		meson_t7_scanout_retire(&display->buffers, false);
+		meson_t7_handoff_fault(display);
 		drm_err(&display->drm, "OSD transaction build failed: %d\n", bytes);
 		return;
 	}
@@ -406,13 +466,12 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 	 * transaction pins every old/new plane until reboot, including video.
 	 */
 	if (!READ_ONCE(display->faulted) && video_reconfigure && !blank) {
-		if (meson_t7_scanout_acquire(&display->buffers, next))
+		if (!meson_t7_handoff_acquire_layers(display, commit, false, next))
 			return;
 		bytes = meson_t7_video_build(display->video, commit, false, true, layers,
 					     display->rdma_table, MESON_T7_VIDEO_KMS_PAIRS);
 		if (bytes < 0) {
-			WRITE_ONCE(display->faulted, true);
-			meson_t7_scanout_retire(&display->buffers, false);
+			meson_t7_handoff_fault(display);
 			return;
 		}
 		spin_lock_irqsave(&display->lock, flags);
@@ -437,8 +496,7 @@ static void meson_t7_handoff_drain_layers(struct meson_t7_handoff *display)
 	if (!wait_event_timeout(display->wait,
 				READ_ONCE(display->vsync_count) != start,
 				msecs_to_jiffies(100))) {
-		WRITE_ONCE(display->faulted, true);
-		meson_t7_scanout_retire(&display->buffers, false);
+		meson_t7_handoff_fault(display);
 		return;
 	}
 	meson_t7_scanout_retire(&display->buffers, true);
@@ -656,7 +714,7 @@ static void meson_t7_handoff_enable(struct drm_crtc *crtc,
 			conn = drm_atomic_get_new_connector_state(state, connector);
 		ret = meson_t7_modeset_enable(display->modeset, &new->adjusted_mode, conn);
 		if (ret) {
-			WRITE_ONCE(display->faulted, true);
+			meson_t7_handoff_fault(display);
 			drm_err(crtc->dev, "ENC2 modeset failed: %d; restart required\n", ret);
 			if (new->event)
 				meson_t7_handoff_abort_event(crtc, new);
@@ -946,20 +1004,28 @@ static int meson_t7_handoff_boot_check(struct meson_t7_handoff *display)
 	u32 ctrl = readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
 	u32 format = readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W0));
 	u32 unpack = readl(display->osd + OSD_REG(VIU_OSD1_MALI_UNPACK_CTRL));
+	u32 address = readl(display->osd + OSD_REG(VIU_OSD1_BLK1_CFG_W4));
 	u32 htotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_PXCNT));
 	u32 vtotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_LNCNT));
+	bool fallback = display->native_modeset && display->managed_sram &&
+			htotal == 1649 && vtotal == 749;
 
 	/* Linear OSD ownership does not include the Mali decoder or its DMA. */
 	if (format & BIT(30) || unpack & BIT(31))
 		return -EBUSY;
-	/* RGB888 little endian, linear, 1920x1080 with the matching boot frame. */
+	/* Full native SRAM ownership can rebuild U-Boot's no-EDID 720p timing.
+	 * Its first boot frame is also inside the validated no-map reservation.
+	 * The fetch layout and one of these two frames must still match exactly;
+	 * firmware-timed handoff must remain 1080p.
+	 */
 	if ((ctrl & 5) != 5 || (format & 0xffff) != 0x8700 ||
-	    readl(display->osd + OSD_REG(VIU_OSD1_BLK1_CFG_W4)) != HANDOFF_BOOT_ADDR >> 4 ||
+	    (address != HANDOFF_BOOT_ADDR >> 4 &&
+	     (!fallback || address != HANDOFF_BOOT_FALLBACK_ADDR >> 4)) ||
 	    readl(display->osd + OSD_REG(VIU_OSD1_BLK2_CFG_W4)) != HANDOFF_PITCH >> 4 ||
 	    readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W1)) != (HANDOFF_WIDTH - 1) << 16 ||
 	    readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W2)) != (HANDOFF_HEIGHT - 1) << 16 ||
 	    readl(display->venc + VENC_REG(ENCP_VIDEO_EN)) != 1 ||
-	    htotal != 2199 || vtotal != 1124)
+	    (!fallback && (htotal != 2199 || vtotal != 1124)))
 		return -ENODEV;
 	display->boot_format = format;
 	display->boot_stride = readl(display->osd + OSD_REG(VIU_OSD1_BLK2_CFG_W4));
