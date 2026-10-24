@@ -49,6 +49,176 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_m2m_job_binds_codec_only_until_dma_stop(self):
+        worker = function(HERE / "aml_vdec.c", "m2mops_vdec_device_run")
+        run_c(COMMON + """
+#define WRITE_ONCE(p, value) ((p) = (value))
+#define WARN_ON_ONCE(v) (v)
+#define dev_dbg(...) ((void)0)
+#define VB2_BUF_STATE_DONE 1
+#define VB2_BUF_STATE_ERROR 2
+struct media_request {};
+struct vb2_v4l2_buffer { struct { int index; struct { struct media_request *req; } req_obj; } vb2_buf; };
+struct aml_vdec_ctx;
+struct codec_ops { int (*run)(struct aml_vdec_ctx *); };
+struct hw { bool faulted; void *curr_ctx; };
+struct platform_data { const char *fw_path[1]; };
+struct aml_vdec_dev { struct hw *dec_hw; struct platform_data *pvdec_data; int m2m_dev_dec; };
+struct aml_vdec_ctx {
+    struct aml_vdec_dev *dev;
+    struct { void *m2m_ctx; } fh;
+    const struct codec_ops *codec_ops;
+    int curr_dec_type, ctrl_handler, dos_clk_en;
+    void *codec_priv, *m2m_ctx;
+};
+static struct vb2_v4l2_buffer buffer;
+static int jobs, stops, firmware_error;
+static bool stop_error;
+static struct aml_vdec_ctx *owner;
+static struct vb2_v4l2_buffer *v4l2_m2m_next_src_buf(void *p) { return &buffer; }
+static struct vb2_v4l2_buffer *v4l2_m2m_next_dst_buf(void *p) { return &buffer; }
+static int v4l2_ctrl_request_setup(void *p, int *h) { return 0; }
+static void v4l2_ctrl_request_complete(void *p, int *h) {}
+static void dos_enable(struct hw *h) { assert(h->curr_ctx == owner->codec_priv); }
+static int aml_vdec_reset_core(struct hw *h) { return 0; }
+static int load_firmware(struct hw *h, const char *path)
+{ assert(h->curr_ctx == owner->codec_priv); return firmware_error; }
+static void aml_vdec_fault(struct aml_vdec_ctx *ctx) { ctx->dev->dec_hw->faulted = true; }
+static void aml_vdec_stop_job(struct aml_vdec_ctx *ctx)
+{
+    if (!ctx->dos_clk_en || ctx->dev->dec_hw->faulted) return;
+    assert(ctx == owner && ctx->dev->dec_hw->curr_ctx == ctx->codec_priv);
+    stops++;
+    if (stop_error) aml_vdec_fault(ctx);
+    else ctx->dos_clk_en = 0;
+}
+static void v4l2_m2m_buf_copy_metadata(void *src, void *dst) {}
+static void v4l2_m2m_buf_done_and_job_finish(int device, void *ctx, int result)
+{
+    assert(ctx == owner->m2m_ctx);
+    assert(owner->dev->dec_hw->faulted || !owner->dev->dec_hw->curr_ctx);
+    assert(result == ((firmware_error || stop_error) ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE));
+    jobs++;
+}
+static int decode(struct aml_vdec_ctx *ctx)
+{ assert(ctx == owner && ctx->dev->dec_hw->curr_ctx == ctx->codec_priv); return 0; }
+""" + worker + """
+int main(void)
+{
+    struct hw hw = {};
+    struct platform_data data = { { "h264" } };
+    struct aml_vdec_dev dev = { &hw, &data };
+    struct codec_ops ops = { decode };
+    struct aml_vdec_ctx a = { .dev = &dev, .codec_ops = &ops, .codec_priv = &a, .m2m_ctx = &a };
+    struct aml_vdec_ctx b = { .dev = &dev, .codec_ops = &ops, .codec_priv = &b, .m2m_ctx = &b };
+    owner = &a; m2mops_vdec_device_run(&a);
+    owner = &b; m2mops_vdec_device_run(&b);
+    owner = &a; m2mops_vdec_device_run(&a);
+    assert(jobs == 3 && stops == 3 && !hw.curr_ctx);
+    firmware_error = -EIO;
+    owner = &b; m2mops_vdec_device_run(&b);
+    assert(jobs == 4 && stops == 4 && !hw.curr_ctx);
+    firmware_error = 0; stop_error = true;
+    owner = &a; m2mops_vdec_device_run(&a);
+    assert(jobs == 5 && stops == 5 && hw.faulted && hw.curr_ctx == a.codec_priv);
+    return 0;
+}
+""")
+
+    def test_multiple_files_keep_independent_queues_and_pm_references(self):
+        functions = "\n".join(function(HERE / "aml_vdec_drv.c", name) for name in (
+            "fops_vcodec_open", "fops_vcodec_release"))
+        run_c(COMMON + """
+#include <stdlib.h>
+#define READ_ONCE(x) (x)
+#define GFP_KERNEL 0
+#define __force
+#define kzalloc_obj(obj, flags) calloc(1, sizeof(obj))
+#define kfree free
+#define IS_ERR(p) ((p) == (void *)-ENOMEM)
+#define PTR_ERR(p) (-ENOMEM)
+#define v4l2_err(...) ((void)0)
+struct aml_vdec_hw { bool faulted, power_test_passed, mdec_test_passed; void *curr_ctx; };
+struct platform { int dev; };
+struct platform_data { bool has_dbus_ctrl; };
+struct aml_vdec_dev {
+    struct aml_vdec_hw *dec_hw;
+    struct platform *plat_dev;
+    struct platform_data *pvdec_data;
+    unsigned int open_count;
+    int dev_mutex, m2m_dev_dec;
+};
+struct fh { void *m2m_ctx; };
+struct aml_vdec_ctx {
+    struct aml_vdec_dev *dev;
+    struct fh fh;
+    void *m2m_ctx;
+    int v4l2_intf_lock, queue, int_cond, ctrl_handler;
+};
+struct file { void *private_data; };
+static struct aml_vdec_hw hw = { .power_test_passed = true, .mdec_test_passed = true };
+static struct platform platform;
+static struct platform_data data = { true };
+static struct aml_vdec_dev dev = { .dec_hw = &hw, .plat_dev = &platform, .pvdec_data = &data };
+static bool t7_snapshot_only, allow_t7_power = true, fail_queue, fail_controls;
+static int pm_refs, contexts, handles;
+static struct aml_vdec_dev *video_drvdata(struct file *f) { return &dev; }
+static void *video_devdata(struct file *f) { return NULL; }
+static struct aml_vdec_ctx *fh_to_dec_ctx(struct file *f)
+{ return (void *)((char *)f->private_data - offsetof(struct aml_vdec_ctx, fh)); }
+static void mutex_lock(int *p) {}
+static void mutex_unlock(int *p) {}
+static void mutex_init(int *p) {}
+static void init_waitqueue_head(int *p) {}
+static int pm_runtime_resume_and_get(int *p) { return ++pm_refs, 0; }
+static int pm_runtime_put_sync_suspend(int *p) { assert(pm_refs > 0); return --pm_refs, 0; }
+static void v4l2_fh_init(struct fh *fh, void *vfd) { handles++; }
+static void v4l2_fh_add(struct fh *fh, struct file *f) {}
+static void v4l2_fh_del(struct fh *fh, struct file *f) {}
+static void v4l2_fh_exit(struct fh *fh) { handles--; }
+static void aml_vdec_queue_init(void) {}
+static void *v4l2_m2m_ctx_init(int device, void *ctx, void (*init)(void))
+{ if (fail_queue) return (void *)-ENOMEM; contexts++; return malloc(1); }
+static void v4l2_m2m_ctx_release(void *ctx) { contexts--; free(ctx); }
+static int aml_vdec_ctrls_setup(struct aml_vdec_ctx *ctx) { return fail_controls ? -ENOMEM : 0; }
+static void aml_vdec_reset_fmts(struct aml_vdec_ctx *ctx) {}
+static void v4l2_ctrl_handler_free(int *p) {}
+static void aml_vdec_fault(struct aml_vdec_ctx *ctx) { assert(!"unexpected PM failure"); }
+""" + functions + """
+int main(void)
+{
+    struct file first = {}, second = {}, failed = {};
+    struct aml_vdec_ctx *a, *b;
+
+    assert(!fops_vcodec_open(&first));
+    a = fh_to_dec_ctx(&first);
+    hw.curr_ctx = a; /* Another file may open/close during a running job. */
+    assert(!fops_vcodec_open(&second));
+    b = fh_to_dec_ctx(&second);
+    assert(a != b && a->m2m_ctx != b->m2m_ctx);
+    assert(a->fh.m2m_ctx == a->m2m_ctx && b->fh.m2m_ctx == b->m2m_ctx);
+    assert(dev.open_count == 2 && pm_refs == 2 && contexts == 2 && handles == 2);
+    fail_queue = true;
+    assert(fops_vcodec_open(&failed) == -ENOMEM);
+    fail_queue = false;
+    fail_controls = true;
+    assert(fops_vcodec_open(&failed) == -ENOMEM);
+    fail_controls = false;
+    assert(dev.open_count == 2 && pm_refs == 2 && contexts == 2 && handles == 2);
+    assert(hw.curr_ctx == a);
+    assert(!fops_vcodec_release(&second));
+    assert(dev.open_count == 1 && pm_refs == 1 && contexts == 1 && handles == 1);
+    assert(hw.curr_ctx == a && a->m2m_ctx);
+    hw.faulted = true;
+    assert(fops_vcodec_open(&failed) == -EIO);
+    hw.faulted = false;
+    hw.curr_ctx = NULL;
+    assert(!fops_vcodec_release(&first));
+    assert(!dev.open_count && !pm_refs && !contexts && !handles);
+    return 0;
+}
+""")
+
     def test_snapshot_guard_stops_internal_access_but_allows_abort(self):
         functions = "\n".join(function(HERE / "aml_vdec_drv.c", name) for name in (
             "register_step_store", "mdec_test_store"))
@@ -59,7 +229,7 @@ class LifetimeTests(unittest.TestCase):
 struct device {};
 struct device_attribute {};
 struct aml_vdec_hw { unsigned int probe_step; };
-struct aml_vdec_dev { void *dec_ctx; int dev_mutex; struct aml_vdec_hw *dec_hw; };
+struct aml_vdec_dev { unsigned int open_count; int dev_mutex; struct aml_vdec_hw *dec_hw; };
 static struct aml_vdec_hw hw;
 static struct aml_vdec_dev vdec = { .dec_hw = &hw };
 static bool t7_snapshot_only = true, allow_t7_power = true;
