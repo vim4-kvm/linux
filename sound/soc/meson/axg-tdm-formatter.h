@@ -16,6 +16,8 @@ struct snd_kcontrol;
 
 struct axg_tdm_formatter_hw {
 	unsigned int skew_offset;
+	unsigned int slot_num_mask;
+	bool extended;
 };
 
 struct axg_tdm_formatter_ops {

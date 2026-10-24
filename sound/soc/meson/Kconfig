@@ -135,4 +135,40 @@ config SND_SOC_MESON_T9015
 	help
 	  Say Y or M if you want to add support for the internal DAC found
 	  on GXL, G12 and SM1 SoC family.
+config SND_MESON_T7_ASRC
+	tristate "Amlogic T7 asynchronous sample rate converter"
+	select REGMAP
+	help
+	  Enable the T7 audio ASRC A and loopback ASRC B components.
+	  These convert digital audio between independent sample clocks.
+	  ASRC A feeds capture DMA and ASRC B supplies the reference input
+	  of the microphone loopback combiner at a fixed 16 kHz output rate.
+
+config SND_MESON_T7_LOOPBACK
+	tristate "Amlogic T7 hardware loopback combiner"
+	select REGMAP_MMIO
+	help
+	  Enable the T7 microphone and playback reference channel combiners.
+	  Each combiner merges microphone data with an independently selected
+	  playback reference. Both input synchronizers are configured by DAPM.
+	  Reference sample rate conversion is provided by the separate ASRC B.
+
+config SND_MESON_T7_AED
+	tristate "Amlogic T7 stereo audio effects"
+	select REGMAP_MMIO
+	help
+	  Enable the T7 stereo hardware EQ and full band dynamics processor.
+	  The component taps a playback FIFO and sends the processed first
+	  stereo lane to TDMOUT B. Equalizer coefficients are validated before
+	  loading both coefficient RAM banks while the engine is stopped.
+
+config SND_MESON_T7_VAD
+	tristate "Amlogic T7 voice activity detector"
+	select REGMAP
+	help
+	  Enable hardware speech activity detection on an existing 16 kHz PDM
+	  stream. Keyword recognition and suspend clock policy are separate.
+	  The component reports hardware activity interrupts using a standard
+	  read-only ALSA control without depending on a speech recognition SDK.
+
 endmenu

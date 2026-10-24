@@ -31,6 +31,8 @@
 #define CTRL2_SEL2_EN_SHIFT		12
 #define CTRL2_SEL3_SHIFT		16
 #define CTRL2_SEL3_EN_SHIFT		20
+#define T7_CTRL0_FRDDR_URGENT		BIT(0)
+#define T7_CTRL2_FRDDR_CHANNELS		GENMASK(31, 24)
 
 static int g12a_frddr_dai_prepare(struct snd_pcm_substream *substream,
 				  struct snd_soc_dai *dai)
@@ -60,10 +62,8 @@ static int axg_frddr_dai_hw_params(struct snd_pcm_substream *substream,
 	/* Trim the FIFO depth if the period is small to improve latency */
 	depth = min(period, fifo->depth);
 	val = (depth / AXG_FIFO_BURST) - 1;
-	regmap_update_bits(fifo->map, FIFO_CTRL1, CTRL1_FRDDR_DEPTH,
-			   FIELD_PREP(CTRL1_FRDDR_DEPTH, val));
-
-	return 0;
+	return regmap_update_bits(fifo->map, FIFO_CTRL1, CTRL1_FRDDR_DEPTH,
+				  FIELD_PREP(CTRL1_FRDDR_DEPTH, val));
 }
 
 static int axg_frddr_dai_startup(struct snd_pcm_substream *substream,
@@ -372,6 +372,91 @@ static const struct axg_fifo_match_data sm1_frddr_match_data = {
 	.dai_drv		= &g12a_frddr_dai_drv
 };
 
+static int t7_frddr_dai_hw_params(struct snd_pcm_substream *substream,
+				  struct snd_pcm_hw_params *params,
+				  struct snd_soc_dai *dai)
+{
+	struct axg_fifo *fifo = snd_soc_dai_get_drvdata(dai);
+	int ret;
+
+	ret = axg_frddr_dai_hw_params(substream, params, dai);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(fifo->map, FIFO_CTRL2, T7_CTRL2_FRDDR_CHANNELS,
+				 FIELD_PREP(T7_CTRL2_FRDDR_CHANNELS,
+					    params_channels(params) - 1));
+	if (ret)
+		return ret;
+
+	return regmap_update_bits(fifo->map, FIFO_CTRL0, T7_CTRL0_FRDDR_URGENT,
+				  T7_CTRL0_FRDDR_URGENT);
+}
+
+static const struct snd_soc_dai_ops t7_frddr_ops = {
+	.prepare = g12a_frddr_dai_prepare,
+	.hw_params = t7_frddr_dai_hw_params,
+	.startup = axg_frddr_dai_startup,
+	.shutdown = axg_frddr_dai_shutdown,
+	.pcm_new = axg_frddr_pcm_new,
+};
+
+static struct snd_soc_dai_driver t7_frddr_dai_drv = {
+	.name = "FRDDR",
+	.playback = {
+		.stream_name = "Playback",
+		.channels_min = 1,
+		.channels_max = AXG_FIFO_CH_MAX,
+		.rates = SNDRV_PCM_RATE_CONTINUOUS,
+		.rate_min = 5515,
+		.rate_max = 768000,
+		.formats = AXG_FIFO_FORMATS,
+	},
+	.ops = &t7_frddr_ops,
+};
+
+static const struct snd_soc_dapm_widget t7_frddr_aed_widgets[] = {
+	SND_SOC_DAPM_PGA("AED", FIFO_CTRL2, 3, 0, NULL, 0),
+};
+
+static const struct snd_soc_dapm_route t7_frddr_aed_routes[] = {
+	{ "AED", NULL, "Playback" },
+};
+
+static int t7_frddr_component_probe(struct snd_soc_component *component)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+	int ret;
+
+	ret = snd_soc_dapm_new_controls(dapm, t7_frddr_aed_widgets,
+					ARRAY_SIZE(t7_frddr_aed_widgets));
+	if (ret)
+		return ret;
+	return snd_soc_dapm_add_routes(dapm, t7_frddr_aed_routes,
+				       ARRAY_SIZE(t7_frddr_aed_routes));
+}
+
+static const struct snd_soc_component_driver t7_frddr_component = {
+	.probe = t7_frddr_component_probe,
+	.dapm_widgets = sm1_frddr_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(sm1_frddr_dapm_widgets),
+	.dapm_routes = g12a_frddr_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(g12a_frddr_dapm_routes),
+	.open = axg_fifo_pcm_open,
+	.close = axg_fifo_pcm_close,
+	.hw_params = g12a_fifo_pcm_hw_params,
+	.hw_free = axg_fifo_pcm_hw_free,
+	.pointer = axg_fifo_pcm_pointer,
+	.trigger = axg_fifo_pcm_trigger,
+	.legacy_dai_naming = 1,
+};
+
+static const struct axg_fifo_match_data t7_frddr_match_data = {
+	.field_threshold = REG_FIELD(FIFO_CTRL1, 16, 23),
+	.component_drv = &t7_frddr_component,
+	.dai_drv = &t7_frddr_dai_drv,
+};
+
 static const struct of_device_id axg_frddr_of_match[] = {
 	{
 		.compatible = "amlogic,axg-frddr",
@@ -382,6 +467,9 @@ static const struct of_device_id axg_frddr_of_match[] = {
 	}, {
 		.compatible = "amlogic,sm1-frddr",
 		.data = &sm1_frddr_match_data,
+	}, {
+		.compatible = "amlogic,t7-frddr",
+		.data = &t7_frddr_match_data,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, axg_frddr_of_match);

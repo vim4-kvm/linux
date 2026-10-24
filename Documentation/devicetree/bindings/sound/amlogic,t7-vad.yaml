@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/amlogic,t7-vad.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amlogic T7 voice activity detector
+
+maintainers:
+  - localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+
+description: |
+  The detector observes an existing 16 kHz PDM stream. Voice activity IRQs
+  indicate speech energy, not keyword recognition. The audio fabric feed
+  register is separate from the detector core. Retaining the PDM producer
+  and its clocks during system suspend requires machine power policy.
+
+allOf:
+  - $ref: component-common.yaml#
+
+properties:
+  compatible:
+    const: amlogic,t7-vad
+  reg:
+    items:
+      - description: Detector core
+      - description: Audio fabric feed control
+  reg-names:
+    items:
+      - const: core
+      - const: feed
+  clocks:
+    items:
+      - description: Peripheral gate
+      - description: Detector processing clock
+  clock-names:
+    items:
+      - const: pclk
+      - const: clk
+  interrupts:
+    items:
+      - description: Voice activity
+  interrupt-names:
+    const: voice
+  power-domains:
+    maxItems: 1
+  wakeup-source: true
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - clocks
+  - clock-names
+  - interrupts
+  - interrupt-names
+  - power-domains
+
+unevaluatedProperties: false

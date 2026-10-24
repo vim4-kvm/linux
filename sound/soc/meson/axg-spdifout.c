@@ -34,7 +34,7 @@
 #define  SPDIFOUT_CTRL0_VSEL		BIT(18)
 #define  SPDIFOUT_CTRL0_VSET		BIT(17)
 #define  SPDIFOUT_CTRL0_MASK_MASK	GENMASK(11, 4)
-#define  SPDIFOUT_CTRL0_MASK(x)		((x) << 4)
+#define  T7_SPDIFOUT_CTRL0_MASK_MASK	GENMASK(15, 0)
 #define SPDIFOUT_CTRL1			0x10
 #define  SPDIFOUT_CTRL1_MSB_POS_MASK	GENMASK(12, 8)
 #define  SPDIFOUT_CTRL1_MSB_POS(x)	((x) << 8)
@@ -56,7 +56,13 @@
 #define SPDIFOUT_CHSTSB			0x48
 #define SPDIFOUT_MUTE_VAL		0x4c
 
+struct axg_spdifout_match_data {
+	unsigned int channel_mask;
+	unsigned int channel_shift;
+};
+
 struct axg_spdifout {
+	const struct axg_spdifout_match_data *data;
 	struct regmap *map;
 	struct clk *mclk;
 	struct clk *pclk;
@@ -128,10 +134,10 @@ static int axg_spdifout_sample_fmt(struct snd_pcm_hw_params *params,
 	/* Set the samples spdifout will pull from the FIFO */
 	switch (params_channels(params)) {
 	case 1:
-		val = SPDIFOUT_CTRL0_MASK(0x1);
+		val = 0x1;
 		break;
 	case 2:
-		val = SPDIFOUT_CTRL0_MASK(0x3);
+		val = 0x3;
 		break;
 	default:
 		dev_err(dai->dev, "too many channels for spdif dai: %u\n",
@@ -140,7 +146,8 @@ static int axg_spdifout_sample_fmt(struct snd_pcm_hw_params *params,
 	}
 
 	regmap_update_bits(priv->map, SPDIFOUT_CTRL0,
-			   SPDIFOUT_CTRL0_MASK_MASK, val);
+			   priv->data->channel_mask,
+			   val << priv->data->channel_shift);
 
 	/* FIFO data are arranged in chunks of 64bits */
 	switch (params_physical_width(params)) {
@@ -393,8 +400,23 @@ static const struct regmap_config axg_spdifout_regmap_cfg = {
 	.max_register	= SPDIFOUT_MUTE_VAL,
 };
 
+static const struct axg_spdifout_match_data axg_spdifout_data = {
+	.channel_mask = SPDIFOUT_CTRL0_MASK_MASK,
+	.channel_shift = 4,
+};
+
+static const struct axg_spdifout_match_data t7_spdifout_data = {
+	.channel_mask = T7_SPDIFOUT_CTRL0_MASK_MASK,
+};
+
 static const struct of_device_id axg_spdifout_of_match[] = {
-	{ .compatible = "amlogic,axg-spdifout", },
+	{
+		.compatible = "amlogic,axg-spdifout",
+		.data = &axg_spdifout_data,
+	}, {
+		.compatible = "amlogic,t7-spdifout",
+		.data = &t7_spdifout_data,
+	},
 	{}
 };
 MODULE_DEVICE_TABLE(of, axg_spdifout_of_match);
@@ -409,6 +431,7 @@ static int axg_spdifout_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, priv);
+	priv->data = of_device_get_match_data(dev);
 
 	regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(regs))
