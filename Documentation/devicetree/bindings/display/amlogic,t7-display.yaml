@@ -73,9 +73,10 @@ properties:
       - description: vd3-fetch, ff012400/4
       - description: vd3-afbc, ff012500/4
       - description: VPP0 POST2 output matrix, ff00e680/38
+      - description: VPP0 OSD HDR2 control and matrices, ff00e280/f4
   reg-names:
     minItems: 12
-    maxItems: 45
+    maxItems: 46
     oneOf:
       - minItems: 12
         items:
@@ -148,6 +149,7 @@ properties:
           - const: dimm2
           - const: dimm3
           - const: post2-matrix
+          - const: osd-hdr
       - minItems: 14
         items:
           - const: osd1
@@ -195,6 +197,7 @@ properties:
           - const: vd3-fetch
           - const: vd3-afbc
           - const: post2-matrix
+          - const: osd-hdr
   amlogic,video-planes:
     type: boolean
     description: |
@@ -276,9 +279,9 @@ allOf:
     else:
       properties:
         reg:
-          maxItems: 25
+          maxItems: 26
         reg-names:
-          maxItems: 25
+          maxItems: 26
         power-domains:
           maxItems: 10
   - if:
