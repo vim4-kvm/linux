@@ -163,7 +163,7 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 	int ret = 0;
 	const char *fw_path = dev->pvdec_data->fw_path[ctx->curr_dec_type];
 
-	if (dev->dec_hw->faulted)
+	if (dev->dec_hw->faulted || ctx->decode_failed)
 		goto err_cancel_job;
 	src_buf = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	dst_buf = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);

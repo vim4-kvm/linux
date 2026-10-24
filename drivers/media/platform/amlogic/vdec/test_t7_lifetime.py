@@ -54,6 +54,82 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_fifo_ring_includes_padding_without_exposing_unallocated_memory(self):
+        prepare = function(HERE / "h264.c", "h264_prepare_input")
+        run_c(COMMON + """
+#include <string.h>
+#include "reg_defines.h"
+#define VDEC_FIFO_ALIGN 8
+#define VLD_PADDING_SIZE 1024
+#define H264_DECODE_INFO M4_CONTROL_REG
+#define H264_DECODE_SIZE AV_SCRATCH_E
+#define DOS_BUS 0
+#define round_down(v, a) ((v) / (a) * (a))
+#define dev_info(...) ((void)0)
+typedef unsigned long dma_addr_t;
+struct aml_vdec_hw { void *dev, *map[1]; };
+struct vb2_buffer { unsigned int payload, size; void *data; };
+struct vb2_v4l2_buffer { struct vb2_buffer vb2_buf; };
+struct aml_vdec_ctx { struct aml_vdec_hw *dev; struct { void *m2m_ctx; } fh; };
+static unsigned int registers[0x10000 / 4], writes;
+static struct vb2_v4l2_buffer source;
+static struct aml_vdec_hw *vdec_get_hw(struct aml_vdec_hw *p) { return p; }
+static struct vb2_v4l2_buffer *v4l2_m2m_next_src_buf(void *p) { return &source; }
+static unsigned int vb2_get_plane_payload(struct vb2_buffer *b, int p) { return b->payload; }
+static unsigned int vb2_plane_size(struct vb2_buffer *b, int p) { return b->size; }
+static void *vb2_plane_vaddr(struct vb2_buffer *b, int p) { return b->data; }
+static dma_addr_t vb2_dma_contig_plane_dma_addr(struct vb2_buffer *b, int p) { return 0x10000000; }
+static void regmap_write(void *map, unsigned int reg, unsigned int value)
+{ writes++; registers[reg / 4] = value; }
+""" + prepare + """
+int main(void)
+{
+    unsigned char memory[4096];
+    struct aml_vdec_hw hw = {};
+    struct aml_vdec_ctx ctx = { .dev = &hw };
+    unsigned int cases[] = { 1, 7, 8, 1000, 3064 }, i, j;
+    source.vb2_buf.data = memory; source.vb2_buf.size = sizeof(memory);
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        unsigned int size = cases[i];
+        memset(memory, 0xa5, sizeof(memory)); source.vb2_buf.payload = size;
+        assert(!h264_prepare_input(&ctx));
+        assert(registers[VLD_MEM_VIFIFO_END_PTR / 4] == 0x10000ff8);
+        assert(registers[VLD_MEM_VIFIFO_WP / 4] > 0x10000000);
+        assert(registers[VLD_MEM_VIFIFO_WP / 4] <= registers[VLD_MEM_VIFIFO_END_PTR / 4]);
+        for (j = 0; j < size; j++) assert(memory[j] == 0xa5);
+        for (j = size; j < size + 1024; j++) assert(!memory[j]);
+        for (j = size + 1024; j < sizeof(memory); j++) assert(memory[j] == 0xa5);
+    }
+    writes = 0; source.vb2_buf.payload = 3065;
+    assert(h264_prepare_input(&ctx) == -EINVAL && !writes);
+    source.vb2_buf.payload = 0;
+    assert(h264_prepare_input(&ctx) == -EINVAL && !writes);
+    source.vb2_buf.payload = 1; source.vb2_buf.data = NULL;
+    assert(h264_prepare_input(&ctx) == -EINVAL && !writes);
+    return 0;
+}
+""")
+
+    def test_timeout_snapshots_before_latching_and_waking_both_queues(self):
+        timeout = function(HERE / "h264.c", "h264_timeout")
+        run_c(COMMON + """
+struct aml_vdec_ctx { bool decode_failed; void *m2m_ctx; };
+static unsigned int stage;
+static void h264_snapshot(struct aml_vdec_ctx *p, const char *phase)
+{ assert(!stage && !p->decode_failed); stage++; }
+static void *v4l2_m2m_get_src_vq(void *p) { return (void *)1; }
+static void *v4l2_m2m_get_dst_vq(void *p) { return (void *)2; }
+static void vb2_queue_error(void *q) { assert((unsigned long)q == stage); stage++; }
+""" + timeout + """
+int main(void)
+{
+    struct aml_vdec_ctx ctx = {};
+    h264_timeout(&ctx);
+    assert(ctx.decode_failed && stage == 3);
+    return 0;
+}
+""")
+
     def test_streamoff_releases_own_canvas_after_hardware_owner_is_cleared(self):
         functions = "\n".join(function(HERE / "h264.c", name) for name in (
             "release_canvas_index", "h264_release_decode_spec", "aml_h264_finish"))
@@ -218,6 +294,7 @@ struct aml_vdec_ctx {
     const struct codec_ops *codec_ops;
     int curr_dec_type, ctrl_handler, dos_clk_en;
     void *codec_priv, *m2m_ctx;
+    bool decode_failed;
 };
 static struct vb2_v4l2_buffer buffer;
 static int jobs, stops, firmware_error, pin_error;
@@ -250,7 +327,7 @@ static void v4l2_m2m_buf_done_and_job_finish(int device, void *ctx, int result)
     assert(ctx == owner->m2m_ctx);
     assert(owner->dev->dec_hw->faulted || !owner->dev->dec_hw->curr_ctx);
     assert(!pins_held);
-    assert(result == ((firmware_error || stop_error || pin_error) ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE));
+    assert(result == ((firmware_error || stop_error || pin_error || owner->decode_failed) ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE));
     jobs++;
 }
 static int decode(struct aml_vdec_ctx *ctx)
@@ -268,6 +345,10 @@ int main(void)
     owner = &b; m2mops_vdec_device_run(&b);
     owner = &a; m2mops_vdec_device_run(&a);
     assert(jobs == 3 && stops == 3 && !hw.curr_ctx);
+    a.decode_failed = true;
+    owner = &a; m2mops_vdec_device_run(&a);
+    assert(jobs == 4 && stops == 3 && !hw.curr_ctx);
+    jobs--; a.decode_failed = false;
     firmware_error = -EIO;
     owner = &b; m2mops_vdec_device_run(&b);
     assert(jobs == 4 && stops == 4 && !hw.curr_ctx);

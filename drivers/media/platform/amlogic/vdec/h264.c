@@ -8,6 +8,7 @@
 #include "aml_vdec.h"
 #include "aml_vdec_hw.h"
 #include "h264.h"
+#include "h264_diag.h"
 
 #define INVALID_POC 0xffffffff
 
@@ -269,6 +270,8 @@ static int h264_prepare_input(struct aml_vdec_ctx *ctx)
 	struct vb2_buffer *vb;
 	dma_addr_t src_dma;
 	u32 payload_size;
+	u32 buffer_size;
+	void *input;
 	int dummy;
 
 	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
@@ -278,10 +281,15 @@ static int h264_prepare_input(struct aml_vdec_ctx *ctx)
 	}
 	vb = &src->vb2_buf;
 	payload_size = vb2_get_plane_payload(vb, 0);
-	/* The FIFO write pointer includes padding, which must remain allocated. */
-	if (!payload_size || vb2_plane_size(vb, 0) < VLD_PADDING_SIZE ||
-	    payload_size > vb2_plane_size(vb, 0) - VLD_PADDING_SIZE)
+	buffer_size = round_down(vb2_plane_size(vb, 0), VDEC_FIFO_ALIGN);
+	/* Leave one FIFO word free so the padded WP cannot alias the RP. */
+	if (!payload_size || buffer_size <= VLD_PADDING_SIZE + VDEC_FIFO_ALIGN ||
+	    payload_size > buffer_size - VLD_PADDING_SIZE - VDEC_FIFO_ALIGN)
 		return -EINVAL;
+	input = vb2_plane_vaddr(vb, 0);
+	if (!input)
+		return -EINVAL;
+	memset(input + payload_size, 0, VLD_PADDING_SIZE);
 	src_dma = vb2_dma_contig_plane_dma_addr(vb, 0);
 
 	regmap_write(hw->map[DOS_BUS], VLD_MEM_VIFIFO_CONTROL, 0);
@@ -293,7 +301,7 @@ static int h264_prepare_input(struct aml_vdec_ctx *ctx)
 
 	regmap_write(hw->map[DOS_BUS], VLD_MEM_VIFIFO_START_PTR, src_dma);
 	regmap_write(hw->map[DOS_BUS], VLD_MEM_VIFIFO_END_PTR,
-		     (src_dma + payload_size));
+		     src_dma + buffer_size - VDEC_FIFO_ALIGN);
 	regmap_write(hw->map[DOS_BUS], VLD_MEM_VIFIFO_CURR_PTR,
 		     round_down(src_dma, VDEC_FIFO_ALIGN));
 
@@ -2130,6 +2138,44 @@ static void config_decode_mode(struct aml_vdec_ctx *ctx)
 	regmap_write(hw->map[DOS_BUS], INIT_FLAG_REG, 1);
 }
 
+static void h264_snapshot(struct aml_vdec_ctx *ctx, const char *phase)
+{
+	static const struct {
+		const char *name;
+		u32 reg;
+	} regs[] = {
+#define DIAG_REG(name, word) { #name, (word) << 2 },
+		H264_DIAG_REGS(DIAG_REG)
+#undef DIAG_REG
+	};
+	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
+	u32 value;
+	int i, ret;
+
+	dev_info(hw->dev, "h264 snapshot %s irq=%d hard=%u thread=%u swap=%#x\n",
+		 phase, hw->dec_irq, READ_ONCE(hw->irq_count),
+		 READ_ONCE(hw->threaded_irq_count), hw->secure_swap);
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		ret = regmap_read(hw->map[DOS_BUS], regs[i].reg, &value);
+		if (ret) {
+			dev_err(hw->dev, "h264 snapshot %s %s read failed: %d\n",
+				phase, regs[i].name, ret);
+			break;
+		}
+		dev_info(hw->dev, "h264 snapshot %s %s offset=%#x value=%#x\n",
+			 phase, regs[i].name, regs[i].reg, value);
+	}
+}
+
+static void h264_timeout(struct aml_vdec_ctx *ctx)
+{
+	/* Capture before the worker resets/isolate DMA and loses firmware state. */
+	h264_snapshot(ctx, "timeout");
+	ctx->decode_failed = true;
+	vb2_queue_error(v4l2_m2m_get_src_vq(ctx->m2m_ctx));
+	vb2_queue_error(v4l2_m2m_get_dst_vq(ctx->m2m_ctx));
+}
+
 int aml_h264_dec_run(void *priv)
 {
 	struct aml_vdec_ctx *ctx = (struct aml_vdec_ctx *)priv;
@@ -2170,6 +2216,10 @@ int aml_h264_dec_run(void *priv)
 	regmap_update_bits(dec_hw->map[DOS_BUS], VDEC_ASSIST_MMC_CTRL1,
 			   (1 << 3), 0);
 
+	if (dec_hw->has_dbus_ctrl && !ctx->diag_started) {
+		h264_snapshot(ctx, "prepared");
+		ctx->diag_started = true;
+	}
 	aml_start_vdec_hw(dec_hw);
 	h264_ctx->init_flag = 1;
 
@@ -2181,6 +2231,8 @@ int aml_h264_dec_run(void *priv)
 	if (!ret) {
 		ret = -ETIMEDOUT;
 		dev_err(&ctx->dev->plat_dev->dev, "dec timeout=%u\n", DECODER_TIMEOUT_MS);
+		if (dec_hw->has_dbus_ctrl)
+			h264_timeout(ctx);
 	} else if (-ERESTARTSYS == ret) {
 		ret = -1;
 		dev_err(&ctx->dev->plat_dev->dev, "dec inter fail\n");

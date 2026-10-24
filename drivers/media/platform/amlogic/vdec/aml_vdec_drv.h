@@ -134,6 +134,8 @@ struct dec_pic_info {
  * @codec_priv: Pointer to current decoder instance.
  * @decode_result: Result signaled by the firmware IRQ; completed after stop.
  * @buffers_held: Queue mmap locks and per-job DMA pins are held.
+ * @decode_failed: A timed-out context rejects further jobs until close.
+ * @diag_started: The initial T7 decode snapshot has been recorded.
  */
 struct aml_vdec_ctx {
 	struct aml_vdec_dev *dev;
@@ -157,6 +159,8 @@ struct aml_vdec_ctx {
 	void *codec_priv;
 	int decode_result;
 	bool buffers_held;
+	bool decode_failed;
+	bool diag_started;
 };
 
 void aml_vdec_fault(struct aml_vdec_ctx *ctx);
