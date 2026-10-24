@@ -1092,28 +1092,44 @@ static int t7_hdmirx_tmds_status(struct t7_hdmirx *rx)
 	unsigned long reference = clk_get_rate(rx->clocks[T7_RX_METER].clk);
 	u32 sqo, cable_status, tmds_status;
 	u64 cable, tmds, delta;
+	unsigned int attempt, wait_us;
 	int ret;
 
+	if (!reference)
+		return -EAGAIN;
+	wait_us = div_u64((u64)T7_RX_METER_REF_CYCLES * 1000000 + reference - 1,
+			  reference);
 	/* Vendor T7 aml_get_tmds_valid_t7 uses SQO, matching recovered clocks
 	 * and alignment (checked by the caller), not the APLL lock bit. Keep
 	 * that bit for initial PLL acquisition, not ongoing source admission.
 	 */
-	sqo = readl(rx->top + T7_RX_TOP_MISC_STAT0) & BIT(0);
-	cable_status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
-	tmds_status = readl(rx->top + T7_RX_TOP_METER_HDMI_STAT);
-	/* A TOP meter can briefly clear VALID while retaining the matching count.
-	 * That is an unavailable measurement, not proof of a lost recovered clock.
-	 * Retry the frame; the link worker bounds persistent measurement failures.
-	 */
-	if (sqo && (!(cable_status & T7_RX_METER_VALID) ||
-		    !(tmds_status & T7_RX_METER_VALID)))
-		return -EAGAIN;
+	for (attempt = 0; ; attempt++) {
+		if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
+		    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)))
+			return -ENOLINK;
+		sqo = readl(rx->top + T7_RX_TOP_MISC_STAT0) & BIT(0);
+		cable_status = readl(rx->top + T7_RX_TOP_METER_CABLE_STAT);
+		tmds_status = readl(rx->top + T7_RX_TOP_METER_HDMI_STAT);
+		if (!sqo || ((cable_status & T7_RX_METER_VALID) &&
+			     (tmds_status & T7_RX_METER_VALID)))
+			break;
+		/* VALID can clear between completed measurements. Wait at most two
+		 * measurement windows, not an entire frame, and never admit retained
+		 * counts without VALID. Physical loss still fails at every attempt.
+		 */
+		if (attempt == 2)
+			return -EAGAIN;
+		usleep_range(wait_us, wait_us + 50);
+	}
 	cable = t7_hdmirx_meter_hz(cable_status, reference);
 	tmds = t7_hdmirx_meter_hz(tmds_status, reference);
 	if (rx->uhd60)
 		cable *= 4;
 	delta = cable > tmds ? cable - tmds : tmds - cable;
 	ret = sqo && cable && tmds && delta <= 2000000 ? 0 : -ENOLINK;
+	if (!ret && attempt)
+		pr_info_ratelimited("t7-hdmirx TMDS measurement ready after %u windows: cable=%#x tmds=%#x\n",
+				    attempt, cable_status, tmds_status);
 	if (ret)
 		pr_info_ratelimited("t7-hdmirx TMDS admission: sqo=%u cable=%#x tmds=%#x reference=%lu ratio=%u\n",
 				    sqo, cable_status, tmds_status, reference, rx->uhd60 ? 4 : 1);

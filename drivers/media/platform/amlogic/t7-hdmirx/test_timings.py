@@ -93,7 +93,8 @@ static unsigned long clk_get_rate(void *clk) { (void)clk; return 166666664; }
 static u64 div_u64(u64 a, u32 b) { assert(b); return a/b; }
 static void *dev_get_drvdata(struct device *dev) { return dev->data; }
 static void usleep_range(unsigned int low, unsigned int high) {
-    (void)low; (void)high; assert(!"timing ioctls must not sleep for a frame");
+    /* Only bounded TOP meter remeasurement, never a whole frame wait. */
+    assert(low < 1000 && high < 1000 && high >= low);
 }
 struct t7_vdin { struct device *receiver; };
 struct file { void *data; };
