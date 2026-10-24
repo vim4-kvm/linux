@@ -24,7 +24,8 @@ typedef uint32_t u32;
 #define T7_RX_EDID_CAPACITY 512
 #define T7_RX_EDID_BLOCK_SIZE 128
 #define min(a,b) ((a)<(b)?(a):(b))
-struct link { int lock; unsigned int users; };
+#define WRITE_ONCE(place, value) ((place) = (value))
+struct link { int lock; unsigned int users, video_samples; bool ready; };
 struct t7_hdmirx { struct link *link; struct { size_t size; } edid_blob;
     u8 edid[512]; u32 saved_reset, saved_port_sel;
     bool ddc_active, core_active, uhd60; };
@@ -54,21 +55,25 @@ int main(void) {
     u8 table[256]={0}, changed[256], output[512]={0};
     const u8 header[]={0,255,255,255,255,255,255,0};
     memcpy(table,header,8); table[126]=1; checksum(table); checksum(table+128);
-    struct link link={.users=1};
+    struct link link={.users=1,.ready=true,.video_samples=3};
     struct t7_hdmirx rx={.link=&link,.edid_blob.size=256,.saved_reset=3,.saved_port_sel=7,
                         .ddc_active=true,.core_active=true,.uhd60=true};
     memcpy(rx.edid,table,256);
     struct device dev={.data=&rx};
     struct v4l2_edid request={.blocks=2,.edid=table};
     assert(t7_hdmirx_set_edid(&dev,&request)==0 && programs==0);
+    assert(link.ready && link.video_samples==3);
     memcpy(changed,table,256); changed[20]=1; checksum(changed); request.edid=changed;
     assert(t7_hdmirx_set_edid(&dev,&request)==-EBUSY && programs==0);
+    assert(link.ready && link.video_samples==3);
     link.users=0;
     assert(t7_hdmirx_set_edid(&dev,&request)==0 && programs==1);
+    assert(!link.ready && !link.video_samples);
     assert(hpd);
     assert(rx.saved_reset==3 && rx.saved_port_sel==7 && !memcmp(rx.edid,changed,256));
-    request.edid=table; failures=1;
+    request.edid=table; failures=1; link.ready=true; link.video_samples=3;
     assert(t7_hdmirx_set_edid(&dev,&request)==-EIO && programs==3);
+    assert(!link.ready && !link.video_samples);
     assert(rx.edid_blob.size==256 && !memcmp(rx.edid,changed,256));
     assert(hpd);
     assert(rx.saved_reset==3 && rx.saved_port_sel==7);

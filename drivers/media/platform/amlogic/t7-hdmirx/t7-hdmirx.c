@@ -1845,6 +1845,11 @@ int t7_hdmirx_set_edid(struct device *dev, const struct v4l2_edid *edid)
 		ret = -EBUSY;
 		goto out;
 	}
+	/* Replacing EDID pulses HPD. The old video qualification cannot survive
+	 * that disconnect, even if a failed write restores the previous EDID.
+	 */
+	WRITE_ONCE(rx->link->ready, false);
+	rx->link->video_samples = 0;
 	if (!size) {
 		t7_hdmirx_ddc_stop(rx);
 		goto out;
