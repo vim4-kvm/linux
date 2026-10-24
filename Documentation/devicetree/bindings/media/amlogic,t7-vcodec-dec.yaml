@@ -13,9 +13,8 @@ description: |
   T7 VDEC uses DOS DBUS isolation and a secure power domain, without the S4
   DMC request register. This describes the VDEC engine only, not HEVC or
   HCODEC. The DOS mapping overlaps HCODEC, so both engines need a shared
-  register owner before concurrent operation can be supported. The current
-  driver requires an explicit experimental opt-in. Normal board device
-  trees keep this node disabled.
+  register owner before concurrent operation can be supported. Normal board
+  device trees keep this node disabled pending decoder validation.
 
 properties:
   compatible:
@@ -31,7 +30,7 @@ properties:
     maxItems: 1
 
   clocks:
-    maxItems: 4
+    maxItems: 5
 
   clock-names:
     items:
@@ -39,6 +38,7 @@ properties:
       - const: clk_vdec_mux
       - const: sys-apb
       - const: a73-apb
+      - const: vdec-p0
 
   power-domains:
     items:
@@ -80,8 +80,9 @@ examples:
         clocks = <&clkc_periphs CLKID_SYS_DOS>,
                  <&clkc_periphs CLKID_VDEC>,
                  <&clkc_periphs CLKID_SYS_PCLK_SYS_APB>,
-                 <&clkc_periphs CLKID_SYS_A73PCLK_APB>;
-        clock-names = "vdec", "clk_vdec_mux", "sys-apb", "a73-apb";
+                 <&clkc_periphs CLKID_SYS_A73PCLK_APB>,
+                 <&clkc_periphs CLKID_VDEC_0>;
+        clock-names = "vdec", "clk_vdec_mux", "sys-apb", "a73-apb", "vdec-p0";
         power-domains = <&pwrc PWRC_T7_DOS_VDEC_ID>,
                         <&pwrc PWRC_T7_NIC3_ID>;
         power-domain-names = "vdec", "nic3";
