@@ -322,6 +322,9 @@ static int vdec_clock_gate_init(struct aml_vdec_hw *hw)
 	ret = devm_clk_bulk_get(hw->dev, ARRAY_SIZE(hw->apb_gates), hw->apb_gates);
 	if (ret)
 		return ret;
+	hw->vdec_p0 = devm_clk_get(hw->dev, "vdec-p0");
+	if (IS_ERR(hw->vdec_p0))
+		return PTR_ERR(hw->vdec_p0);
 	return t7_clock_provider_init(hw);
 }
 
@@ -678,6 +681,21 @@ static int t7_power_off(struct aml_vdec_hw *hw)
 	return 0;
 }
 
+static int t7_set_clock(struct aml_vdec_hw *hw)
+{
+	int ret;
+
+	/*
+	 * Live vendor H.264 uses p0. A same-rate p1 left every external bus
+	 * check valid but internal DOS accesses still faulted. Select the
+	 * observed path through CCF; never overwrite shared HCODEC fields.
+	 */
+	ret = clk_set_parent(hw->gates[VDEC_MUX].clk, hw->vdec_p0);
+	if (ret)
+		return ret;
+	return clk_set_rate(hw->vdec_p0, 800000000);
+}
+
 static int t7_clock_preflight(struct aml_vdec_hw *hw)
 {
 	u32 sys, apb, p0, p1, selected;
@@ -687,7 +705,7 @@ static int t7_clock_preflight(struct aml_vdec_hw *hw)
 	 * Live T7 vendor H.264: SYS_DOS bit 1, VDEC p0=0x100, p1 low half=0.
 	 * CCF's cached rate alone cannot prove the gate survived secure power-on.
 	 * Read CLKCTRL (not DOS) after the transition, before any internal access.
-	 * Both documented mux paths are valid; preserve all shared HCODEC bits.
+	 * A matching rate on p1 is not the observed vendor configuration.
 	 */
 	ret = regmap_read(hw->clkctrl, 0x44, &sys);
 	if (ret)
@@ -705,7 +723,8 @@ static int t7_clock_preflight(struct aml_vdec_hw *hw)
 	dev_info(hw->dev, "CLKCTRL: SYS=%#x APB=%#x VDEC0=%#x VDEC1=%#x path=%u\n",
 		 sys, apb, p0, p1, !!(p1 & BIT(15)));
 	/* 800 MHz recipe: fclk_div2p5, divide by one, gate enabled. */
-	if (!(sys & BIT(1)) || (apb & (BIT(19) | BIT(20))) != (BIT(19) | BIT(20)) ||
+	if (p1 & BIT(15) || !(sys & BIT(1)) ||
+	    (apb & (BIT(19) | BIT(20))) != (BIT(19) | BIT(20)) ||
 	    (selected & 0xf7f) != BIT(8)) {
 		dev_err(hw->dev, "refusing DOS MMIO: physical clock configuration mismatch\n");
 		return -EHOSTDOWN;
@@ -722,7 +741,7 @@ static int t7_power_on(struct aml_vdec_hw *hw)
 		return -EIO;
 	/* vdec_power_ctrl.c enables the functional clock before secure PM. */
 	/* T7 vdec_max_clk_get(), used unconditionally by vendor clkg12.c. */
-	ret = clk_set_rate(hw->gates[VDEC_MUX].clk, 800000000);
+	ret = t7_set_clock(hw);
 	if (ret)
 		return ret;
 	ret = t7_clocks_on(hw);
@@ -815,7 +834,7 @@ static int t7_probe_domain_on(struct aml_vdec_hw *hw)
 	int ret;
 
 	/* Vendor vdec_set_clk(): DOS EN0, frequency selection, then domain on. */
-	ret = clk_set_rate(hw->gates[VDEC_MUX].clk, 800000000);
+	ret = t7_set_clock(hw);
 	if (ret)
 		return ret;
 	ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_1].dev);

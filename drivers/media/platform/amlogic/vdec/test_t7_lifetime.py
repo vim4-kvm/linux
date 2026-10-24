@@ -126,6 +126,36 @@ int main(void)
 }
 """)
 
+    def test_vendor_path_selection_propagates_errors_before_rate_programming(self):
+        run_c(COMMON + """
+#define VDEC_MUX 1
+struct clk_bulk_data { void *clk; };
+struct aml_vdec_hw { struct clk_bulk_data gates[2]; void *vdec_p0; };
+static int parent_error, rate_error, parent_calls, rate_calls;
+static int clk_set_parent(void *clk, void *parent)
+{
+    assert(clk == (void *)1 && parent == (void *)2);
+    parent_calls++; return parent_error;
+}
+static int clk_set_rate(void *clk, int rate)
+{
+    assert(parent_calls && !parent_error && clk == (void *)2 && rate == 800000000);
+    rate_calls++; return rate_error;
+}
+""" + function(HERE / "aml_vdec_hw.c", "t7_set_clock") + """
+int main(void)
+{
+    struct aml_vdec_hw hw = {.gates[1].clk = (void *)1, .vdec_p0 = (void *)2};
+    parent_error = -EIO;
+    assert(t7_set_clock(&hw) == -EIO && parent_calls == 1 && !rate_calls);
+    parent_error = 0; rate_error = -ERANGE;
+    assert(t7_set_clock(&hw) == -ERANGE && parent_calls == 2 && rate_calls == 1);
+    rate_error = 0;
+    assert(!t7_set_clock(&hw) && parent_calls == 3 && rate_calls == 2);
+    return 0;
+}
+""")
+
     def test_physical_clock_guard_rejects_closed_gates_and_wrong_recipe(self):
         run_c(COMMON + """
 #define dev_info(...) ((void)0)
@@ -166,6 +196,8 @@ int main(void)
     values[2] = 0x7fff0100; values[3] |= BIT(15); reads = 0;
     assert(t7_clock_preflight(&hw) == -EHOSTDOWN);
     values[2] = 0; values[3] |= BIT(8); reads = 0;
+    assert(t7_clock_preflight(&hw) == -EHOSTDOWN);
+    values[2] = 0x7fff0100; values[3] = 0x80000000; reads = 0;
     assert(!t7_clock_preflight(&hw));
     for (fail_at = 1; fail_at <= 4; fail_at++) {
         reads = 0;
@@ -177,7 +209,7 @@ int main(void)
 
     def test_parent_is_owned_before_top_access_and_child_power_and_released_last(self):
         functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
-            "t7_clocks_on", "t7_clocks_off", "t7_power_off",
+            "t7_clocks_on", "t7_clocks_off", "t7_power_off", "t7_set_clock",
             "t7_probe_begin", "t7_probe_domain_on"))
         run_c(COMMON + """
 typedef int32_t s32;
@@ -191,7 +223,7 @@ struct clk_bulk_data { void *clk; };
 struct pd { void *dev; };
 struct pm { struct pd pd_data[1]; };
 struct aml_vdec_hw {
-    void *dev, *nic3_dev;
+    void *dev, *nic3_dev, *vdec_p0;
     struct pm *pm;
     struct clk_bulk_data gates[2];
     struct clk_bulk_data apb_gates[2];
@@ -217,6 +249,8 @@ static void clk_bulk_disable_unprepare(int n, void *gates)
     } else { assert(clocks == 1); clocks--; }
 }
 static int clk_set_rate(void *clk, int rate)
+{ assert(en0_programmed && clocks && parent_refs && !child_refs); return 0; }
+static int clk_set_parent(void *clk, void *parent)
 { assert(en0_programmed && clocks && parent_refs && !child_refs); return 0; }
 static int pm_runtime_resume_and_get(void *dev)
 {
@@ -422,7 +456,7 @@ int main(void)
     def test_power_test_never_touches_dos_before_secure_domains_report_on(self):
         functions = "\n".join(function(HERE / "aml_vdec_hw.c", name) for name in (
             "t7_domain_state", "aml_vdec_t7_power_state", "t7_power_fault",
-            "t7_power_off", "t7_power_on", "aml_vdec_t7_power_test"))
+            "t7_power_off", "t7_set_clock", "t7_power_on", "aml_vdec_t7_power_test"))
         run_c(COMMON + """
 #include "reg_defines.h"
 typedef int32_t s32;
@@ -447,7 +481,7 @@ struct aml_vdec_hw {
     bool has_dbus_ctrl, powered, faulted, power_test_passed, mdec_test_passed;
     bool nic3_held, clocks_held, probe_failed;
     u32 power_test_reset;
-    void *dev, *map[1], *nic3_dev;
+    void *dev, *map[1], *nic3_dev, *vdec_p0;
     struct clk_bulk_data gates[2];
     struct pm *pm;
 };
@@ -461,6 +495,7 @@ static void arm_smccc_smc(unsigned int cmd, unsigned int id, int a, int b,
     res->a0 = id == 4 ? vdec_state : nic3_state;
 }
 static int clk_set_rate(void *clk, int rate) { assert(rate == 800000000); return 0; }
+static int clk_set_parent(void *clk, void *parent) { assert(!phase); return 0; }
 static int clk_bulk_prepare_enable(int n, void *gates)
 { assert(phase == 0); phase = 1; clocks++; return 0; }
 static void clk_bulk_disable_unprepare(int n, void *gates)

@@ -130,6 +130,7 @@ struct pm_pd_s {
  * @clkctrl: Clock provider's regmap, used only to verify physical gate state.
  * @apb_gates: CPU APB bridge gates retained during experimental T7 power-on.
  * @apb_held: APB references remain held until secure power-off completes.
+ * @vdec_p0: Functional clock path selected by the live T7 vendor decoder.
  */
 struct aml_vdec_hw {
 	struct platform_device *pdev;
@@ -161,6 +162,7 @@ struct aml_vdec_hw {
 	struct regmap *clkctrl;
 	struct clk_bulk_data apb_gates[2];
 	bool apb_held;
+	struct clk *vdec_p0;
 };
 
 /**
