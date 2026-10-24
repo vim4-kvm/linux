@@ -948,18 +948,23 @@ static int meson_t7_handoff_boot_check(struct meson_t7_handoff *display)
 	u32 unpack = readl(display->osd + OSD_REG(VIU_OSD1_MALI_UNPACK_CTRL));
 	u32 htotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_PXCNT));
 	u32 vtotal = readl(display->venc + VENC_REG(ENCP_VIDEO_MAX_LNCNT));
+	bool fallback = display->native_modeset && display->managed_sram &&
+			htotal == 1649 && vtotal == 749;
 
 	/* Linear OSD ownership does not include the Mali decoder or its DMA. */
 	if (format & BIT(30) || unpack & BIT(31))
 		return -EBUSY;
-	/* RGB888 little endian, linear, 1920x1080 with the matching boot frame. */
+	/* Full native SRAM ownership can rebuild U-Boot's no-EDID 720p timing.
+	 * The fetch layout and reserved boot frame must still match exactly;
+	 * firmware-timed handoff must remain 1080p.
+	 */
 	if ((ctrl & 5) != 5 || (format & 0xffff) != 0x8700 ||
 	    readl(display->osd + OSD_REG(VIU_OSD1_BLK1_CFG_W4)) != HANDOFF_BOOT_ADDR >> 4 ||
 	    readl(display->osd + OSD_REG(VIU_OSD1_BLK2_CFG_W4)) != HANDOFF_PITCH >> 4 ||
 	    readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W1)) != (HANDOFF_WIDTH - 1) << 16 ||
 	    readl(display->osd + OSD_REG(VIU_OSD1_BLK0_CFG_W2)) != (HANDOFF_HEIGHT - 1) << 16 ||
 	    readl(display->venc + VENC_REG(ENCP_VIDEO_EN)) != 1 ||
-	    htotal != 2199 || vtotal != 1124)
+	    (!fallback && (htotal != 2199 || vtotal != 1124)))
 		return -ENODEV;
 	display->boot_format = format;
 	display->boot_stride = readl(display->osd + OSD_REG(VIU_OSD1_BLK2_CFG_W4));
