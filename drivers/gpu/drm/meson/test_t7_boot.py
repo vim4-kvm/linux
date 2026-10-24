@@ -96,6 +96,15 @@ int main(void)
     assert(meson_t7_handoff_boot_check(&display)==-ENODEV);
     display.native_modeset=true;
     assert(!meson_t7_handoff_boot_check(&display));
+    /* Actual no-EDID firmware uses the first of the two reserved frames. */
+    osd[VIU_OSD1_BLK1_CFG_W4-VIU_OSD1_CTRL_STAT]=HANDOFF_BOOT_FALLBACK_ADDR>>4;
+    assert(!meson_t7_handoff_boot_check(&display));
+    venc[ENCP_VIDEO_MAX_PXCNT-VENC_INTCTRL]=2199;
+    venc[ENCP_VIDEO_MAX_LNCNT-VENC_INTCTRL]=1124;
+    assert(meson_t7_handoff_boot_check(&display)==-ENODEV);
+    venc[ENCP_VIDEO_MAX_PXCNT-VENC_INTCTRL]=1649;
+    venc[ENCP_VIDEO_MAX_LNCNT-VENC_INTCTRL]=749;
+    memcpy(saved,osd,sizeof(osd));
     /* The exception must not bypass any of the nine fetch/timing guards. */
     for (unsigned int i=0;i<sizeof(fetch)/sizeof(fetch[0]);i++) {
         osd[fetch[i]-VIU_OSD1_CTRL_STAT]^=1;
