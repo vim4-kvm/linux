@@ -7,7 +7,8 @@ import tempfile
 
 root = Path(__file__).resolve().parent
 source = (root / 'meson-secure-pwrc.c').read_text()
-functions = source[source.index('static int meson_secure_pwrc_wait('):source.index('#define SEC_PD(')]
+functions = source[source.index('static int meson_secure_pwrc_wait('):
+                   source.index('static bool meson_secure_mempd_initially_off(')]
 prefix = r'''
 #include <assert.h>
 #include <errno.h>
@@ -47,6 +48,7 @@ static int meson_sm_call(void *fw, unsigned cmd, s32 *value, unsigned index,
     (void)fw; (void)a; (void)b; (void)c; assert(index==5);
     if (cmd==SM_A1_PWRC_SET) {
         sets++; target=!state;
+        if (value) *value=mode==6 ? -EACCES : mode==7 ? 1 : 0;
         return mode==1 ? -EINVAL : 0;
     }
     assert(cmd==SM_A1_PWRC_GET); gets++;
@@ -75,6 +77,16 @@ int main(void)
     }
     domain.verify_state=false; mode=4; sets=gets=0;
     assert(!meson_secure_pwrc_off(&domain.base) && sets==1 && !gets);
+    /* SRAM SET must check the firmware payload and must never issue GET. */
+    for (unsigned off=0; off<2; off++) {
+        for (mode=0; mode<8; mode++) {
+            sets=gets=0;
+            int ret=off ? meson_secure_mempd_off(&domain.base) :
+                          meson_secure_mempd_on(&domain.base);
+            assert(ret==(mode==1 ? -EINVAL : mode==6 ? -EACCES : mode==7 ? -EIO : 0));
+            assert(sets==1 && !gets && target==off);
+        }
+    }
     puts("Secure PWRC: 12 transition/failure cases and unmodified-domain behavior passed");
 }
 '''
