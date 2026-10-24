@@ -180,6 +180,17 @@ int main(void)
     running.adjusted_mode=(struct drm_display_mode){1920,1080,74250,2200,1125};
     assert(!video_plane_check(&video.planes[0],&commit));
     struct drm_framebuffer *frames[2]={};
+    /* An OSD-only commit has no state for either unattached video plane. */
+    commit.states[0]=commit.states[1]=NULL;
+    frames[0]=frames[1]=&fb;
+    assert(!meson_t7_video_collect(&video,&commit,false,frames));
+    assert(!frames[0] && !frames[1] && !meson_t7_video_in_use(&video,&commit));
+    commit.states[0]=&states[0];
+    assert(!meson_t7_video_collect(&video,&commit,false,frames));
+    assert(frames[0]==&fb && !frames[1]);
+    assert(!meson_t7_video_collect(&video,&commit,true,frames));
+    assert(!frames[0] && !frames[1]);
+    commit.states[1]=&states[1];
     assert(!meson_t7_video_collect(&video,&commit,false,frames));
     assert(frames[0]==&fb && frames[1]==&fb && meson_t7_video_in_use(&video,&commit));
     memset(tx,0xa5,sizeof(tx));

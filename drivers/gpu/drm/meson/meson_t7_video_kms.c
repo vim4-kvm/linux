@@ -268,9 +268,8 @@ int meson_t7_video_collect(struct meson_t7_video_kms *video, struct drm_atomic_c
 		struct drm_plane *plane = &video->planes[i];
 		struct drm_plane_state *state = drm_atomic_get_new_plane_state(commit, plane);
 
-		if (!state)
-			return -EINVAL;
-		frames[i] = !blank && state->visible && state->fb ? state->fb : NULL;
+		/* Affected-plane expansion omits disabled, unattached planes. */
+		frames[i] = state && !blank && state->visible ? state->fb : NULL;
 	}
 	return 0;
 }
