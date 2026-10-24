@@ -1113,11 +1113,11 @@ static int t7_hdmirx_tmds_status(struct t7_hdmirx *rx)
 		if (!sqo || ((cable_status & T7_RX_METER_VALID) &&
 			     (tmds_status & T7_RX_METER_VALID)))
 			break;
-		/* VALID can clear between completed measurements. Wait at most two
-		 * measurement windows, not an entire frame, and never admit retained
-		 * counts without VALID. Physical loss still fails at every attempt.
+		/* Observed VALID gaps span three windows with stable recovered clocks.
+		 * Allow one more window for sample phase, never an entire frame or
+		 * retained counts without VALID. Check physical loss on every attempt.
 		 */
-		if (attempt == 2)
+		if (attempt == 4)
 			return -EAGAIN;
 		usleep_range(wait_us, wait_us + 50);
 	}

@@ -247,18 +247,16 @@ int main(void)
      */
     const char *reason;
     lease.ready=true;
+    for (unsigned int window=1;window<=4;window++) {
+        writel(16384,top+T7_RX_TOP_METER_HDMI_STAT);
+        meter_waits=0;meter_ready_at=window;
+        assert(!t7_hdmirx_check_capture(&dev,&reason));
+        assert(meter_waits==window);
+    }
     writel(16384,top+T7_RX_TOP_METER_HDMI_STAT);
-    meter_waits=0;meter_ready_at=1;
-    assert(!t7_hdmirx_check_capture(&dev,&reason));
-    assert(meter_waits==1);
-    writel(16384,top+T7_RX_TOP_METER_HDMI_STAT);
-    meter_waits=0;meter_ready_at=2;
-    assert(!t7_hdmirx_check_capture(&dev,&reason));
-    assert(meter_waits==2);
-    writel(16384,top+T7_RX_TOP_METER_HDMI_STAT);
-    meter_waits=0;meter_ready_at=3;
+    meter_waits=0;meter_ready_at=5;
     assert(t7_hdmirx_check_capture(&dev,&reason)==-EAGAIN);
-    assert(meter_waits==2);
+    assert(meter_waits==4);
     assert(!strcmp(reason,"tmds-measurement"));
     meter_waits=0;meter_ready_at=1;meter_loss_at=1;
     assert(t7_hdmirx_check_capture(&dev,&reason)==-ENOLINK);
