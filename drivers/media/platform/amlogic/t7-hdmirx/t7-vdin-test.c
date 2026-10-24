@@ -738,8 +738,11 @@ static int t7_vdin_thread(void *data)
 							   (!READ_ONCE(vdin->ring_running) && t7_vdin_has_buffer(vdin))) :
 							  (t7_vdin_has_buffer(vdin) && t7_vdin_ring_ready(vdin))),
 							 msecs_to_jiffies(1000));
-		if (kthread_should_stop())
+		if (kthread_should_stop()) {
+			/* The previous frame's retry is not a STREAMOFF failure. */
+			ret = READ_ONCE(vdin->ring_error);
 			break;
+		}
 		if (ready < 0) {
 			ret = ready;
 			break;

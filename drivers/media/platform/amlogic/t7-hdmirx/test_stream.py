@@ -337,6 +337,14 @@ static void check_direct(void) {
         assert(!receiver.faulted && !pins);
         teardown(b); assert(!live_leases);
     }
+    /* STREAMOFF after a retryable frame is not an asynchronous queue failure. */
+    setup_direct(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+    step(1,false); __atomic_store_n(&transient_after,1,__ATOMIC_RELEASE);
+    step(2,false); await(&completed,1);
+    assert(!pthread_create(&stop,NULL,stop_stream,NULL)); await(&stop_waiting,1);
+    step(3,false); pthread_join(stop,NULL);
+    assert(receiver.invalid_frames==1 && !receiver.stream_stops && !receiver.queue.error);
+    teardown(b); assert(!live_leases);
     /* Held/exported buffers are never selected again until explicitly queued. */
     setup_direct(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
     step(1,false); step(2,false); await(&completed,1);
