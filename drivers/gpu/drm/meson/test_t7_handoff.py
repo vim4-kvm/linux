@@ -309,6 +309,7 @@ struct meson_t7_video_kms {
     struct drm_framebuffer *frames[2];
     struct dma_fence *readers[2];
     bool fail_enable;
+    bool address_only;
     unsigned int configured, enabled;
 };
 #define MESON_T7_VIDEO_KMS_PAIRS 320
@@ -329,7 +330,12 @@ static int meson_t7_video_collect_readers(struct meson_t7_video_kms *video,
 }
 static int meson_t7_video_flip(struct meson_t7_video_kms *video,
     struct drm_atomic_commit *commit, bool blank, u32 *table, unsigned int pairs)
-{ return 0; }
+{
+    if(!video || !video->address_only || blank) return 0;
+    assert(pairs>=3);
+    for(unsigned int i=0;i<3;i++) {table[2*i]=0x4820+i;table[2*i+1]=1;}
+    return 24;
+}
 static int meson_t7_video_build(struct meson_t7_video_kms *video,
     struct drm_atomic_commit *commit, bool blank, bool enable, const void *osd,
     u32 *table, unsigned int pairs)
@@ -691,6 +697,48 @@ int main(void)
     assert(va.references==3 && vb.references==3);
     assert(!fve.signaled && !fvf.signaled && fve.refs==3 && fvf.refs==3);
     puts("Video retirement: two-phase latch/drain, two video references, RMFB and enable failure pinning passed");
+
+    /* VD1-only updates must progress once per vsync, retaining the full guard. */
+    struct meson_t7_handoff fast={.osd=osd,.rdma=rdma,.rdma_table=table,.paths=paths,
+        .native_modeset=true,.managed_sram=true,.linear_formats=true};
+    fast.crtc.dev=&fast.drm;
+    struct drm_framebuffer pictures[120]={0};
+    struct dma_fence picture_readers[120]={0};
+    struct meson_t7_video_kms fast_video={0};fast.video=&fast_video;
+    for(unsigned int i=0;i<3;i++) {
+        multi_commit.planes[i]=i?&fast.extra_planes[i-1]:&fast.plane;
+        multi_commit.planes[i]->dev=&fast.drm;
+        states[i].fb=NULL;states[i].visible=false;
+    }
+    fail_drain=false;inject_timeout=false;
+    for(unsigned int frame=0;frame<120;frame++) {
+        pictures[frame].references=1;picture_readers[frame].refs=1;
+        fast_video.frames[0]=&pictures[frame];
+        fast_video.readers[0]=&picture_readers[frame];
+        frame_start=vblanks;
+        meson_t7_handoff_scanout_layers(&fast,&multi_commit,false);
+        assert(!fast.faulted && vblanks-frame_start==(frame?1U:4U));
+        assert(!picture_readers[frame].signaled && pictures[frame].references==2);
+        if(frame) {
+            assert(!picture_readers[frame-1].signaled);
+            assert(pictures[frame-1].references==2);
+        }
+        if(frame>1) {
+            assert(picture_readers[frame-2].signaled);
+            assert(pictures[frame-2].references==1);
+        }
+        fast_video.address_only=true;
+    }
+    meson_t7_handoff_irq(0,&fast);
+    assert(picture_readers[118].signaled && !picture_readers[119].signaled);
+    assert(pictures[118].references==2); /* IRQ never releases a framebuffer. */
+    fast_video.frames[0]=NULL;fast_video.readers[0]=NULL;
+    meson_t7_handoff_scanout_layers(&fast,&multi_commit,true);
+    for(unsigned int frame=0;frame<120;frame++) {
+        assert(picture_readers[frame].signaled && picture_readers[frame].refs==1);
+        assert(pictures[frame].references==1);
+    }
+    puts("VD1 address updates: 120 generations, one latch per vsync and unchanged full-scan retirement passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

@@ -232,6 +232,12 @@ int main(void)
     old[1].dst.x2--;
     assert(!meson_t7_video_flip(&video,&commit,false,tx,6));
     old[1].dst.x2++;
+    commit.planes[1]=NULL; /* The disabled, unattached peer is omitted. */
+    bytes=meson_t7_video_flip(&video,&commit,false,tx,6);
+    assert(bytes==24);
+    for(int i=0;i<bytes/4;i+=2)
+        assert(tx[i]>=0x4820 && tx[i]<=0x4822);
+    commit.planes[1]=&video.planes[1];
     assert(!meson_t7_video_flip(&video,&commit,true,tx,6));
     assert(meson_t7_video_flip(&video,&commit,false,tx,5)==-ENOSPC);
     states[1].normalized_zpos=4;

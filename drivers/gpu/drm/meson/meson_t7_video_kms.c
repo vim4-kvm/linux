@@ -384,6 +384,9 @@ int meson_t7_video_flip(struct meson_t7_video_kms *video, struct drm_atomic_comm
 		struct meson_t7_video_frame frame;
 		struct drm_crtc_state *crtc;
 
+		/* An unattached, disabled peer need not be part of this atomic state. */
+		if (!old && !state)
+			continue;
 		if (!old || !state)
 			return 0;
 		enabled[i] = state->visible && state->fb;

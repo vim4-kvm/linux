@@ -244,7 +244,8 @@ static void meson_t7_handoff_finish(struct meson_t7_handoff *display, u32 sequen
 {
 	unsigned long flags;
 	u32 start;
-	bool ready;
+	unsigned int i;
+	bool ready, defer = slow;
 
 	if (!wait_event_timeout(display->wait,
 				READ_ONCE(display->applied) == sequence,
@@ -261,7 +262,11 @@ static void meson_t7_handoff_finish(struct meson_t7_handoff *display, u32 sequen
 		drm_err(&display->drm, "Scanout retirement boundary missing; DMA buffers pinned\n");
 		return;
 	}
-	meson_t7_scanout_advance(&display->buffers, true, slow);
+	/* Pipeline address-only video commits without shortening FB ownership. */
+	for (i = MESON_T7_OSD_LAYERS; i < MESON_T7_MAX_LAYERS; i++)
+		if (display->buffers.active[i] || display->buffers.pending[i])
+			defer = true;
+	meson_t7_scanout_advance(&display->buffers, true, defer);
 	/* Preserve the original post-reference-update drain reference point. */
 	spin_lock_irqsave(&display->lock, flags);
 	start = display->vsync_count;
@@ -401,7 +406,7 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 	u32 sequence;
 	int bytes;
 	int video_bytes;
-	bool slow, video_update, video_reconfigure = false;
+	bool slow, video_update, video_reconfigure = false, osd_empty = true;
 
 	if (READ_ONCE(display->faulted))
 		return;
@@ -413,6 +418,8 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 			meson_t7_handoff_layer_state(state, &layers[i]);
 			next[i] = state->fb;
 		}
+		if (layers[i].enabled || display->layers[i].enabled)
+			osd_empty = false;
 	}
 	if (meson_t7_video_collect(display->video, commit, blank, next + MESON_T7_OSD_LAYERS))
 		return;
@@ -422,7 +429,7 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 	bytes = display->layers_valid ?
 		meson_t7_osd_layers_flip(display->rdma_table, MESON_T7_RDMA_PAIRS,
 					 layers, display->layers) : 0;
-	slow = !bytes;
+	slow = !bytes && !(display->layers_valid && osd_empty && video_update);
 	if (slow)
 		bytes = meson_t7_osd_layers_build(display->rdma_table, MESON_T7_RDMA_PAIRS,
 						  layers, mode->hdisplay, mode->vdisplay,
@@ -438,8 +445,8 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 							   layers,
 							   video_table,
 							   MESON_T7_VIDEO_KMS_PAIRS);
-		/* Video address writes also retain the previous frame for one full scan. */
-		slow = true;
+		/* Only an isolated video's three address words use the pipelined path. */
+		slow |= video_reconfigure || !osd_empty || video_bytes != 3 * 2 * sizeof(u32);
 		bytes = video_bytes < 0 ? video_bytes : bytes + video_bytes;
 	}
 	if (bytes < 0) {
