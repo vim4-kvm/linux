@@ -761,9 +761,10 @@ static int meson_t7_handoff_dumb_create(struct drm_file *file, struct drm_device
 
 	if (((!display->native_modeset &&
 	      (args->width != HANDOFF_WIDTH || args->height != HANDOFF_HEIGHT))) ||
-	    !args->width || args->width > 3840 || !args->height || args->height > 2160 ||
+	    !args->width || args->width > 3840 || !args->height || args->height > 4096 ||
 	    (args->bpp != 24 && (!display->linear_formats || args->bpp != 32)))
 		return -EINVAL;
+	/* Render-only allocations include padding beyond the visible FB height. */
 	args->pitch = ALIGN(args->width * (args->bpp / 8), 32);
 	args->size = PAGE_ALIGN(args->pitch * args->height);
 	return drm_gem_dma_dumb_create_internal(file, drm, args);
