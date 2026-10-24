@@ -6,6 +6,7 @@ No hardware, kernel module loading, duplicated stop implementation or sleeps.
 The backends inject every MMIO failure, stuck status and ownership transition.
 """
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -15,8 +16,12 @@ HERE = Path(__file__).resolve().parent
 
 def function(path, name):
     source = path.read_text()
-    # Function signatures used here fit on one line.
-    start = source.rfind("\n", 0, source.index(name + "(")) + 1
+    # Skip forward declarations and calls; compile the actual definition.
+    match = re.search(r"^[\w *]+\b" + re.escape(name) + r"\([^;{}]*\)\n\{",
+                      source, re.MULTILINE)
+    if match is None:
+        raise ValueError(f"Missing definition: {name}")
+    start = match.start()
     opening = source.index("{", start)
     depth = 1
     end = opening + 1
@@ -49,6 +54,96 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_job_pins_unwind_and_quarantine_without_idle_mapped_flags(self):
+        functions = "\n".join(function(HERE / "aml_vdec.c", name) for name in (
+            "aml_vdec_pin_buffer", "vb2_ops_vdec_buf_cleanup",
+            "aml_vdec_put_buffer_pins", "aml_vdec_get_buffer_pins"))
+        run_c(COMMON + """
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define IS_ERR_OR_NULL(p) (!(p))
+#define SINGLE_DEPTH_NESTING 1
+#define O_RDWR 2
+struct dma_buf { unsigned int refs; };
+struct vb2_buffer;
+struct mem_ops { struct dma_buf *(*get_dmabuf)(struct vb2_buffer *, void *, int); };
+struct hw { bool faulted; };
+struct platform_data { bool has_dbus_ctrl; };
+struct dev { struct hw *dec_hw; struct platform_data *pvdec_data; };
+struct vb2_queue {
+    int mmap_lock;
+    unsigned int max_num_buffers;
+    struct vb2_buffer *buffers[2];
+    const struct mem_ops *mem_ops;
+    void *ctx;
+};
+struct m2m_ctx { struct vb2_queue queues[2]; };
+struct aml_vdec_ctx { struct dev *dev; struct m2m_ctx *m2m_ctx; bool buffers_held; };
+struct vb2_buffer {
+    struct vb2_queue *vb2_queue;
+    unsigned int num_planes;
+    struct { void *mem_priv; } planes[2];
+};
+struct vb2_v4l2_buffer { struct vb2_buffer vb2_buf; };
+struct aml_vdec_buffer { struct { struct vb2_v4l2_buffer vb; } m2m; struct dma_buf *pins[2]; };
+#define to_vb2_v4l2_buffer(vb) container_of(vb, struct vb2_v4l2_buffer, vb2_buf)
+#define vb2_get_drv_priv(q) ((q)->ctx)
+static unsigned int held, calls, fail_at;
+static struct vb2_queue *v4l2_m2m_get_src_vq(struct m2m_ctx *p) { return &p->queues[0]; }
+static struct vb2_queue *v4l2_m2m_get_dst_vq(struct m2m_ctx *p) { return &p->queues[1]; }
+static struct vb2_buffer *vb2_get_buffer(struct vb2_queue *q, unsigned int i) { return q->buffers[i]; }
+static void mutex_lock(int *lock) { assert(!held); *lock = ++held; }
+static void mutex_lock_nested(int *lock, int depth) { assert(held == 1 && depth == 1); *lock = ++held; }
+static void mutex_unlock(int *lock) { assert(*lock == (int)held); held--; *lock = 0; }
+static void dma_buf_put(struct dma_buf *buf) { assert(buf->refs > 1); buf->refs--; }
+static struct dma_buf *get_dmabuf(struct vb2_buffer *vb, void *priv, int flags)
+{
+    struct dma_buf *buf = priv;
+    assert(held == 2 && flags == O_RDWR);
+    if (++calls == fail_at) return NULL;
+    buf->refs++; return buf;
+}
+""" + functions + """
+int main(void)
+{
+    struct hw hw = {};
+    struct platform_data data = { true };
+    struct dev dev = { &hw, &data };
+    struct m2m_ctx m2m = {};
+    struct aml_vdec_ctx ctx = { &dev, &m2m };
+    struct mem_ops ops = { get_dmabuf };
+    struct dma_buf memory[4] = { {1}, {1}, {1}, {1} };
+    struct aml_vdec_buffer buffers[2] = {};
+    unsigned int q, p, n;
+    for (q = 0; q < 2; q++) {
+        struct vb2_queue *queue = &m2m.queues[q];
+        struct vb2_buffer *vb = &buffers[q].m2m.vb.vb2_buf;
+        queue->ctx = &ctx; queue->max_num_buffers = 2; queue->mem_ops = &ops;
+        queue->buffers[1] = vb; /* Include a sparse queue slot. */
+        vb->vb2_queue = queue; vb->num_planes = 2;
+        for (p = 0; p < 2; p++) vb->planes[p].mem_priv = &memory[q*2+p];
+    }
+    for (fail_at = 1; fail_at <= 4; fail_at++) {
+        calls = 0;
+        assert(aml_vdec_get_buffer_pins(&ctx) == -ENOMEM);
+        assert(!held && !ctx.buffers_held);
+        for (n = 0; n < 4; n++) assert(memory[n].refs == 1);
+    }
+    fail_at = calls = 0;
+    assert(!aml_vdec_get_buffer_pins(&ctx) && held == 2 && ctx.buffers_held);
+    for (n = 0; n < 4; n++) assert(memory[n].refs == 2);
+    aml_vdec_put_buffer_pins(&ctx);
+    assert(!held && !ctx.buffers_held);
+    for (n = 0; n < 4; n++) assert(memory[n].refs == 1); /* No false idle MAPPED. */
+    assert(!aml_vdec_get_buffer_pins(&ctx));
+    hw.faulted = true;
+    aml_vdec_put_buffer_pins(&ctx);
+    assert(!held && !ctx.buffers_held);
+    for (n = 0; n < 4; n++) assert(memory[n].refs == 2); /* Pinned until reset. */
+    return 0;
+}
+""")
+
     def test_m2m_job_binds_codec_only_until_dma_stop(self):
         worker = function(HERE / "aml_vdec.c", "m2mops_vdec_device_run")
         run_c(COMMON + """
@@ -72,14 +167,18 @@ struct aml_vdec_ctx {
     void *codec_priv, *m2m_ctx;
 };
 static struct vb2_v4l2_buffer buffer;
-static int jobs, stops, firmware_error;
-static bool stop_error;
+static int jobs, stops, firmware_error, pin_error;
+static bool stop_error, pins_held;
 static struct aml_vdec_ctx *owner;
 static struct vb2_v4l2_buffer *v4l2_m2m_next_src_buf(void *p) { return &buffer; }
 static struct vb2_v4l2_buffer *v4l2_m2m_next_dst_buf(void *p) { return &buffer; }
 static int v4l2_ctrl_request_setup(void *p, int *h) { return 0; }
 static void v4l2_ctrl_request_complete(void *p, int *h) {}
-static void dos_enable(struct hw *h) { assert(h->curr_ctx == owner->codec_priv); }
+static void dos_enable(struct hw *h) { assert(pins_held && h->curr_ctx == owner->codec_priv); }
+static int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx)
+{ assert(!pins_held); pins_held = !pin_error; return pin_error; }
+static void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx)
+{ assert(ctx->dev->dec_hw->faulted || !ctx->dos_clk_en); pins_held = false; }
 static int aml_vdec_reset_core(struct hw *h) { return 0; }
 static int load_firmware(struct hw *h, const char *path)
 { assert(h->curr_ctx == owner->codec_priv); return firmware_error; }
@@ -97,7 +196,8 @@ static void v4l2_m2m_buf_done_and_job_finish(int device, void *ctx, int result)
 {
     assert(ctx == owner->m2m_ctx);
     assert(owner->dev->dec_hw->faulted || !owner->dev->dec_hw->curr_ctx);
-    assert(result == ((firmware_error || stop_error) ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE));
+    assert(!pins_held);
+    assert(result == ((firmware_error || stop_error || pin_error) ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE));
     jobs++;
 }
 static int decode(struct aml_vdec_ctx *ctx)
@@ -118,9 +218,13 @@ int main(void)
     firmware_error = -EIO;
     owner = &b; m2mops_vdec_device_run(&b);
     assert(jobs == 4 && stops == 4 && !hw.curr_ctx);
+    firmware_error = 0; pin_error = -ENOMEM;
+    owner = &a; m2mops_vdec_device_run(&a);
+    assert(jobs == 5 && stops == 4 && !hw.curr_ctx);
+    pin_error = 0;
     firmware_error = 0; stop_error = true;
     owner = &a; m2mops_vdec_device_run(&a);
-    assert(jobs == 5 && stops == 5 && hw.faulted && hw.curr_ctx == a.codec_priv);
+    assert(jobs == 6 && stops == 5 && hw.faulted && hw.curr_ctx == a.codec_priv);
     return 0;
 }
 """)

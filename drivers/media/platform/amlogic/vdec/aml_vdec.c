@@ -22,6 +22,9 @@ struct aml_vdec_buffer {
 	struct dma_buf *pins[VB2_MAX_PLANES];
 };
 
+static int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx);
+static void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx);
+
 void aml_vdec_fault(struct aml_vdec_ctx *ctx)
 {
 	struct aml_vdec_hw *hw = ctx->dev->dec_hw;
@@ -175,6 +178,9 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 		if (ret)
 			goto complete_request;
 	}
+	ret = aml_vdec_get_buffer_pins(ctx);
+	if (ret)
+		goto complete_request;
 	/* m2m owns the hardware until stop has drained IRQ and DMA activity. */
 	WRITE_ONCE(dev->dec_hw->curr_ctx, ctx->codec_priv);
 	dos_enable(dev->dec_hw);
@@ -207,6 +213,7 @@ complete_request:
 	if (ret < 0 || dev->dec_hw->faulted)
 		goto err_cancel_job;
 
+	aml_vdec_put_buffer_pins(ctx);
 	WRITE_ONCE(dev->dec_hw->curr_ctx, NULL);
 	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx,
 					 VB2_BUF_STATE_DONE);
@@ -214,6 +221,7 @@ complete_request:
 
 err_cancel_job:
 	aml_vdec_stop_job(ctx);
+	aml_vdec_put_buffer_pins(ctx);
 	if (!dev->dec_hw->faulted)
 		WRITE_ONCE(dev->dec_hw->curr_ctx, NULL);
 	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx,
@@ -687,7 +695,7 @@ static int vb2ops_vdec_buf_prepare(struct vb2_buffer *vb)
 	return 0;
 }
 
-static int vb2_ops_vdec_buf_init(struct vb2_buffer *vb)
+static int aml_vdec_pin_buffer(struct vb2_buffer *vb)
 {
 	struct aml_vdec_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
 	struct aml_vdec_buffer *buf = container_of(to_vb2_v4l2_buffer(vb),
@@ -696,18 +704,12 @@ static int vb2_ops_vdec_buf_init(struct vb2_buffer *vb)
 
 	if (!ctx->dev->pvdec_data->has_dbus_ctrl)
 		return 0;
-	/*
-	 * T7 accepts MMAP only. Exported references pin the original dma-contig
-	 * allocations and DMA mappings even if close/REQBUFS frees vb2 objects.
-	 * Imported DMABUF or USERPTR would need independent mapping ownership.
-	 */
+	/* T7 accepts MMAP only: retain both allocation and original DMA mapping. */
 	for (i = 0; i < vb->num_planes; i++) {
 		buf->pins[i] = vb->vb2_queue->mem_ops->get_dmabuf(vb,
 						vb->planes[i].mem_priv, O_RDWR);
 		if (IS_ERR_OR_NULL(buf->pins[i])) {
 			buf->pins[i] = NULL;
-			while (i--)
-				dma_buf_put(buf->pins[i]);
 			return -ENOMEM;
 		}
 	}
@@ -725,9 +727,63 @@ static void vb2_ops_vdec_buf_cleanup(struct vb2_buffer *vb)
 	if (ctx->dev->dec_hw->faulted)
 		return;
 	for (i = 0; i < vb->num_planes; i++) {
-		if (buf->pins[i])
+		if (buf->pins[i]) {
 			dma_buf_put(buf->pins[i]);
+			buf->pins[i] = NULL;
+		}
 	}
+}
+
+static void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx)
+{
+	struct vb2_queue *queues[] = { v4l2_m2m_get_src_vq(ctx->m2m_ctx),
+				       v4l2_m2m_get_dst_vq(ctx->m2m_ctx) };
+	struct vb2_buffer *vb;
+	unsigned int q, i;
+
+	if (!ctx->buffers_held)
+		return;
+	for (q = 0; q < ARRAY_SIZE(queues); q++) {
+		for (i = 0; i < queues[q]->max_num_buffers; i++) {
+			vb = vb2_get_buffer(queues[q], i);
+			if (vb)
+				vb2_ops_vdec_buf_cleanup(vb);
+		}
+	}
+	ctx->buffers_held = false;
+	mutex_unlock(&queues[1]->mmap_lock);
+	mutex_unlock(&queues[0]->mmap_lock);
+}
+
+static int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx)
+{
+	struct vb2_queue *queues[] = { v4l2_m2m_get_src_vq(ctx->m2m_ctx),
+				       v4l2_m2m_get_dst_vq(ctx->m2m_ctx) };
+	struct vb2_buffer *vb;
+	unsigned int q, i;
+
+	if (!ctx->dev->pvdec_data->has_dbus_ctrl)
+		return 0;
+	/*
+	 * Pin before the first MMIO, not at allocation: an idle internal export
+	 * makes vb2 QUERYBUF incorrectly report MAPPED before userspace mmap.
+	 * Freeze both buffer arrays, including DPB references, until DMA stops.
+	 * STREAMOFF/close wait for m2m cancellation before taking mmap_lock;
+	 * CREATE_BUFS must not add an unpinned DMA target during this job.
+	 */
+	mutex_lock(&queues[0]->mmap_lock);
+	mutex_lock_nested(&queues[1]->mmap_lock, SINGLE_DEPTH_NESTING);
+	ctx->buffers_held = true;
+	for (q = 0; q < ARRAY_SIZE(queues); q++) {
+		for (i = 0; i < queues[q]->max_num_buffers; i++) {
+			vb = vb2_get_buffer(queues[q], i);
+			if (vb && aml_vdec_pin_buffer(vb)) {
+				aml_vdec_put_buffer_pins(ctx);
+				return -ENOMEM;
+			}
+		}
+	}
+	return 0;
 }
 
 static void vb2_ops_vdec_buf_queue(struct vb2_buffer *vb)
@@ -797,7 +853,6 @@ static const struct vb2_ops aml_vdec_vb2_ops = {
 	.start_streaming = vb2ops_vdec_start_streaming,
 	.stop_streaming = vb2ops_vdec_stop_streaming,
 
-	.buf_init = vb2_ops_vdec_buf_init,
 	.buf_cleanup = vb2_ops_vdec_buf_cleanup,
 	.buf_prepare = vb2ops_vdec_buf_prepare,
 	.buf_out_validate = vb2ops_vdec_out_buf_validate,
