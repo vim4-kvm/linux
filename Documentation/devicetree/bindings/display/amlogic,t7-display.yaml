@@ -50,6 +50,26 @@ properties:
       - description: OSD1 constant color control, ff006b7c/4
       - description: OSD2 constant color control, ff006b3c/4
       - description: OSD3 constant color control, ff00f680/4
+      - description: vd1-mif, ff012000/104
+      - description: vd2-mif, ff012200/104
+      - description: vd1-pps, ff007404/80
+      - description: vd1-pps-control, ff0074d0/1c
+      - description: vd2-pps, ff00e4cc/78
+      - description: video-misc, ff007498/4
+      - description: video-alpha, ff0075d8/4
+      - description: video-sources, ff0077ec/10
+      - description: vd3-source, ff0077bc/4
+      - description: video-hdr-size, ff00695c/8
+      - description: vd1-hdr, ff00e000/4
+      - description: vd2-hdr, ff00e140/4
+      - description: video-path, ff0069e8/4
+      - description: video-start, ff006a28/4
+      - description: video-size, ff007698/4
+      - description: video-matrix, ff00757c/4
+      - description: video-dsc, ff006a0c/8
+      - description: video-sr, ff007644/8
+      - description: vd3-fetch, ff012400/4
+      - description: vd3-afbc, ff012500/4
   reg-names:
     minItems: 12
     items:
@@ -75,6 +95,34 @@ properties:
       - const: dimm1
       - const: dimm2
       - const: dimm3
+      - const: vd1-mif
+      - const: vd2-mif
+      - const: vd1-pps
+      - const: vd1-pps-control
+      - const: vd2-pps
+      - const: video-misc
+      - const: video-alpha
+      - const: video-sources
+      - const: vd3-source
+      - const: video-hdr-size
+      - const: vd1-hdr
+      - const: vd2-hdr
+      - const: video-path
+      - const: video-start
+      - const: video-size
+      - const: video-matrix
+      - const: video-dsc
+      - const: video-sr
+      - const: vd3-fetch
+      - const: vd3-afbc
+  amlogic,video-planes:
+    type: boolean
+    description: |
+      Experimental progressive linear VD1/VD2 ownership with two-phase RDMA.
+      Requires managed OSD SRAM and five additional exclusive video SRAM domains.
+      All firmware VD fetches and AFBC decoders must be disabled. SR must be off;
+      firmware must route VD1/VD2 to VPP0 using VD_PATH_MISC_CTRL low byte 0x21
+      and PATH_START_SEL low byte zero. No global VPU arbitration is changed.
   amlogic,managed-osd-sram:
     type: boolean
     description: |
@@ -107,6 +155,11 @@ properties:
       - description: OSD2 scaler SRAM
       - description: OSD blend34 SRAM
       - description: RDMA SRAM
+      - description: VD1 SRAM
+      - description: VD2 SRAM
+      - description: VD1 scaler SRAM
+      - description: VD2 scaler SRAM
+      - description: VD2 output FIFO SRAM
   memory-region:
     maxItems: 1
     description: Reserved firmware logo frames
@@ -127,6 +180,27 @@ required:
 additionalProperties: false
 
 allOf:
+  - if:
+      required:
+        - amlogic,video-planes
+    then:
+      required:
+        - amlogic,managed-osd-sram
+      properties:
+        reg:
+          minItems: 42
+        reg-names:
+          minItems: 42
+        power-domains:
+          minItems: 15
+    else:
+      properties:
+        reg:
+          maxItems: 22
+        reg-names:
+          maxItems: 22
+        power-domains:
+          maxItems: 10
   - if:
       required:
         - amlogic,managed-osd-sram
