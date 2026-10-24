@@ -1030,7 +1030,7 @@ static irqreturn_t vdec_irq_handler(int irq, void *priv)
 	struct aml_vdec_hw *hw = dev->dec_hw;
 	irqreturn_t ret = IRQ_HANDLED;
 
-	if (hw->hw_ops.irq_handler)
+	if (READ_ONCE(hw->curr_ctx) && hw->hw_ops.irq_handler)
 		ret = hw->hw_ops.irq_handler(irq, priv);
 
 	return ret;
@@ -1042,7 +1042,7 @@ static irqreturn_t vdec_threaded_isr_handler(int irq, void *priv)
 	struct aml_vdec_hw *hw = dev->dec_hw;
 	irqreturn_t ret = IRQ_HANDLED;
 
-	if (hw->hw_ops.irq_threaded_func)
+	if (READ_ONCE(hw->curr_ctx) && hw->hw_ops.irq_threaded_func)
 		ret = hw->hw_ops.irq_threaded_func(irq, priv);
 
 	return ret;

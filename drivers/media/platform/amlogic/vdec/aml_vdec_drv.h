@@ -77,11 +77,10 @@ struct aml_video_fmt {
  * @m2m_dev_dec: Mem2mem device associated to this device.
  * @vfd: Video_device associated to this device.
  * @mdev: Media_device associated to this device.
- * @dec_ctx: Decoder context. See struct aml_vdec_ctx.
+ * @open_count: File contexts holding runtime PM references, under dev_mutex.
  * @dec_hw: Decoder hardware resources. See struct aml_vdec_hw.
  * @pvdec_data: Decoder platform data. See struct aml_dev_platform_data.
  * @dev_mutex: video_device lock.
- * @filp: v4l2 file handle pointer.
  */
 struct aml_vdec_dev {
 	struct platform_device *plat_dev;
@@ -90,12 +89,11 @@ struct aml_vdec_dev {
 	struct video_device *vfd;
 	struct media_device mdev;
 
-	struct aml_vdec_ctx *dec_ctx;
+	unsigned int open_count;
 	struct aml_vdec_hw *dec_hw;
 	const struct aml_dev_platform_data *pvdec_data;
 
 	struct mutex dev_mutex;
-	struct file *filp;
 };
 
 /**

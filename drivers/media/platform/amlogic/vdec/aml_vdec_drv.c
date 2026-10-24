@@ -64,7 +64,7 @@ static ssize_t power_test_store(struct device *dev, struct device_attribute *att
 	mutex_lock(&vdec->dev_mutex);
 	if (!READ_ONCE(allow_t7_power))
 		ret = -EPERM;
-	else if (vdec->dec_ctx || vdec->dec_hw->probe_step || !pm_runtime_suspended(dev))
+	else if (vdec->open_count || vdec->dec_hw->probe_step || !pm_runtime_suspended(dev))
 		ret = -EBUSY;
 	else
 		ret = aml_vdec_t7_power_test(vdec->dec_hw);
@@ -95,7 +95,7 @@ static ssize_t mdec_test_store(struct device *dev, struct device_attribute *attr
 	mutex_lock(&vdec->dev_mutex);
 	if (t7_snapshot_only || !READ_ONCE(allow_t7_power))
 		ret = -EPERM;
-	else if (vdec->dec_ctx || vdec->dec_hw->probe_step || !pm_runtime_suspended(dev))
+	else if (vdec->open_count || vdec->dec_hw->probe_step || !pm_runtime_suspended(dev))
 		ret = -EBUSY;
 	else
 		ret = aml_vdec_t7_mdec_test(vdec->dec_hw);
@@ -131,7 +131,7 @@ static ssize_t register_step_store(struct device *dev, struct device_attribute *
 	mutex_lock(&vdec->dev_mutex);
 	if ((t7_snapshot_only && step > 8) || (step && !READ_ONCE(allow_t7_power)))
 		ret = -EPERM;
-	else if (vdec->dec_ctx || !pm_runtime_suspended(dev))
+	else if (vdec->open_count || !pm_runtime_suspended(dev))
 		ret = -EBUSY;
 	else
 		ret = aml_vdec_t7_register_step(vdec->dec_hw, step);
@@ -176,8 +176,8 @@ static int fops_vcodec_open(struct file *file)
 		return -ENOMEM;
 
 	mutex_lock(&dec_dev->dev_mutex);
-	if (dec_dev->dec_ctx || dec_dev->dec_hw->faulted) {
-		ret = dec_dev->dec_hw->faulted ? -EIO : -EBUSY;
+	if (dec_dev->dec_hw->faulted) {
+		ret = -EIO;
 		goto err_open;
 	}
 	if (dec_dev->pvdec_data->has_dbus_ctrl) {
@@ -185,12 +185,10 @@ static int fops_vcodec_open(struct file *file)
 		if (ret < 0)
 			goto err_open;
 	}
-	dec_dev->dec_ctx = ctx;
 	ctx->dev = dec_dev;
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
 	file->private_data = &ctx->fh;
 	v4l2_fh_add(&ctx->fh, file);
-	dec_dev->filp = file;
 	mutex_init(&ctx->v4l2_intf_lock);
 	init_waitqueue_head(&ctx->queue);
 	ctx->int_cond = 0;
@@ -211,6 +209,7 @@ static int fops_vcodec_open(struct file *file)
 	}
 
 	aml_vdec_reset_fmts(ctx);
+	dec_dev->open_count++;
 	mutex_unlock(&dec_dev->dev_mutex);
 
 	return ret;
@@ -220,7 +219,6 @@ err_ctrls_setup:
 err_m2m_ctx_init:
 	v4l2_fh_del(&ctx->fh, file);
 	v4l2_fh_exit(&ctx->fh);
-	dec_dev->dec_ctx = NULL;
 	if (dec_dev->pvdec_data->has_dbus_ctrl)
 		pm_runtime_put_sync_suspend(&dec_dev->plat_dev->dev);
 err_open:
@@ -241,13 +239,13 @@ static int fops_vcodec_release(struct file *file)
 	v4l2_ctrl_handler_free(&ctx->ctrl_handler);
 	v4l2_fh_del(&ctx->fh, file);
 	v4l2_fh_exit(&ctx->fh);
+	dec_dev->open_count--;
 	if (!dec_dev->dec_hw->faulted) {
 		if (dec_dev->pvdec_data->has_dbus_ctrl &&
 		    pm_runtime_put_sync_suspend(&dec_dev->plat_dev->dev) < 0)
 			aml_vdec_fault(ctx);
 	}
 	if (!dec_dev->dec_hw->faulted) {
-		dec_dev->dec_ctx = NULL;
 		kfree(ctx);
 	}
 	mutex_unlock(&dec_dev->dev_mutex);

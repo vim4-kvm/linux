@@ -1738,8 +1738,8 @@ static irqreturn_t h264_threaded_isr_func(int irq, void *priv)
 {
 	u32 dec_status;
 	struct aml_vdec_dev *dev = (struct aml_vdec_dev *)priv;
-	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)dev->dec_hw->curr_ctx;
-	struct aml_vdec_ctx *ctx = (struct aml_vdec_ctx *)dev->dec_ctx;
+	struct aml_vdec_ctx *ctx = v4l2_m2m_get_curr_priv(dev->m2m_dev_dec);
+	struct aml_h264_ctx *h264_ctx = ctx->codec_priv;
 	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
 	unsigned short *p = (unsigned short *)h264_ctx->lmem_addr;
 	int i, ii;
@@ -2050,7 +2050,6 @@ int aml_h264_init(void *priv)
 	h264_ctx->workspace_vaddr = h264_ctx->cma_alloc_vaddr + DCAC_READ_MARGIN;
 
 	ctx->codec_priv = h264_ctx;
-	dec_hw->curr_ctx = h264_ctx;
 	h264_ctx->col_buf_alloc_size = 0;
 	h264_ctx->init_flag = 0;
 	h264_ctx->new_pic_flag = 0;
@@ -2116,7 +2115,6 @@ void aml_h264_exit(void *priv)
 				  h264_ctx->cma_alloc_addr);
 
 	kfree(ctx->codec_priv);
-	dec_hw->curr_ctx = NULL;
 	ctx->codec_priv = NULL;
 }
 
