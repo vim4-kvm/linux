@@ -23,6 +23,10 @@ properties:
   compatible:
     const: amlogic,t7-display
   reg:
+    minItems: 12
+    oneOf:
+      - maxItems: 12
+      - minItems: 14
     items:
       - description: OSD1, ff006840/80
       - description: ENC2 timing, ff008db8/608
@@ -36,7 +40,13 @@ properties:
       - description: VPP postblend size, ff007484/4
       - description: VPP output size, ff007694/4
       - description: HDMI mapping and sync polarity, ff009c6c/4
+      - description: HDMI chroma formatter, ff009d0c/4
+      - description: VPP0 OSD blend RGB to YUV matrix, ff00e440/38
   reg-names:
+    minItems: 12
+    oneOf:
+      - maxItems: 12
+      - minItems: 14
     items:
       - const: osd1
       - const: venc
@@ -50,6 +60,8 @@ properties:
       - const: post-size
       - const: out-size
       - const: hdmi-setting
+      - const: hdmi-format
+      - const: osd-matrix
   amlogic,clock-controller:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: T7 peripheral clock controller providing the shared MMIO regmap
