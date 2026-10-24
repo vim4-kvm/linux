@@ -37,6 +37,13 @@ the tests being investigated; arm64 execution requires a suitable QEMU::
 An omitted KUnit stage is recorded as null, never as a successful KUnit run.
 KUnit build products and its console log remain inside the result directory.
 
+The CPU power-down idle state and GPU passive cooling map are unverified on
+VIM4. Normal profiles leave the idle state disabled and omit the GPU map.
+Only the explicit ``amlogic-t7-a311d2-khadas-vim4-pm-test.dtb`` opts into both;
+building it does not select it for boot. Existing critical trips remain in
+all profiles. Offline fixtures do not qualify suspend, wakeup or thermal
+behavior on hardware.
+
 Patch export, strict checkpatch, DT schema checks and full Image/DTB/module
 builds are orchestrated by ``packaging/kernel-edge/maintain.py`` in the
 vim4-kvm integration repository. Those commands use an external build

@@ -212,12 +212,25 @@ int main(void)
     assert(canceled == before + 1 && delay == 0);
     write_error = 0; ctx.power = &power; regulator_error = -1;
     assert(khadas_mcu_fan_suspend(&dev) == -1 && delay == 0);
+    assert(ctx.level == 100 && requested == 100);
+    /* Thermal-controlled fans also need synchronous rollback on failure. */
+    ctx.quiet = false; ctx.level = 42;
+    int rollback_queued = queued;
+    assert(khadas_mcu_fan_suspend(&dev) == -1);
+    assert(requested == 42 && ctx.level == 42 && queued == rollback_queued);
+    ctx.quiet = true;
     regulator_error = 0;
+    ctx.level = 15; ctx.quiet_started = true;
+    temperatures[2] = 50000; temperatures[5] = 90000;
     assert(khadas_mcu_fan_suspend(&dev) == 0);
     int pending = queued;
     assert(khadas_mcu_fan_resume(&dev) == 0 && queued == pending + 1 && delay == 0);
     khadas_vim4_fan_work(&ctx.quiet_work.work);
-    assert(ctx.level == 100);
+    assert(ctx.level == 85);
+    /* Failed power restoration cannot start work against an unpowered fan. */
+    pending = queued; regulator_error = -1;
+    assert(khadas_mcu_fan_resume(&dev) == -1 && queued == pending);
+    regulator_error = 0;
     ctx.quiet = false; ctx.power = NULL; ctx.level = 42;
     assert(khadas_mcu_fan_suspend(&dev) == 0);
     assert(khadas_mcu_fan_resume(&dev) == 0 && requested == 42);
