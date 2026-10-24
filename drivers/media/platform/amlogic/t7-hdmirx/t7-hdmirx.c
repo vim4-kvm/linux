@@ -954,9 +954,23 @@ static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *co
 	return 0;
 }
 
-static void t7_hdmirx_read_measurement(struct t7_hdmirx *rx,
-				     struct t7_hdmirx_measurement *m)
+static bool t7_hdmirx_same_measurement(const struct t7_hdmirx_measurement *a,
+				       const struct t7_hdmirx_measurement *b)
 {
+	struct t7_hdmirx_measurement left = *a, right = *b;
+	u32 delta = a->ticks > b->ticks ? a->ticks - b->ticks : b->ticks - a->ticks;
+
+	left.ticks = 0;
+	right.ticks = 0;
+	/* Meter quantization is a few ticks; 60 versus 59.94 remains a change. */
+	return !memcmp(&left, &right, sizeof(left)) && delta <= a->ticks / 2000;
+}
+
+static int t7_hdmirx_read_measurement(struct t7_hdmirx *rx,
+				      struct t7_hdmirx_measurement *m)
+{
+	u32 upper, low, after;
+
 	*m = (struct t7_hdmirx_measurement) {
 		.width = t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH),
 		.height = t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT),
@@ -968,34 +982,27 @@ static void t7_hdmirx_read_measurement(struct t7_hdmirx *rx,
 		.vhigh = t7_hdmirx_core_read16(rx, T7_RX_COR_VSYNC_HIGH),
 		.vfront = t7_hdmirx_core_read16(rx, T7_RX_COR_VFRONT),
 		.vback = t7_hdmirx_core_read16(rx, T7_RX_COR_VBACK),
-		.ticks = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
-			 (readb(rx->cor + T7_RX_COR_FRAME_TICKS + 2) << 16),
 		.polarity = readb(rx->cor + T7_RX_COR_FRAME_STATUS),
 	};
+	/* Byte-addressed period counters can cross a carry during MMIO reads.
+	 * Prove a coherent 24-bit value separately from inter-frame quantization.
+	 */
+	upper = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS + 1);
+	low = readb(rx->cor + T7_RX_COR_FRAME_TICKS);
+	after = t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS + 1);
+	if (upper != after)
+		return -EAGAIN;
+	m->ticks = (upper << 8) | low;
+	return 0;
 }
 
-static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
-			     struct t7_hdmirx_measurement *m)
+static int t7_hdmirx_validate_measurement(struct t7_hdmirx *rx, bool yuv420,
+					  const struct t7_hdmirx_measurement *m)
 {
-	struct t7_hdmirx_measurement again;
 	u32 hsync, vsync, reference = clk_get_rate(rx->clocks[T7_RX_PCLK].clk);
 	u32 scale = yuv420 ? 2 : 1;
 	u64 pixelclock;
 
-	t7_hdmirx_read_measurement(rx, m);
-	t7_hdmirx_read_measurement(rx, &again);
-	if (memcmp(m, &again, sizeof(*m))) {
-		if (rx->link && READ_ONCE(rx->link->ready))
-			pr_info_ratelimited("t7-hdmirx unstable FDET: first=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x second=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
-					    m->width, m->height, m->ticks,
-					    m->hlow, m->hhigh, m->hfront, m->hback,
-					    m->vlow, m->vhigh, m->vfront, m->vback, m->polarity,
-					    again.width, again.height, again.ticks,
-					    again.hlow, again.hhigh, again.hfront, again.hback,
-					    again.vlow, again.vhigh, again.vfront, again.vback,
-					    again.polarity);
-		return -EAGAIN;
-	}
 	/* FDET polarity bits select the pulse, not the much longer idle level. */
 	hsync = m->polarity & BIT(0) ? m->hhigh : m->hlow;
 	vsync = m->polarity & BIT(1) ? m->vhigh : m->vlow;
@@ -1021,15 +1028,40 @@ static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
 	return 0;
 }
 
-static bool t7_hdmirx_same_measurement(const struct t7_hdmirx_measurement *a,
-				      const struct t7_hdmirx_measurement *b)
+static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
+			     struct t7_hdmirx_measurement *m)
 {
-	struct t7_hdmirx_measurement left = *a, right = *b;
-	u32 delta = a->ticks > b->ticks ? a->ticks - b->ticks : b->ticks - a->ticks;
+	struct t7_hdmirx_measurement again;
+	int ret;
 
-	left.ticks = right.ticks = 0;
-	/* Meter quantization is a few ticks; 60 versus 59.94 remains a change. */
-	return !memcmp(&left, &right, sizeof(left)) && delta <= a->ticks / 2000;
+	ret = t7_hdmirx_read_measurement(rx, m);
+	if (ret)
+		return ret;
+	ret = t7_hdmirx_read_measurement(rx, &again);
+	if (ret)
+		return ret;
+	/* Use the existing lease tolerance for independently coherent periods;
+	 * every geometry and polarity field must still match exactly.
+	 */
+	if (!t7_hdmirx_same_measurement(m, &again)) {
+		if (rx->link && READ_ONCE(rx->link->ready))
+			pr_info_ratelimited("t7-hdmirx unstable FDET: first=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x second=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
+					    m->width, m->height, m->ticks,
+					    m->hlow, m->hhigh, m->hfront, m->hback,
+					    m->vlow, m->vhigh, m->vfront, m->vback, m->polarity,
+					    again.width, again.height, again.ticks,
+					    again.hlow, again.hhigh, again.hfront, again.hback,
+					    again.vlow, again.vhigh, again.vfront, again.vback,
+					    again.polarity);
+		return -EAGAIN;
+	}
+	ret = t7_hdmirx_validate_measurement(rx, yuv420, m);
+	if (ret)
+		return ret;
+	ret = t7_hdmirx_validate_measurement(rx, yuv420, &again);
+	if (!ret)
+		*m = again;
+	return ret;
 }
 
 static int t7_hdmirx_measure_live(struct t7_hdmirx *rx, bool yuv420,

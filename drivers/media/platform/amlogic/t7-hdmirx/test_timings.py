@@ -53,6 +53,8 @@ static u8 core[0x8000], top[0x4000], phy[0x100];
 static unsigned int period_reads, change_read, changed_period;
 static unsigned int measurement_reads, corrupt_measurement;
 static bool lose_signal;
+static bool quantize_period, change_refresh, change_geometry, tear_period;
+static unsigned int quantized_reads;
 static void word(unsigned int reg, unsigned int value) {
     core[reg] = value; core[reg+1] = value >> 8;
 }
@@ -61,6 +63,22 @@ static void period(unsigned int value) {
     core[T7_RX_COR_FRAME_TICKS+2] = value >> 16;
 }
 static u8 readb(void *address) {
+    if (address == core + T7_RX_COR_WIDTH &&
+        (quantize_period || change_refresh || change_geometry)) {
+        bool alternate = ++quantized_reads & 1;
+        if (quantize_period) period(alternate ? 2777823 : 2777825);
+        if (change_refresh) period(alternate ? 2777778 : 2780556);
+        if (change_geometry) {
+            word(T7_RX_COR_HFRONT, alternate ? 88 : 89);
+            word(T7_RX_COR_HBACK, alternate ? 148 : 147);
+        }
+    }
+    if (address == core + T7_RX_COR_FRAME_TICKS && tear_period) {
+        u8 value = *(u8 *)address;
+        period(0x2a6300);
+        tear_period = false;
+        return value;
+    }
     if (address == core + T7_RX_COR_WIDTH && ++measurement_reads == corrupt_measurement)
         period(changed_period);
     if (address == core + T7_RX_COR_FRAME_TICKS && ++period_reads == change_read) {
@@ -214,6 +232,33 @@ int main(void) {
     parm.type=V4L2_BUF_TYPE_VIDEO_OUTPUT;
     assert(t7_vdin_get_parm(&file,NULL,&parm)==-EINVAL);
     setup(false,2777778); rx.dynamic_modes=true; rx.uhd60=false; link.ready=true;
+    /* Hardware pairs from Mac mini: identical geometry, two ticks apart.
+     * Quantization must not mark complete capture frames as ERROR.
+     */
+    measured_mode(&(struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60);
+    t7_hdmirx_read_measurement(&rx,&rx.lease_mode);
+    assert(!t7_hdmirx_read_color(&rx,&rx.lease_color));
+    link.users=1; quantize_period=true;
+    for (unsigned int sample=0;sample<1000;sample++) {
+        const char *reason;
+        assert(!t7_hdmirx_check_capture(&dev,&reason));
+    }
+    quantize_period=false; link.users=0;
+    /* Neither changed porches nor 60 -> 59.94 is measurement noise. */
+    for (unsigned int geometry=0;geometry<2;geometry++) {
+        measured_mode(&(struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60);
+        change_geometry=geometry; change_refresh=!geometry; timing=untouched;
+        assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-EAGAIN);
+        assert(!memcmp(&timing,&untouched,sizeof(timing)));
+        change_geometry=change_refresh=false;
+    }
+    /* A torn byte at rollover is only 256 ticks away, inside the existing
+     * lease tolerance. Coherent register reads must reject it separately.
+     */
+    measured_mode(&(struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60);
+    period(0x2a62ff); tear_period=true; timing=untouched;
+    assert(t7_hdmirx_query_timings(&dev,&timing,&interval)==-EAGAIN);
+    assert(!memcmp(&timing,&untouched,sizeof(timing)));
     for (unsigned int i=0;i<ARRAY_SIZE(modes);i++) {
         measured_mode(&modes[i]);
         assert(!t7_hdmirx_query_timings(&dev,&timing,&interval));
