@@ -1443,6 +1443,7 @@ F:	drivers/gpu/drm/meson/meson_t7_handoff.*
 F:	drivers/gpu/drm/meson/meson_t7_layers.*
 F:	drivers/gpu/drm/meson/meson_t7_scanout.h
 F:	drivers/gpu/drm/meson/meson_t7_video.*
+F:	drivers/gpu/drm/meson/meson_t7_video_kms.*
 F:	drivers/gpu/drm/meson/meson_t7_video_pps.c
 F:	drivers/gpu/drm/meson/test_t7_boot.py
 F:	drivers/gpu/drm/meson/test_t7_fb.py
@@ -1453,6 +1454,7 @@ F:	drivers/gpu/drm/meson/test_t7_producer_layouts.py
 F:	drivers/gpu/drm/meson/test_t7_scanout.py
 F:	drivers/gpu/drm/meson/test_t7_sram.py
 F:	drivers/gpu/drm/meson/test_t7_video.py
+F:	drivers/gpu/drm/meson/test_t7_video_kms.py
 F:	drivers/gpu/drm/meson/test_t7_video_phase.py
 
 AMLOGIC VDEC DRIVER

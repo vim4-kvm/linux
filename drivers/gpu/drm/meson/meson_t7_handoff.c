@@ -40,6 +40,7 @@
 #include "meson_t7_scanout.h"
 #include "meson_t7_layers.h"
 #include "meson_t7_fb.h"
+#include "meson_t7_video_kms.h"
 
 #define HANDOFF_WIDTH	1920
 #define HANDOFF_HEIGHT	1080
@@ -79,6 +80,7 @@ struct meson_t7_handoff {
 	struct meson_t7_modeset *modeset;
 	bool native_modeset;
 	bool managed_sram;
+	struct meson_t7_video_kms *video;
 	bool layers_valid;
 	struct meson_t7_osd_layer layers[MESON_T7_OSD_LAYERS];
 	u32 requested, written, applied;
@@ -332,11 +334,13 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 	struct drm_framebuffer *next[MESON_T7_MAX_LAYERS] = {};
 	struct drm_crtc_state *crtc = drm_atomic_get_new_crtc_state(commit, &display->crtc);
 	struct drm_display_mode *mode = &crtc->adjusted_mode;
+	u32 *video_table;
 	unsigned int i;
 	unsigned long flags;
 	u32 sequence;
 	int bytes;
-	bool slow;
+	int video_bytes;
+	bool slow, video_update, video_reconfigure = false;
 
 	if (READ_ONCE(display->faulted))
 		return;
@@ -349,6 +353,9 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 			next[i] = state->fb;
 		}
 	}
+	if (meson_t7_video_collect(display->video, commit, blank, next + MESON_T7_OSD_LAYERS))
+		return;
+	video_update = meson_t7_video_in_use(display->video, commit);
 	if (meson_t7_scanout_acquire(&display->buffers, next))
 		return;
 	bytes = display->layers_valid ?
@@ -359,6 +366,21 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 		bytes = meson_t7_osd_layers_build(display->rdma_table, MESON_T7_RDMA_PAIRS,
 						  layers, mode->hdisplay, mode->vdisplay,
 						  readl(display->paths), readl(display->paths + 4));
+	if (bytes >= 0 && video_update) {
+		video_table = display->rdma_table + bytes / sizeof(u32);
+		video_bytes = meson_t7_video_flip(display->video, commit, blank,
+						  video_table,
+						  MESON_T7_VIDEO_KMS_PAIRS);
+		video_reconfigure = !video_bytes;
+		if (video_reconfigure)
+			video_bytes = meson_t7_video_build(display->video, commit, blank, false,
+							   layers,
+							   video_table,
+							   MESON_T7_VIDEO_KMS_PAIRS);
+		/* Video address writes also retain the previous frame for one full scan. */
+		slow = true;
+		bytes = video_bytes < 0 ? video_bytes : bytes + video_bytes;
+	}
 	if (bytes < 0) {
 		WRITE_ONCE(display->faulted, true);
 		meson_t7_scanout_retire(&display->buffers, false);
@@ -371,6 +393,28 @@ static void meson_t7_handoff_scanout_layers(struct meson_t7_handoff *display,
 	meson_t7_handoff_rdma_arm(display);
 	spin_unlock_irqrestore(&display->lock, flags);
 	meson_t7_handoff_finish(display, sequence, slow);
+	/*
+	 * Vendor ON_REQ -> ON_PENDING: configure with fetch disconnected, drain the
+	 * previous generation, then enable on a later vsync. A failure in either
+	 * transaction pins every old/new plane until reboot, including video.
+	 */
+	if (!READ_ONCE(display->faulted) && video_reconfigure && !blank) {
+		if (meson_t7_scanout_acquire(&display->buffers, next))
+			return;
+		bytes = meson_t7_video_build(display->video, commit, false, true, layers,
+					     display->rdma_table, MESON_T7_VIDEO_KMS_PAIRS);
+		if (bytes < 0) {
+			WRITE_ONCE(display->faulted, true);
+			meson_t7_scanout_retire(&display->buffers, false);
+			return;
+		}
+		spin_lock_irqsave(&display->lock, flags);
+		display->rdma_bytes = bytes;
+		sequence = ++display->requested;
+		meson_t7_handoff_rdma_arm(display);
+		spin_unlock_irqrestore(&display->lock, flags);
+		meson_t7_handoff_finish(display, sequence, true);
+	}
 	if (!READ_ONCE(display->faulted)) {
 		for (i = 0; i < MESON_T7_OSD_LAYERS; i++)
 			display->layers[i] = layers[i];
@@ -491,6 +535,7 @@ static const struct drm_plane_funcs meson_t7_handoff_plane_funcs = {
 
 static int meson_t7_plane_properties(struct drm_plane *plane)
 {
+	struct meson_t7_handoff *display = to_handoff(plane->dev);
 	unsigned int rotations = DRM_MODE_ROTATE_0 | DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y;
 	int ret;
 
@@ -506,8 +551,10 @@ static int meson_t7_plane_properties(struct drm_plane *plane)
 		return ret;
 	if (to_handoff(plane->dev)->managed_sram)
 		return drm_plane_create_zpos_property(plane, plane->type == DRM_PLANE_TYPE_CURSOR ?
-						     2 : plane->type == DRM_PLANE_TYPE_OVERLAY,
-						     0, 2);
+						     (display->video ? 4 : 2) :
+						     (plane->type == DRM_PLANE_TYPE_OVERLAY) +
+						     (display->video ? 2 : 0),
+						     0, display->video ? 4 : 2);
 	return drm_plane_create_zpos_immutable_property(plane, 0);
 }
 
@@ -516,11 +563,15 @@ static int meson_t7_handoff_crtc_check(struct drm_crtc *crtc,
 {
 	struct drm_crtc_state *new = drm_atomic_get_new_crtc_state(state, crtc);
 	struct meson_t7_handoff *display = to_handoff(crtc->dev);
+	int ret;
 
 	if (new->enable && (display->native_modeset ? meson_t7_mode_valid(&new->mode) :
 			   meson_t7_handoff_mode_valid(&new->mode)) != MODE_OK)
 		return -EINVAL;
-	return drm_atomic_add_affected_planes(state, crtc);
+	ret = drm_atomic_add_affected_planes(state, crtc);
+	if (ret)
+		return ret;
+	return meson_t7_video_zpos_check(display->video, state);
 }
 
 static void meson_t7_handoff_abort_event(struct drm_crtc *crtc, struct drm_crtc_state *new)
@@ -791,7 +842,7 @@ static int meson_t7_handoff_sram_get(struct meson_t7_handoff *display)
 				(u32)(READ_ONCE(display->vsync_count) - start) >= 2,
 				msecs_to_jiffies(100)))
 		return -ETIMEDOUT;
-	return meson_t7_handoff_domains_get(display->drm.dev, 3, 10);
+	return meson_t7_handoff_domains_get(display->drm.dev, 3, display->video ? 15 : 10);
 }
 
 static void __iomem *meson_t7_handoff_map(struct platform_device *pdev,
@@ -818,14 +869,17 @@ static int meson_t7_handoff_check_dt(struct device *dev)
 			PWRC_T7_OSD1_MEM_ID, PWRC_T7_OSD2_MEM_ID, PWRC_T7_OSD3_MEM_ID,
 			PWRC_T7_OSD_SCALE_MEM_ID, PWRC_T7_OSD2_SCALE_MEM_ID,
 			PWRC_T7_OSD_BLD34_MEM_ID, PWRC_T7_RDMA_MEM_ID,
+			PWRC_T7_VD1_MEM_ID, PWRC_T7_VD2_MEM_ID, PWRC_T7_VD1_SCALE_MEM_ID,
+			PWRC_T7_VD2_SCALE_MEM_ID, PWRC_T7_VD2_OFIFO_MEM_ID,
 		};
-		unsigned int i;
+		unsigned int i, count = of_property_read_bool(dev->of_node,
+							     "amlogic,video-planes") ? 15 : 10;
 
 		if (!of_device_is_compatible(dev->of_node, "amlogic,t7-display") ||
 		    of_count_phandle_with_args(dev->of_node, "power-domains",
-					       "#power-domain-cells") != ARRAY_SIZE(ids))
+					       "#power-domain-cells") != count)
 			return -EINVAL;
-		for (i = 0; i < ARRAY_SIZE(ids); i++) {
+		for (i = 0; i < count; i++) {
 			ret = of_parse_phandle_with_args(dev->of_node, "power-domains",
 							 "#power-domain-cells", i, &pll);
 			if (ret)
@@ -915,6 +969,7 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	struct clk_bulk_data *clocks;
 	struct device_node *node;
 	unsigned int i;
+	size_t rdma_size;
 	int ret, irq;
 
 	ret = meson_t7_handoff_check_dt(dev);
@@ -990,6 +1045,12 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	ret = meson_t7_handoff_boot_check(display);
 	if (ret)
 		return dev_err_probe(dev, ret, "Firmware display contract does not match\n");
+	display->video = meson_t7_video_map(pdev);
+	if (IS_ERR(display->video))
+		return dev_err_probe(dev, PTR_ERR(display->video),
+				     "Video firmware contract mismatch\n");
+	if (display->video && !display->managed_sram)
+		return -EINVAL;
 	if (display->linear_formats) {
 		u32 control;
 
@@ -1000,9 +1061,11 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		for (i = 0; i < 7; i++)
 			if (readl(display->rdma + RDMA_REG(RDMA_AUTO_SRC1_SEL) + i * 4))
 				return dev_err_probe(dev, -EBUSY, "Firmware RDMA channel active\n");
-		display->rdma_table = dmam_alloc_coherent(dev, display->managed_sram ?
-						MESON_T7_RDMA_PAIRS * 8 : 40, &display->rdma_dma,
-							GFP_KERNEL);
+		rdma_size = display->managed_sram ? MESON_T7_RDMA_PAIRS * 8 : 40;
+		if (display->video)
+			rdma_size += MESON_T7_VIDEO_KMS_PAIRS * 8;
+		display->rdma_table = dmam_alloc_coherent(dev, rdma_size, &display->rdma_dma,
+							  GFP_KERNEL);
 		if (!display->rdma_table)
 			return -ENOMEM;
 		control = readl(display->rdma + RDMA_REG(RDMA_CTRL)) & 0x00ffffff;
@@ -1078,6 +1141,9 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 				return ret;
 		}
 	}
+	ret = meson_t7_video_planes_init(display->video, drm);
+	if (ret)
+		return ret;
 	ret = drm_crtc_init_with_planes(drm, &display->crtc, &display->plane,
 					display->managed_sram ? &display->extra_planes[1] : NULL,
 					&meson_t7_handoff_crtc_funcs, NULL);

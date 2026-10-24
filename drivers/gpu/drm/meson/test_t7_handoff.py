@@ -126,17 +126,18 @@ static bool drm_atomic_crtc_needs_modeset(struct drm_crtc_state *state)
 struct drm_plane { struct drm_device *dev; struct drm_plane_state *state; };
 struct drm_crtc { struct drm_device *dev; struct drm_crtc_state *state; };
 struct drm_encoder { int unused; };
-struct drm_format_info { unsigned int format; unsigned int cpp[1]; unsigned int num_planes; };
+struct drm_format_info { unsigned int format; unsigned int cpp[2]; unsigned int num_planes; };
 static int drm_format_info_plane_width(const struct drm_format_info *f, int w, int p)
-{return w;}
+{return p ? w/2 : w;}
 static int drm_format_info_plane_height(const struct drm_format_info *f, int h, int p)
-{return h;}
+{return p ? h/2 : h;}
 struct drm_framebuffer {
     unsigned int references;
     const struct drm_format_info *format;
-    unsigned int width, height, pitches[1], offsets[1];
+    unsigned int width, height, pitches[2], offsets[2];
     uint64_t modifier;
     struct drm_gem_dma_object *object;
+    struct drm_gem_dma_object *objects[2];
 };
 struct drm_plane_state {
     bool visible;
@@ -151,8 +152,8 @@ struct drm_plane_state {
 };
 struct drm_atomic_commit {
     struct drm_plane_state *plane;
-    struct drm_plane *planes[3];
-    struct drm_plane_state *states[3];
+    struct drm_plane *planes[5];
+    struct drm_plane_state *states[5];
     struct drm_crtc_state *old_crtc, *new_crtc;
 };
 #define DRM_FORMAT_RGB888 1
@@ -160,6 +161,8 @@ struct drm_atomic_commit {
 #define DRM_FORMAT_XBGR8888 3
 #define DRM_FORMAT_ARGB8888 4
 #define DRM_FORMAT_ABGR8888 5
+#define DRM_FORMAT_NV12 6
+#define DRM_FORMAT_NV21 7
 #define DRM_MODE_BLEND_PIXEL_NONE 0
 #define DRM_MODE_BLEND_COVERAGE 1
 #define DRM_MODE_REFLECT_X (1 << 4)
@@ -213,7 +216,7 @@ static struct meson_t7_handoff *to_handoff(struct drm_device *drm);
 static struct drm_plane_state *drm_atomic_get_new_plane_state(
     struct drm_atomic_commit *state, struct drm_plane *plane)
 {
-    for (unsigned int i=0;i<3;i++) if (state->planes[i]==plane) return state->states[i];
+    for (unsigned int i=0;i<5;i++) if (state->planes[i]==plane) return state->states[i];
     return state->plane;
 }
 static struct drm_crtc_state *drm_atomic_get_new_crtc_state(
@@ -238,6 +241,7 @@ static struct drm_gem_dma_object *drm_fb_dma_get_gem_obj(struct drm_framebuffer 
     static struct drm_gem_dma_object default_object={.dma_addr=0x20000000,
                                                     .base.size=64*1024*1024};
     assert(fb);
+    if (fb->objects[index]) return fb->objects[index];
     return fb->object ? fb->object : &default_object;
 }
 static dma_addr_t drm_fb_dma_get_gem_addr(struct drm_framebuffer *fb,
@@ -287,6 +291,40 @@ static void drm_framebuffer_put(struct drm_framebuffer *fb)
 {
     assert(fb->references > 1);
     fb->references--;
+}
+struct meson_t7_video_kms {
+    struct drm_framebuffer *frames[2];
+    bool fail_enable;
+    unsigned int configured, enabled;
+};
+#define MESON_T7_VIDEO_KMS_PAIRS 320
+static int meson_t7_video_collect(struct meson_t7_video_kms *video,
+    struct drm_atomic_commit *commit, bool blank, struct drm_framebuffer **frames)
+{
+    if (video) for (unsigned int i=0;i<2;i++) frames[i]=blank?NULL:video->frames[i];
+    return 0;
+}
+static bool meson_t7_video_in_use(struct meson_t7_video_kms *video,
+    struct drm_atomic_commit *commit)
+{ return video != NULL; }
+static int meson_t7_video_flip(struct meson_t7_video_kms *video,
+    struct drm_atomic_commit *commit, bool blank, u32 *table, unsigned int pairs)
+{ return 0; }
+static int meson_t7_video_build(struct meson_t7_video_kms *video,
+    struct drm_atomic_commit *commit, bool blank, bool enable, const void *osd,
+    u32 *table, unsigned int pairs)
+{
+    assert(video && pairs>=MESON_T7_VIDEO_KMS_PAIRS);
+    if (enable) {
+        assert(video->configured>video->enabled);
+        video->enabled++;
+        for (unsigned int i=0;i<2;i++)
+            if (video->frames[i]) assert(video->frames[i]->references>=2);
+        if (video->fail_enable) inject_timeout=true;
+    } else video->configured++;
+    table[0]=0x4800; table[1]=enable && video->frames[0] && !blank;
+    table[2]=0x4880; table[3]=enable && video->frames[1] && !blank;
+    return 16;
 }
 #define wait_event_timeout(wait, condition, timeout) ({ \
     bool missed=inject_timeout || (fail_drain && display->managed_sram && !rdma[0x23]); \
@@ -585,6 +623,42 @@ int main(void)
     meson_t7_handoff_scanout_layers(&multi,&multi_commit,false);
     assert(desktop_a.references==1 && desktop_b.references==2 && overlay.references==2);
     puts("Three OSD engines: 60 safe events/60 vsyncs, long-update event delay, RMFB and drain fault pinning passed");
+
+    struct meson_t7_handoff five={.osd=osd,.rdma=rdma,.rdma_table=table,.paths=paths,
+        .native_modeset=true,.managed_sram=true,.linear_formats=true};
+    five.crtc.dev=&five.drm;
+    struct drm_framebuffer va={.references=1}, vb={.references=1};
+    struct drm_framebuffer vc={.references=1}, vd={.references=1};
+    struct meson_t7_video_kms video={.frames={&va,&vb}};
+    five.video=&video;
+    for (unsigned int i=0;i<3;i++) {
+        struct drm_plane *p=i?&five.extra_planes[i-1]:&five.plane;
+        p->dev=&five.drm;
+        states[i].fb=NULL; states[i].visible=false;
+        multi_commit.planes[i]=p;
+    }
+    fail_drain=false; inject_timeout=false; output.active=true; output.event=&event;
+    frame_start=vblanks; previously_sent=sent;
+    meson_t7_handoff_flush(&five.crtc,&multi_commit);
+    assert(vblanks-frame_start==4 && sent==previously_sent+1);
+    assert(video.configured==1 && video.enabled==1);
+    assert(va.references==2 && vb.references==2 && (pipeline[0x4800]&1));
+    video.frames[0]=&vc; video.frames[1]=&vd;
+    output.event=&event;
+    meson_t7_handoff_flush(&five.crtc,&multi_commit);
+    assert(va.references==1 && vb.references==1 && vc.references==2 && vd.references==2);
+    video.frames[0]=video.frames[1]=NULL;
+    meson_t7_handoff_scanout_layers(&five,&multi_commit,true);
+    assert(vc.references==1 && vd.references==1 && !(pipeline[0x4800]&1));
+    video.frames[0]=&va; video.frames[1]=&vb; video.fail_enable=true;
+    output.event=&event; previously_sent=sent;
+    meson_t7_handoff_flush(&five.crtc,&multi_commit);
+    assert(five.faulted && five.buffers.faulted && !output.event && sent==previously_sent);
+    assert(va.references==3 && vb.references==3); /* Both enabling generations pinned. */
+    rdma[0x15]=RDMA_IRQ_STAT_CHAN1;
+    meson_t7_handoff_rdma_irq(0,&five); meson_t7_handoff_irq(0,&five);
+    assert(va.references==3 && vb.references==3);
+    puts("Video retirement: two-phase latch/drain, two video references, RMFB and enable failure pinning passed");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:

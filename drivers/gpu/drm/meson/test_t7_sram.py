@@ -23,9 +23,10 @@ prefix = r'''
 #include <errno.h>
 typedef uint32_t u32;
 struct device { unsigned int id; bool attached, resumed; };
-static struct device domains[10];
-static void (*actions[10])(void *);
-static void *action_data[10];
+static struct device domains[15];
+static void (*actions[15])(void *);
+static void *action_data[15];
+static unsigned int domain_count=10;
 static unsigned int action_count, calls, fail_at, failure, ticks;
 static bool timeout;
 static u32 osd[3];
@@ -34,6 +35,7 @@ struct meson_t7_handoff {
     void *osd, *extra_osd[2];
     u32 vsync_count;
     int wait;
+    void *video;
 };
 #define BIT(n) (1U << (n))
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
@@ -46,7 +48,7 @@ static void writel(u32 value, void *p) { *(u32 *)p = value; }
 static struct device *dev_pm_domain_attach_by_id(struct device *dev, unsigned int i)
 {
     (void)dev;
-    assert(i >= 3 && i < 10 && ticks == 2);
+    assert(i >= 3 && i < domain_count && ticks == 2);
     /* No SRAM transition is permitted while a boot OSD can still fetch. */
     assert(!(osd[0] & 1) && !(osd[1] & 1) && !(osd[2] & 1));
     calls++;
@@ -109,16 +111,19 @@ int main(void)
 {
     struct meson_t7_handoff display = {.osd=&osd[0], .extra_osd={&osd[1], &osd[2]}};
     const int errors[] = {0, -ENODEV, -EAGAIN, -EIO, -ENOMEM};
-    for (failure = 0; failure < 5; failure++) {
-        for (fail_at = 3; fail_at < 10; fail_at++) {
+    for (domain_count=10;domain_count<=15;domain_count+=5) {
+      display.video=domain_count==15 ? &display : NULL;
+      for (failure = 0; failure < 5; failure++) {
+        for (fail_at = 3; fail_at < domain_count; fail_at++) {
             osd[0] = osd[1] = osd[2] = 0xa5a50005;
             display.vsync_count = UINT32_MAX; /* Drain also spans counter wrap. */
             ticks = calls = 0;
             assert(meson_t7_handoff_sram_get(&display) == errors[failure]);
-            assert(ticks == 2 && calls == (failure ? fail_at - 2 : 7));
+            assert(ticks == 2 && calls == (failure ? fail_at - 2 : domain_count-3));
             for (unsigned int i = 0; i < 3; i++) assert(osd[i] == 0xa5a50004);
             unwind();
         }
+      }
     }
     timeout = true; ticks = calls = 0;
     assert(meson_t7_handoff_sram_get(&display) == -ETIMEDOUT);
@@ -171,4 +176,4 @@ with tempfile.TemporaryDirectory() as directory:
         abi += f'assert(smc_id == PWRC_T7_{name}_MEM_ID && smc_state == 1);\n'
     abi += '}\n'
     execute('vendor-abi', abi)
-print(f'OSD SRAM: 35 acquisition/unwind cases, missing vsync, wrap and {len(names)} vendor SMC IDs passed')
+print(f'OSD/video SRAM: 95 acquisition/unwind cases, missing vsync, wrap and {len(names)} vendor SMC IDs passed')
