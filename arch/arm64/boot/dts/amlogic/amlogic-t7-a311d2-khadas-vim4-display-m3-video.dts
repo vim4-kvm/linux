@@ -47,7 +47,9 @@
 	      <0x0 0xff006a0c 0x0 0x8>,
 	      <0x0 0xff007644 0x0 0x8>,
 	      <0x0 0xff012400 0x0 0x4>,
-	      <0x0 0xff012500 0x0 0x4>;
+	      <0x0 0xff012500 0x0 0x4>,
+	      <0x0 0xff00e680 0x0 0x38>,
+	      <0x0 0xff00e280 0x0 0xf4>;
 	reg-names = "osd1", "venc", "rdma", "pll", "vid2", "vid-div",
 		    "vpp", "blend", "scaler", "post-size", "out-size", "hdmi-setting",
 		    "hdmi-format", "osd-matrix",
@@ -72,7 +74,7 @@
 		    "video-dsc",
 		    "video-sr",
 		    "vd3-fetch",
-		    "vd3-afbc";
+		    "vd3-afbc", "post2-matrix", "osd-hdr";
 	power-domains = <&pwrc PWRC_T7_VPU_HDMI_ID>,
 			<&pwrc PWRC_T7_VI_CLK1_ID>, <&pwrc PWRC_T7_VI_CLK2_ID>,
 			<&pwrc PWRC_T7_OSD1_MEM_ID>, <&pwrc PWRC_T7_OSD2_MEM_ID>,

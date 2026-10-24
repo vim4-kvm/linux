@@ -1189,6 +1189,9 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		u32 colorspaces = BIT(DRM_MODE_COLORIMETRY_BT709_YCC) |
 				  BIT(DRM_MODE_COLORIMETRY_BT2020_YCC);
 
+		ret = drm_connector_attach_broadcast_rgb_property(connector);
+		if (ret)
+			return ret;
 		ret = drm_mode_create_hdmi_colorspace_property(connector, colorspaces);
 		if (ret)
 			return ret;

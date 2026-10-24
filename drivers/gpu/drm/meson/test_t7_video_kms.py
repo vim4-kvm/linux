@@ -28,7 +28,10 @@ if args.dtb:
     capture = capture.split('} regions[] = {')[1].split('};')[0]
     capture_regions = [(int(a, 16), int(b, 16)) for a, b in
                        re.findall(r'\{\s*(0x[0-9a-f]+),\s*(0x[0-9a-f]+)\s*}', capture)]
-    assert capture_regions and len(names) == len(regions) == 44
+    assert capture_regions and len(names) == len(regions) == len(set(names))
+    for i, (start, size) in enumerate(regions):
+        for other, length in regions[i + 1:]:
+            assert max(start, other) >= min(start + size, other + length)
     for start, size in regions:
         for a, b in capture_regions:
             assert max(start, a) >= min(start + size, a + b)
@@ -40,7 +43,7 @@ if args.dtb:
     domains = [int(value, 16) for value in prop(node, 'power-domains')]
     assert len(domains) == 30 and len(set(domains[::2])) == 1
     assert domains[-9::2] == [54, 55, 100, 86, 103]
-    print('Compiled video DT: 44 disjoint capture/display banks and 15 exclusive domains passed')
+    print(f'Compiled video DT: {len(regions)} disjoint capture/display banks and 15 exclusive domains passed')
 handoff_test = (directory / 'test_t7_handoff.py').read_text()
 prefix = re.search(r"prefix = r'''(.*?)'''", handoff_test, re.S)[1]
 # Share the fake GEM/atomic ABI with the retirement test, executing real video code.

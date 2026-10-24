@@ -63,11 +63,13 @@ typedef uint32_t u32;
 typedef uint8_t u8;
 typedef uint16_t u16;
 #define BIT(n) (1U << (n))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define GENMASK(h,l) ((~0U << (l)) & (~0U >> (31-(h))))
 #define min(a,b) ((a)<(b)?(a):(b))
 #define DIV_ROUND_CLOSEST(a,b) (((a)+(b)/2)/(b))
 #define DIV_ROUND_CLOSEST_ULL(a,b) DIV_ROUND_CLOSEST(a,b)
 #define DRM_OUTPUT_COLOR_FORMAT_YCBCR420 3
+#define DRM_OUTPUT_COLOR_FORMAT_RGB444 0
 #define DRM_MODE_COLORIMETRY_BT2020_YCC 10
 #define __ffs(x) __builtin_ctz(x)
 #define HDMITX_INFO(...) do {} while (0)
@@ -82,7 +84,8 @@ struct drm_display_mode {
     int vdisplay,vsync_start,vsync_end,vtotal,flags;
 };
 struct drm_connector_state { int colorspace;
-    struct {unsigned int output_format,output_bpc;unsigned long long tmds_char_rate;} hdmi;
+    struct {unsigned int output_format,output_bpc;unsigned long long tmds_char_rate;
+        bool is_limited_range;} hdmi;
     void *crtc;};
 struct hdmi_timing {
     int vic,h_total,h_blank,h_front,h_sync,h_back,h_active;
@@ -138,7 +141,7 @@ driver_names = ('meson_t7_clock_calculate', 'meson_t7_link_clock_calculate',
                 'meson_t7_mode_valid', 'meson_t7_pll_lock',
                 'meson_t7_pll_recipe', 'meson_t7_pll_set', 'meson_t7_video_clock',
                 'meson_t7_venc_set', 'meson_t7_modeset_disable', 'meson_t7_osd_matrix',
-                'meson_t7_modeset_enable')
+                'meson_t7_osd_sdr', 'meson_t7_output_matrix', 'meson_t7_modeset_enable')
 vendor_names = ('set_hpll_hclk_v1', 'set_hpll_hclk_v2', 'set_hpll_hclk_v3',
                 't7_auto_set_hpll')
 other_registers = '\n'.join(re.findall(r'^#define\s+(?:VPU_HDMI_SETTING|VIU_OSD_BLEND_\w+|'
@@ -147,6 +150,9 @@ other_registers = '\n'.join(re.findall(r'^#define\s+(?:VPU_HDMI_SETTING|VIU_OSD_
 body = preamble + defines + '\n' + other_registers + '\n' + pll_defines + '\n' + vic_defines
 body += '\n' + clock_type + '\n' + link_type
 body += '\n' + '\n'.join(function(source, name) for name in driver_names)
+hdr_source = (args.vendor / 'drivers/media/enhancement/amvecm/set_hdr2_v0.c').read_text()
+hdr_coeff = re.search(r'int rgb2ycbcr_709\[MTX_NUM_PARAM\] = \{(.*?)\};', hdr_source, re.S)[1]
+body += '\nstatic const int vendor_hdr709[] = {' + hdr_coeff + '};\n'
 body += '\n' + '\n'.join(function(hw_t7, name) for name in vendor_names)
 body += '\n' + function(clk_source, 't7_calc_pixel_clk_hpll_vco_od')
 body += '\n' + function(venc_source, 'config_tv_enc_calc')
@@ -248,6 +254,15 @@ for(int gamut=0;gamut<2;gamut++) {
     assert(actual_regs[0x3914]==(m[11]&0x1fff));
     assert(actual_regs[0x3919]==((m[18]<<16)|m[19]) && actual_regs[0x391a]==m[20]);
 }
+meson_t7_osd_sdr(&hw);
+for(int i=0;i<4;i++)
+    assert(actual_regs[0x38a2+i]==(((vendor_hdr709[2*i]&0x1fff)<<16)|
+                                  (vendor_hdr709[2*i+1]&0x1fff)));
+assert(actual_regs[0x38a6]==(vendor_hdr709[8]&0x1fff));
+assert(actual_regs[0x38aa]==0x00400200 && actual_regs[0x38ab]==512);
+assert(actual_regs[0x38ac]==0 && actual_regs[0x38ad]==0);
+assert(actual_regs[0x38a0]==(BIT(16)|BIT(15)|BIT(14)));
+assert(actual_regs[0x38db]==1 && actual_regs[0x38dc]==0);
 for(int bpc=8;bpc<=10;bpc+=2)
     for(int y420=0;y420<2;y420++) {
         struct drm_display_mode mode={594000,3840,4016,4104,4400,2160,2168,2178,2250,0};
@@ -266,7 +281,40 @@ for(int bpc=8;bpc<=10;bpc+=2)
         assert(((divider>>16)&3)==(bpc==10?3:2));
         assert(actual_regs[ENCP_VIDEO_MAX_PXCNT]==4399);
     }
-puts("VPP matrix coefficients and 4K 8/10-bit/420 formatter match vendor expressions");
+/* Execute POST2 on 10-bit YCbCr samples from a BT.709 RGB grid. This
+ * catches range, signed-offset, coefficient and channel-order regressions.
+ */
+for(int limited=0;limited<2;limited++) {
+    struct drm_connector_state conn={.hdmi={.output_format=0,.output_bpc=8,
+        .is_limited_range=limited}};
+    meson_t7_output_matrix(&hw,&conn);
+    assert(actual_regs[0x39ad]==1);
+    for(int r=0;r<=255;r+=17) for(int g=0;g<=255;g+=17) for(int b=0;b<=255;b+=17) {
+        double yuv[]={.2126*r+.7152*g+.0722*b,
+                      (-.2126*r-.7152*g+.9278*b)/1.8556,
+                      (.7874*r-.7152*g-.0722*b)/1.5748};
+        yuv[0]=yuv[0]*876/255;
+        yuv[1]=yuv[1]*896/255;
+        yuv[2]=yuv[2]*896/255;
+        int rgb[]={r,g,b};
+        for(int c=0;c<3;c++) {
+            double result=limited?64:0;
+            for(int k=0;k<3;k++) {
+                int n=3*c+k;
+                u32 word=actual_regs[0x39a0+n/2];
+                int m=(n==8?word:(n%2?word:word>>16))&0x1fff;
+                if(m&0x1000) m-=0x2000;
+                result+=m*yuv[k]/1024;
+            }
+            double expected=limited?64+rgb[c]*876.0/255:rgb[c]*4.0;
+            assert(result-expected<=8 && result-expected>=-8);
+        }
+    }
+    conn.hdmi.output_format=1;
+    meson_t7_output_matrix(&hw,&conn);
+    assert(actual_regs[0x39ad]==0); /* RGB -> YUV must retire the old matrix. */
+}
+puts("VPP matrices: vendor recipes, RGB range grid and RGB/YUV transitions passed");
 {struct meson_t7_clock clock;
 assert(meson_t7_clock_calculate(0,&clock)==-ERANGE);
 assert(meson_t7_clock_calculate(594001,&clock)==-ERANGE);}

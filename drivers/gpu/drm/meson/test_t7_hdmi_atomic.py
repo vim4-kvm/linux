@@ -46,10 +46,12 @@ typedef uint32_t u32;
 #define DRM_MODE_COLORIMETRY_BT2020_YCC 10
 #define DRM_HDMI_BROADCAST_RGB_LIMITED 2
 #define HDMI_QUANTIZATION_RANGE_FULL 2
+#define HDMI_QUANTIZATION_RANGE_LIMITED 1
 #define HDMI_QUANTIZATION_RANGE_DEFAULT 0
 #define HDMI_YCC_QUANTIZATION_RANGE_LIMITED 0
 #define HDMI_COLORIMETRY_ITU_709 2
 #define HDMI_EOTF_BT_2100_HLG 3
+#define kmalloc_obj(obj) calloc(1, sizeof(obj))
 struct drm_bridge {int unused;};
 struct drm_bridge_state {int unused;};
 struct drm_plane {int unused;};
@@ -103,10 +105,15 @@ static u8 cor_read(struct meson_hdmitx21 *t,u32 reg) {
 }
 '''
 program += '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
+bus_formats = (here.parents[3] / 'include/uapi/linux/media-bus-format.h').read_text()
+program += '\n' + '\n'.join(re.findall(
+    r'^#define MEDIA_BUS_FMT_(?:RGB888_1X24|RGB101010_1X30|YUV8_1X24|YUV10_1X30)\s+.*$',
+    bus_formats, re.M))
 program += '\n' + header[header.index('struct meson_t7_clock {'):
                   header.index('int meson_t7_link_clock_calculate')]
 program += function(clock, 'meson_t7_link_clock_calculate')
-for name in ['meson_hdmitx21_bridge_atomic_check', 'meson_hdmitx21_write_infoframe',
+for name in ['meson_hdmitx21_bridge_get_input_bus_fmts',
+             'meson_hdmitx21_bridge_atomic_check', 'meson_hdmitx21_write_infoframe',
              'meson_hdmitx21_write_hdr_infoframe', 'meson_hdmitx21_clear_hdr_infoframe',
              'meson_hdmitx21_read_packet']:
     program += '\n' + function(source, name)
@@ -116,11 +123,29 @@ int main(void) {
     struct drm_connector_state conn={.connector=&connector,
         .hdmi={.output_bpc=8,.tmds_char_rate=148500000}};
     struct drm_crtc_state crtc={.crtc=&connector,.adjusted_mode={148500,1920,2200}};
+    for (unsigned int fmt=0;fmt<4;fmt++) {
+        if (fmt==2) continue;
+        for (unsigned int depth=8;depth<=10;depth+=2) {
+            unsigned int count=99;
+            conn.hdmi.output_format=fmt;conn.hdmi.output_bpc=depth;
+            u32 *bus=meson_hdmitx21_bridge_get_input_bus_fmts(NULL,NULL,&crtc,&conn,0,&count);
+            assert(bus && count==1);
+            assert(*bus==(fmt==DRM_OUTPUT_COLOR_FORMAT_RGB444 ?
+                (depth==10 ? MEDIA_BUS_FMT_RGB101010_1X30 : MEDIA_BUS_FMT_RGB888_1X24) :
+                (depth==10 ? MEDIA_BUS_FMT_YUV10_1X30 : MEDIA_BUS_FMT_YUV8_1X24)));
+            free(bus);
+        }
+    }
+    conn.hdmi.output_format=DRM_OUTPUT_COLOR_FORMAT_RGB444;conn.hdmi.output_bpc=8;
     assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn) && affected);
     assert(conn.hdmi.infoframes.avi.data.avi.quantization_range==HDMI_QUANTIZATION_RANGE_FULL);
     conn.hdmi.broadcast_rgb=DRM_HDMI_BROADCAST_RGB_LIMITED;
-    assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==-EINVAL);
+    conn.hdmi.is_limited_range=true;
+    assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn));
+    assert(conn.hdmi.infoframes.avi.data.avi.quantization_range==HDMI_QUANTIZATION_RANGE_LIMITED);
+    assert(conn.hdmi.is_limited_range); /* Preserve the standard helper's decision. */
     conn.hdmi.broadcast_rgb=0;
+    conn.hdmi.is_limited_range=false;
     conn.hdmi.output_format=DRM_OUTPUT_COLOR_FORMAT_YCBCR444;
     assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn));
     assert(conn.hdmi.infoframes.avi.data.avi.quantization_range==0);

@@ -72,9 +72,11 @@ properties:
       - description: video-sr, ff007644/8
       - description: vd3-fetch, ff012400/4
       - description: vd3-afbc, ff012500/4
+      - description: VPP0 POST2 output matrix, ff00e680/38
+      - description: VPP0 OSD HDR2 control and matrices, ff00e280/f4
   reg-names:
     minItems: 12
-    maxItems: 44
+    maxItems: 46
     oneOf:
       - minItems: 12
         items:
@@ -120,6 +122,34 @@ properties:
           - const: video-sr
           - const: vd3-fetch
           - const: vd3-afbc
+      - minItems: 25
+        items:
+          - const: osd1
+          - const: venc
+          - const: rdma
+          - const: pll
+          - const: vid2
+          - const: vid-div
+          - const: vpp
+          - const: blend
+          - const: scaler
+          - const: post-size
+          - const: out-size
+          - const: hdmi-setting
+          - const: hdmi-format
+          - const: osd-matrix
+          - const: osd2
+          - const: osd3
+          - const: scaler2
+          - const: scaler3
+          - const: osd-paths
+          - const: osd2-address
+          - const: osd2-unpack
+          - const: dimm1
+          - const: dimm2
+          - const: dimm3
+          - const: post2-matrix
+          - const: osd-hdr
       - minItems: 14
         items:
           - const: osd1
@@ -166,6 +196,8 @@ properties:
           - const: video-sr
           - const: vd3-fetch
           - const: vd3-afbc
+          - const: post2-matrix
+          - const: osd-hdr
   amlogic,video-planes:
     type: boolean
     description: |
@@ -247,9 +279,9 @@ allOf:
     else:
       properties:
         reg:
-          maxItems: 24
+          maxItems: 26
         reg-names:
-          maxItems: 24
+          maxItems: 26
         power-domains:
           maxItems: 10
   - if:

@@ -455,6 +455,11 @@ static ssize_t link_state_show(struct device *dev, struct device_attribute *attr
 			       cor_read(tx, TPI_SC), cor_read(tx, P2T_CTRL), cor_read(tx, SCRCTL),
 			       cor_read(tx, CLKRATIO), cor_read(tx, GCP_CNTL),
 			       cor_read(tx, CSC0_CTRL), cor_read(tx, CSC1_CTRL));
+	count += sysfs_emit_at(buf, count,
+			       "csc_hi=%02x/%02x input_mask=%02x output_map=%02x%02x output_mask=%02x\n",
+			       cor_read(tx, CSC0_CTRL2), cor_read(tx, CSC1_CTRL2),
+			       cor_read(tx, VP_INPUT_MASK), cor_read(tx, VP_OUTPUT_MAPPING_HI),
+			       cor_read(tx, VP_OUTPUT_MAPPING), cor_read(tx, VP_OUTPUT_MASK));
 	for (i = 0; i < ARRAY_SIZE(banks); i++) {
 		u8 enabled = meson_hdmitx21_read_packet(tx, banks[i], packet);
 
@@ -787,15 +792,13 @@ static void meson_hdmitx21_config_color(struct meson_hdmitx21 *tx,
 					const struct drm_connector_state *conn)
 {
 	bool deep = conn->hdmi.output_bpc == 10;
-	bool rgb = conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_RGB444;
 
 	cor_update(tx, GCP_CNTL, BIT(0), deep ? BIT(0) : 0);
 	cor_write(tx, P2T_CTRL, deep ? BIT(7) | 1 : 0);
 	cor_write(tx, VP_INPUT_MASK, deep ? 0x15 : 0x2a);
-	/* Vendor config_hdmi21_tx(): preset 0x65 converts limited 709 to RGB
-	 * full. BT.2020 therefore uses YUV transport, bypassing this preset.
-	 */
-	cor_write(tx, CSC0_CTRL, rgb ? 0x65 : 0);
+	/* VPP POST2 already produces the negotiated domain and range. */
+	cor_write(tx, CSC0_CTRL, 0);
+	cor_write(tx, CSC1_CTRL, 0);
 }
 
 static void meson_hdmitx21_write_vendor(struct meson_hdmitx21 *tx,
@@ -1121,9 +1124,15 @@ meson_hdmitx21_bridge_get_input_bus_fmts(struct drm_bridge *bridge,
 	if (!fmts)
 		return NULL;
 
-	/* Framebuffers are RGB; the retained OSD matrix precedes this bus. */
-	fmts[0] = bridge_to_hdmitx(bridge)->atomic_color && conn_state->hdmi.output_bpc == 10 ?
-		MEDIA_BUS_FMT_YUV10_1X30 : MEDIA_BUS_FMT_YUV8_1X24;
+	/* The encoder's POST2 precedes this bus and owns RGB range conversion. */
+	if (bridge_to_hdmitx(bridge)->atomic_color &&
+	    conn_state->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_RGB444)
+		fmts[0] = conn_state->hdmi.output_bpc == 10 ?
+			MEDIA_BUS_FMT_RGB101010_1X30 : MEDIA_BUS_FMT_RGB888_1X24;
+	else if (bridge_to_hdmitx(bridge)->atomic_color && conn_state->hdmi.output_bpc == 10)
+		fmts[0] = MEDIA_BUS_FMT_YUV10_1X30;
+	else
+		fmts[0] = MEDIA_BUS_FMT_YUV8_1X24;
 	*num_input_fmts = 1;
 
 	return fmts;
@@ -1168,7 +1177,7 @@ static int meson_hdmitx21_bridge_atomic_check(struct drm_bridge *bridge,
 	if (conn->hdmi.tmds_char_rate > 340000000 &&
 	    (!info->hdmi.scdc.supported || !info->hdmi.scdc.scrambling.supported))
 		return -EINVAL;
-	if (rgb && (bt2020 || conn->hdmi.broadcast_rgb == DRM_HDMI_BROADCAST_RGB_LIMITED))
+	if (rgb && bt2020)
 		return -EINVAL;
 	/* Linear NV12/NV21 video currently has only a BT.709 input contract.
 	 * Reject mixed gamuts rather than tagging those pixels as BT.2020.
@@ -1202,9 +1211,9 @@ static int meson_hdmitx21_bridge_atomic_check(struct drm_bridge *bridge,
 		drm_dbg_kms(bridge->dev, "BT.2020 needs exclusive T7 OSD HDR2 ownership\n");
 		return -EOPNOTSUPP;
 	}
-	conn->hdmi.is_limited_range = false;
-	avi->quantization_range = rgb ? HDMI_QUANTIZATION_RANGE_FULL :
-					HDMI_QUANTIZATION_RANGE_DEFAULT;
+	avi->quantization_range = rgb ? (conn->hdmi.is_limited_range ?
+		HDMI_QUANTIZATION_RANGE_LIMITED : HDMI_QUANTIZATION_RANGE_FULL) :
+		HDMI_QUANTIZATION_RANGE_DEFAULT;
 	avi->ycc_quantization_range = HDMI_YCC_QUANTIZATION_RANGE_LIMITED;
 	if (!bt2020)
 		avi->colorimetry = HDMI_COLORIMETRY_ITU_709;
