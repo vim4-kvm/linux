@@ -995,8 +995,15 @@ static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
 	    (m->width & 1) || !m->ticks ||
 	    m->ticks < reference / 120 || m->ticks > reference / 20 ||
 	    m->width + m->hfront + hsync + m->hback != m->hlow + m->hhigh ||
-	    m->height + m->vfront + vsync + m->vback != m->vlow + m->vhigh)
+	    m->height + m->vfront + vsync + m->vback != m->vlow + m->vhigh) {
+		if (rx->link && READ_ONCE(rx->link->ready))
+			pr_info_ratelimited("t7-hdmirx invalid qualified FDET: %ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
+					    m->width, m->height, m->ticks,
+					    m->hlow, m->hhigh, m->hfront, m->hback,
+					    m->vlow, m->vhigh, m->vfront, m->vback,
+					    m->polarity);
 		return -ERANGE;
+	}
 	pixelclock = div_u64((u64)reference * (m->hlow + m->hhigh) * scale *
 			    (m->vlow + m->vhigh), m->ticks);
 	if (pixelclock < 24000000 || pixelclock > 600000000)
@@ -1117,10 +1124,20 @@ static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reas
 		ret = t7_hdmirx_measure_live(rx, yuv420, &measured);
 		if (!ret && rx->link && rx->link->users &&
 		    !t7_hdmirx_same_measurement(&measured, &rx->lease_mode)) {
-			pr_info_ratelimited("t7-hdmirx lease timing changed: measured=%ux%u/%u lease=%ux%u/%u\n",
+			pr_info_ratelimited("t7-hdmirx lease timing changed: measured=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x lease=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
 					    measured.width, measured.height, measured.ticks,
+					    measured.hlow, measured.hhigh,
+					    measured.hfront, measured.hback,
+					    measured.vlow, measured.vhigh,
+					    measured.vfront, measured.vback,
+					    measured.polarity,
 					    rx->lease_mode.width, rx->lease_mode.height,
-					    rx->lease_mode.ticks);
+					    rx->lease_mode.ticks,
+					    rx->lease_mode.hlow, rx->lease_mode.hhigh,
+					    rx->lease_mode.hfront, rx->lease_mode.hback,
+					    rx->lease_mode.vlow, rx->lease_mode.vhigh,
+					    rx->lease_mode.vfront, rx->lease_mode.vback,
+					    rx->lease_mode.polarity);
 			return t7_hdmirx_video_error(reason, "lease-timing", -ENOLINK);
 		}
 		return t7_hdmirx_video_error(reason, "measurement", ret);
@@ -1154,8 +1171,11 @@ int t7_hdmirx_check_capture(struct device *dev, const char **reason)
 	if (rx && rx->link && !READ_ONCE(rx->link->ready))
 		return t7_hdmirx_video_error(reason, "link-not-ready", -ENOLINK);
 	ret = t7_hdmirx_video_status_reason(rx, reason);
-	if (ret && ret != -EAGAIN && rx && rx->core_active && rx->phy_active)
-		dev_info_ratelimited(dev, "capture check: %s error=%d width=%u height=%u ticks=%u lease=%ux%u/%u pll=%u align=%u\n",
+	/* EAGAIN also produces an ERROR buffer. Record it before the asynchronous
+	 * recovery worker can change the state; do not mistake it for a lost link.
+	 */
+	if (ret && rx && rx->core_active && rx->phy_active)
+		dev_info_ratelimited(dev, "capture check: %s error=%d width=%u height=%u ticks=%u lease=%ux%u/%u pll=%u align=%u sqo=%u cable=%#x tmds=%#x ratio=%u\n",
 				     *reason, ret, t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH),
 				     t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT),
 				     t7_hdmirx_core_read16(rx, T7_RX_COR_FRAME_TICKS) |
@@ -1163,7 +1183,11 @@ int t7_hdmirx_check_capture(struct device *dev, const char **reason)
 				     rx->lease_mode.width, rx->lease_mode.height,
 				     rx->lease_mode.ticks,
 				     !!(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK),
-				     !!(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)));
+				     !!(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0)),
+				     readl(rx->top + T7_RX_TOP_MISC_STAT0) & 1,
+				     readl(rx->top + T7_RX_TOP_METER_CABLE_STAT),
+				     readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
+				     rx->uhd60 ? 4 : 1);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_check_capture);
@@ -2052,9 +2076,15 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		goto out;
 	}
 	if (READ_ONCE(link->ready))
-		pr_info_ratelimited("t7-hdmirx link readiness revoked: reason=%s error=%d retries=%u users=%u configured=%u\n",
+		pr_info_ratelimited("t7-hdmirx link readiness revoked: reason=%s error=%d retries=%u users=%u configured=%u pll=%u sqo=%u align=%u cable=%#x tmds=%#x sample=%u previous=%u ratio=%u\n",
 				    reason, ret, link->timing_retries,
-				    link->users, link->configured);
+				    link->users, link->configured,
+				    !!(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK),
+				    readl(rx->top + T7_RX_TOP_MISC_STAT0) & 1,
+				    readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & 1,
+				    readl(rx->top + T7_RX_TOP_METER_CABLE_STAT),
+				    readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
+				    cable, link->previous_cable, rx->uhd60 ? 4 : 1);
 	WRITE_ONCE(link->ready, false);
 	/* A live or quarantined MIF owns its receiver until DMA is safe. */
 	if (link->users) {
