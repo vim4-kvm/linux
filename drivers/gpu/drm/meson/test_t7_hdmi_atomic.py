@@ -134,6 +134,13 @@ int main(void) {
                 (depth==10 ? MEDIA_BUS_FMT_RGB101010_1X30 : MEDIA_BUS_FMT_RGB888_1X24) :
                 (depth==10 ? MEDIA_BUS_FMT_YUV10_1X30 : MEDIA_BUS_FMT_YUV8_1X24)));
             free(bus);
+            /* The opt-out path keeps its fixed 8-bit YUV input contract. */
+            tx.atomic_color=false;
+            count=99;
+            bus=meson_hdmitx21_bridge_get_input_bus_fmts(NULL,NULL,&crtc,&conn,0,&count);
+            assert(bus && count==1 && *bus==MEDIA_BUS_FMT_YUV8_1X24);
+            free(bus);
+            tx.atomic_color=true;
         }
     }
     conn.hdmi.output_format=DRM_OUTPUT_COLOR_FORMAT_RGB444;conn.hdmi.output_bpc=8;
