@@ -770,6 +770,10 @@ static int t7_vdin_thread(void *data)
 			continue;
 		}
 		buffer = vdin->direct_dma ? slot->buffer : t7_vdin_next_buffer(vdin);
+		/* READY proves frame completion even if RX rejects its contents. */
+		buffer->vb.vb2_buf.timestamp = slot->timestamp;
+		buffer->vb.sequence = slot->sequence;
+		buffer->vb.field = V4L2_FIELD_NONE;
 		mutex_lock(&vdin->lock);
 		ret = t7_hdmirx_check_capture(vdin->receiver, &reason);
 		if (!vdin->direct_dma)
@@ -786,9 +790,6 @@ static int t7_vdin_thread(void *data)
 			/* Publish CPU writes to the coherent output before handing it off. */
 			dma_wmb();
 			ret = t7_hdmirx_check_capture(vdin->receiver, &reason);
-			buffer->vb.vb2_buf.timestamp = slot->timestamp;
-			buffer->vb.sequence = slot->sequence;
-			buffer->vb.field = V4L2_FIELD_NONE;
 		}
 		if (!vdin->direct_dma)
 			dma_sync_single_for_device(vdin->dev, slot->dma, vdin->frame_size, DMA_FROM_DEVICE);

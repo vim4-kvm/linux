@@ -323,9 +323,13 @@ static void check_direct(void) {
      */
     for (unsigned int check=1;check<=2;check++) {
         setup_direct(b); assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+        receiver.ring_sequence=41;
+        b[0].vb.sequence=1234; b[0].vb.vb2_buf.timestamp=9876;
         step(1,false); __atomic_store_n(&transient_after,check,__ATOMIC_RELEASE);
         step(2,false); await(&completed,1);
         assert(b[0].vb.vb2_buf.state==VB2_BUF_STATE_ERROR);
+        assert(b[0].vb.sequence==41 && b[0].vb.vb2_buf.timestamp &&
+               b[0].vb.vb2_buf.timestamp!=9876);
         assert(!receiver.queue.error && !receiver.ring_stopping && receiver.receiver_lease);
         for (unsigned int i=1;i<4;i++) { step(i+2,false); await(&completed,i+1); }
         for (unsigned int i=1;i<4;i++) assert(b[i].vb.vb2_buf.state==VB2_BUF_STATE_DONE);
