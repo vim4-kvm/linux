@@ -22,7 +22,7 @@ struct meson_t7_window {
 struct meson_t7_modeset {
 	struct regmap *clkctrl;
 	void __iomem *pll, *vid2, *vid_div;
-	struct meson_t7_window vcbus[9];
+	struct meson_t7_window vcbus[10];
 };
 
 int meson_t7_clock_calculate(unsigned int pixel_khz, struct meson_t7_clock *clock)
@@ -297,6 +297,40 @@ static void meson_t7_osd_matrix(struct meson_t7_modeset *hw, bool bt2020)
 	meson_t7_write(hw, 0x391d, 1);
 }
 
+static void meson_t7_output_matrix(struct meson_t7_modeset *hw,
+				   const struct drm_connector_state *conn)
+{
+	bool rgb = conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_RGB444;
+	bool limited = conn->hdmi.is_limited_range;
+	/* POST2 follows the BT.709 limited blend domain. Coefficients have ten
+	 * fractional bits; pre/post offsets are in the ten-bit pixel domain.
+	 * Program while ENC2 and fetch are disabled, enable only after all words.
+	 */
+	static const int coeff[2][9] = {
+		{ 1196, 0, 1841, 1196, -219, -547, 1196, 2169, 0 },
+		{ 1024, 0, 1578, 1024, -188, -469, 1024, 1858, 0 },
+	};
+	const int *m = coeff[limited];
+	unsigned int i;
+
+	meson_t7_write(hw, 0x39ad, 0);
+	if (!rgb)
+		return;
+	for (i = 0; i < 4; i++)
+		meson_t7_write(hw, 0x39a0 + i,
+			       ((m[2 * i] & 0x1fff) << 16) | (m[2 * i + 1] & 0x1fff));
+	meson_t7_write(hw, 0x39a4, m[8] & 0x1fff);
+	meson_t7_write(hw, 0x39a5, 0);
+	meson_t7_write(hw, 0x39a6, 0);
+	meson_t7_write(hw, 0x39a7, 0);
+	meson_t7_write(hw, 0x39a8, 0);
+	meson_t7_write(hw, 0x39a9, limited ? (64 << 16) | 64 : 0);
+	meson_t7_write(hw, 0x39aa, limited ? 64 : 0);
+	meson_t7_write(hw, 0x39ab, (0x7c0 << 16) | 0x600);
+	meson_t7_write(hw, 0x39ac, 0x600);
+	meson_t7_write(hw, 0x39ad, 1);
+}
+
 int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
 			   const struct drm_display_mode *mode,
 			   const struct drm_connector_state *conn)
@@ -312,6 +346,8 @@ int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
 	if (ret)
 		return ret;
 	meson_t7_modeset_disable(hw);
+	if (conn)
+		meson_t7_output_matrix(hw, conn);
 	ret = meson_t7_pll_set(hw, &link.pll, link.tmds_khz > 340000);
 	if (ret)
 		return ret;
@@ -324,7 +360,8 @@ int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
 	meson_t7_write(hw, VPU_HDMI_SETTING, BIT(1) |
 			((mode->flags & DRM_MODE_FLAG_PHSYNC) ? BIT(2) : 0) |
 			((mode->flags & DRM_MODE_FLAG_PVSYNC) ? BIT(3) : 0) |
-			(3 << 16) |
+			((conn && conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_RGB444) ?
+			 0 : (3 << 16)) |
 			(yuv420 ? (4 << 5) | BIT(20) : 0));
 	meson_t7_write(hw, 0x2743, (2 << 22) | (bpc == 8 ? BIT(10) : 0) |
 			(2 << 2) | (yuv420 ? 2 : 0));
@@ -359,6 +396,7 @@ struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev)
 		{ "hdmi-setting", VPU_HDMI_SETTING, VPU_HDMI_SETTING },
 		{ "hdmi-format", 0x2743, 0x2743 },
 		{ "osd-matrix", 0x3910, 0x391d },
+		{ "post2-matrix", 0x39a0, 0x39ad },
 	};
 	struct meson_t7_modeset *hw;
 	struct platform_device *clock_device;
@@ -416,6 +454,13 @@ struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev)
 								   windows[i].name);
 		u32 offset = i ? 0 : 0x800;
 		u32 first = windows[i].first, last = windows[i].last;
+
+		/* Legacy M1/M2 DTs do not select atomic HDMI colour. */
+		if (!res && i == 9) {
+			if (of_property_read_bool(pdev->dev.of_node, "amlogic,managed-osd-sram"))
+				return ERR_PTR(-EINVAL);
+			continue;
+		}
 
 		if (i == 3 &&
 		    of_property_read_bool(pdev->dev.of_node, "amlogic,managed-osd-sram")) {

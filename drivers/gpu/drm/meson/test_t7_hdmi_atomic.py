@@ -46,6 +46,7 @@ typedef uint32_t u32;
 #define DRM_MODE_COLORIMETRY_BT2020_YCC 10
 #define DRM_HDMI_BROADCAST_RGB_LIMITED 2
 #define HDMI_QUANTIZATION_RANGE_FULL 2
+#define HDMI_QUANTIZATION_RANGE_LIMITED 1
 #define HDMI_QUANTIZATION_RANGE_DEFAULT 0
 #define HDMI_YCC_QUANTIZATION_RANGE_LIMITED 0
 #define HDMI_COLORIMETRY_ITU_709 2
@@ -119,8 +120,12 @@ int main(void) {
     assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn) && affected);
     assert(conn.hdmi.infoframes.avi.data.avi.quantization_range==HDMI_QUANTIZATION_RANGE_FULL);
     conn.hdmi.broadcast_rgb=DRM_HDMI_BROADCAST_RGB_LIMITED;
-    assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==-EINVAL);
+    conn.hdmi.is_limited_range=true;
+    assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn));
+    assert(conn.hdmi.infoframes.avi.data.avi.quantization_range==HDMI_QUANTIZATION_RANGE_LIMITED);
+    assert(conn.hdmi.is_limited_range); /* Preserve the standard helper's decision. */
     conn.hdmi.broadcast_rgb=0;
+    conn.hdmi.is_limited_range=false;
     conn.hdmi.output_format=DRM_OUTPUT_COLOR_FORMAT_YCBCR444;
     assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn));
     assert(conn.hdmi.infoframes.avi.data.avi.quantization_range==0);
