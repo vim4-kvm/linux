@@ -6,12 +6,10 @@ config VIDEO_MESON_T7_HDMIRX
 	depends on SND_SOC
 	help
 	  Manage the T7 HDMI receiver power domain and clocks, and expose
-	  read-only cable and register status through debugfs. This initial
-	  driver supports resource, cable detection and firmware EDID/DDC/HPD
-	  bring-up, plus opt-in fixed-rate PHY and TMDS core initialization.
-	  Automatic PHY tuning and production V4L2 capture need further work;
-	  the separate VDIN experiment captures progressive 1080p60 input
-	  through a private DMA ring and V4L2 copy queue.
+	  cable and register status through debugfs. Supports firmware EDID,
+	  DDC/HPD, measured progressive input timings and HDMI PCM capture.
+	  PHY, HDR and audio paths still require explicit module parameters.
+	  The separate VDIN experiment exposes video capture through V4L2.
 
 	  To compile this driver as a module, choose M here.
 
@@ -21,9 +19,9 @@ config VIDEO_MESON_T7_VDIN_TEST
 	depends on VIDEO_DEV && OF && HAS_DMA
 	select VIDEOBUF2_DMA_CONTIG
 	help
-	  Exclusive 1080p60 RGB capture experiment for the dedicated VIM4
-	  receiver DTB. Owns the VPU register window while DRM is disabled.
-	  Exposes debugfs snapshots and a V4L2 MMAP queue with DMA-buf export.
-	  Physically contiguous, coherent output buffers are
-	  copied from a private cached DMA ring with explicit CPU/device
-	  synchronization. This is not a production capture driver.
+	  Progressive RGB or NV12 capture, including measured UHD timings,
+	  for the dedicated receiver DTBs. Exposes V4L2 streaming and DMA-buf
+	  export with either a private copy ring or leased direct DMA buffers.
+	  Owns the VPU register window; only the split-resource profile permits
+	  coexistence with the fixed OSD1 display handoff. This experimental
+	  resource and DMA ownership model still needs upstream integration.
