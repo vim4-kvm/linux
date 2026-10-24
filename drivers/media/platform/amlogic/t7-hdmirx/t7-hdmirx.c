@@ -1142,10 +1142,20 @@ static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reas
 		ret = t7_hdmirx_measure_live(rx, yuv420, &measured);
 		if (!ret && rx->link && rx->link->users &&
 		    !t7_hdmirx_same_measurement(&measured, &rx->lease_mode)) {
-			pr_info_ratelimited("t7-hdmirx lease timing changed: measured=%ux%u/%u lease=%ux%u/%u\n",
+			pr_info_ratelimited("t7-hdmirx lease timing changed: measured=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x lease=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
 					    measured.width, measured.height, measured.ticks,
+					    measured.hlow, measured.hhigh,
+					    measured.hfront, measured.hback,
+					    measured.vlow, measured.vhigh,
+					    measured.vfront, measured.vback,
+					    measured.polarity,
 					    rx->lease_mode.width, rx->lease_mode.height,
-					    rx->lease_mode.ticks);
+					    rx->lease_mode.ticks,
+					    rx->lease_mode.hlow, rx->lease_mode.hhigh,
+					    rx->lease_mode.hfront, rx->lease_mode.hback,
+					    rx->lease_mode.vlow, rx->lease_mode.vhigh,
+					    rx->lease_mode.vfront, rx->lease_mode.vback,
+					    rx->lease_mode.polarity);
 			return t7_hdmirx_video_error(reason, "lease-timing", -ENOLINK);
 		}
 		return t7_hdmirx_video_error(reason, "measurement", ret);
