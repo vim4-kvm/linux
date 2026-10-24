@@ -1020,8 +1020,15 @@ static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
 	    (m->width & 1) || !m->ticks ||
 	    m->ticks < reference / 120 || m->ticks > reference / 20 ||
 	    m->width + m->hfront + hsync + m->hback != m->hlow + m->hhigh ||
-	    m->height + m->vfront + vsync + m->vback != m->vlow + m->vhigh)
+	    m->height + m->vfront + vsync + m->vback != m->vlow + m->vhigh) {
+		if (rx->link && READ_ONCE(rx->link->ready))
+			pr_info_ratelimited("t7-hdmirx invalid qualified FDET: %ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
+					    m->width, m->height, m->ticks,
+					    m->hlow, m->hhigh, m->hfront, m->hback,
+					    m->vlow, m->vhigh, m->vfront, m->vback,
+					    m->polarity);
 		return -ERANGE;
+	}
 	pixelclock = div_u64((u64)reference * (m->hlow + m->hhigh) * scale *
 			    (m->vlow + m->vhigh), m->ticks);
 	if (pixelclock < 24000000 || pixelclock > 600000000)
@@ -2118,9 +2125,15 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		goto out;
 	}
 	if (READ_ONCE(link->ready))
-		pr_info_ratelimited("t7-hdmirx link readiness revoked: reason=%s error=%d retries=%u users=%u configured=%u\n",
+		pr_info_ratelimited("t7-hdmirx link readiness revoked: reason=%s error=%d retries=%u users=%u configured=%u pll=%u sqo=%u align=%u cable=%#x tmds=%#x sample=%u previous=%u ratio=%u\n",
 				    reason, ret, link->timing_retries,
-				    link->users, link->configured);
+				    link->users, link->configured,
+				    !!(readl(rx->phy + T7_RX_PHY_APLL0) & T7_RX_PHY_PLL_LOCK),
+				    readl(rx->top + T7_RX_TOP_MISC_STAT0) & 1,
+				    readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & 1,
+				    readl(rx->top + T7_RX_TOP_METER_CABLE_STAT),
+				    readl(rx->top + T7_RX_TOP_METER_HDMI_STAT),
+				    cable, link->previous_cable, rx->uhd60 ? 4 : 1);
 	WRITE_ONCE(link->ready, false);
 	link->video_samples = 0;
 	/* A live or quarantined MIF owns its receiver until DMA is safe. */
