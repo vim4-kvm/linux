@@ -23,6 +23,7 @@ properties:
           - amlogic,g12a-audio-clkc
           - amlogic,s4-audio-clkc
           - amlogic,sm1-audio-clkc
+          - amlogic,t7-audio-clkc
       - items:
           - const: amlogic,t7-audio-clkc
           - const: amlogic,s4-audio-clkc
@@ -126,6 +127,7 @@ allOf:
               - amlogic,g12a-audio-clkc
               - amlogic,s4-audio-clkc
               - amlogic,sm1-audio-clkc
+              - amlogic,t7-audio-clkc
     then:
       required:
         - '#reset-cells'
@@ -138,12 +140,22 @@ allOf:
           contains:
             enum:
               - amlogic,s4-audio-clkc
+              - amlogic,t7-audio-clkc
     then:
       required:
         - power-domains
     else:
       properties:
         power-domains: false
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: amlogic,t7-audio-clkc
+    then:
+      properties:
+        reg:
+          minItems: 2
 additionalProperties: false
 
 examples:

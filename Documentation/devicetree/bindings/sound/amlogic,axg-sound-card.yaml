@@ -42,6 +42,24 @@ patternProperties:
       There should be at least one (and probably more) subnode of this type
 
     properties:
+      convert-rate:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        minimum: 8000
+        maximum: 192000
+        description: |
+          Fixed backend sample rate when a hardware converter separates this
+          interface from the PCM frontend. Other backends without conversion
+          keep the frontend parameters. This property does not create a
+          software converter.
+
+      convert-channels:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        minimum: 1
+        maximum: 128
+        description: |
+          Fixed backend channel count for a hardware channel combiner or
+          converter. Use only where the DAPM path contains that hardware.
+
       dai-format:
         $ref: /schemas/types.yaml#/definitions/string
         enum: [ i2s, left-j, dsp_a ]
