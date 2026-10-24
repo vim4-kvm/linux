@@ -119,6 +119,8 @@ struct pm_pd_s {
  * @mdec_test_passed: Explicit MDEC read and subsequent power-off succeeded.
  * @mdec_test_value: Cached MDEC_PIC_DC_CTRL sample.
  * @secure_swap: Scratch G supplied by the secure microcode loader.
+ * @irq_count: Hard IRQ entries, including entries without an active job.
+ * @threaded_irq_count: Threaded IRQ entries.
  * @nic3_dev: Parent domain held explicitly for DOS-top access before VDEC on.
  * @nic3_held: An explicit parent runtime PM reference is owned.
  * @clocks_held: DOS bus and VDEC functional clocks are owned.
@@ -151,6 +153,8 @@ struct aml_vdec_hw {
 	bool mdec_test_passed;
 	u32 mdec_test_value;
 	u32 secure_swap;
+	u32 irq_count;
+	u32 threaded_irq_count;
 	struct device *nic3_dev;
 	bool nic3_held;
 	bool clocks_held;
