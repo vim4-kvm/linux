@@ -245,9 +245,8 @@ static int fops_vcodec_release(struct file *file)
 		    pm_runtime_put_sync_suspend(&dec_dev->plat_dev->dev) < 0)
 			aml_vdec_fault(ctx);
 	}
-	if (!dec_dev->dec_hw->faulted) {
+	if (!dec_dev->dec_hw->faulted)
 		kfree(ctx);
-	}
 	mutex_unlock(&dec_dev->dev_mutex);
 
 	return 0;
@@ -372,9 +371,8 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		v4l2_err(&dev->v4l2_dev, "Failed to register media device");
 		goto err_media_dev_register;
 	}
-	if (pdata->has_dbus_ctrl) {
+	if (pdata->has_dbus_ctrl)
 		return 0;
-	}
 	ret = vdec_enable(dev->dec_hw);
 	if (ret) {
 		media_device_unregister(&dev->mdev);

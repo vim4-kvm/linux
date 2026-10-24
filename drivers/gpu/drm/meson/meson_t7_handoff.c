@@ -677,8 +677,9 @@ static void meson_t7_handoff_enable(struct drm_crtc *crtc,
 			meson_t7_handoff_scanout_layers(display, state, false);
 		else
 			meson_t7_handoff_scanout(display, plane->visible ? plane->fb : NULL,
-					 plane->visible ?
-					 drm_fb_dma_get_gem_addr(plane->fb, plane, 0) : 0, plane);
+						 plane->visible ?
+						 drm_fb_dma_get_gem_addr(plane->fb, plane, 0) : 0,
+						 plane);
 		if (new->event) {
 			if (display->faulted) {
 				meson_t7_handoff_abort_event(crtc, new);
