@@ -1124,9 +1124,15 @@ meson_hdmitx21_bridge_get_input_bus_fmts(struct drm_bridge *bridge,
 	if (!fmts)
 		return NULL;
 
-	/* Framebuffers are RGB; the retained OSD matrix precedes this bus. */
-	fmts[0] = bridge_to_hdmitx(bridge)->atomic_color && conn_state->hdmi.output_bpc == 10 ?
-		MEDIA_BUS_FMT_YUV10_1X30 : MEDIA_BUS_FMT_YUV8_1X24;
+	/* The encoder's POST2 precedes this bus and owns RGB range conversion. */
+	if (bridge_to_hdmitx(bridge)->atomic_color &&
+	    conn_state->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_RGB444)
+		fmts[0] = conn_state->hdmi.output_bpc == 10 ?
+			MEDIA_BUS_FMT_RGB101010_1X30 : MEDIA_BUS_FMT_RGB888_1X24;
+	else if (bridge_to_hdmitx(bridge)->atomic_color && conn_state->hdmi.output_bpc == 10)
+		fmts[0] = MEDIA_BUS_FMT_YUV10_1X30;
+	else
+		fmts[0] = MEDIA_BUS_FMT_YUV8_1X24;
 	*num_input_fmts = 1;
 
 	return fmts;
