@@ -75,6 +75,7 @@ typedef uint64_t u64;
 #define H_MIRROR 1
 #define V_MIRROR 2
 #define MODE_3D_ENABLE 1
+#define MAX_VSKIP_COUNT 8
 '''
 body += definitions + '\n' + linear_struct + '\n' + mif_struct + '\n' + position + '\n'
 body += without_includes((directory / 'meson_t7_video.h').read_text())
@@ -95,7 +96,8 @@ struct video_layer_s {
     u8 vpp_index;
 };
 static u32 process_3d_type;
-struct vpp_frame_par_s {u32 hscale_skip_count;};
+struct vpp_frame_par_s {u32 hscale_skip_count,vscale_skip_count;};
+static bool framepacking_support;
 static struct {
     u32 display_module;
     struct {void (*rdma_wr)(u32,u32); void (*rdma_wr_bits)(u32,u32,unsigned int,unsigned int);} rdma_func[1];
@@ -121,39 +123,47 @@ body += 'u32 ls, le, h_skip=1; u8 vpp_index=0;\n' + scope + '\n}\n'
 for index, name in enumerate(('vd1_set_dcu', 'vdx_set_dcu')):
     dcu = function(hw, name)
     # Run the original control and formatter blocks, with progressive NV12/NV21
-    # inputs and no DI, Dolby Vision, interlace, skip, mirror or MVC state.
+    # inputs and no DI, Dolby Vision, interlace, mirror or MVC state.
     start = (dcu.rindex('if (cur_dev->display_module != C3_DISPLAY_MODULE)\n\t\tr =')
              if not index else dcu.rindex('r = (3 << VDIF_URGENT_BIT)'))
     control = dcu[start:dcu.index('/* FIXME: don\'t use glayer_info[', start)]
     formatter = dcu[dcu.rindex('/* chroma formatter */'):dcu.index('/* LOOP/SKIP pattern */')]
-    body += f'static void vendor_dcu{index}(u32 type) {{\n'
+    repeat = dcu[dcu.index('/* LOOP/SKIP pattern */'):dcu.index('/* picture 0/1 control */')]
+    patterns = re.search(r'static const u32 vpat\[.*?};', dcu, re.S)[0]
+    body += f'static void vendor_dcu{index}(u32 type,u32 skip) {{\n'
+    body += patterns + '\n'
     body += r'''
-    u32 r, hphase=0, hformatter, vformatter, vphase, vini_phase, vrepeat;
+    u32 r, hphase=0, hformatter, vformatter, vphase, vini_phase, vrepeat,pat,loop;
     u8 vpp_index=0;
     bool is_mvc=false;
-    struct vpp_frame_par_s params={0}, *frame_par=&params;
+    struct vpp_frame_par_s params={.vscale_skip_count=skip}, *frame_par=&params;
     struct vframe_s frame={.type=type, .flag=VFRAME_FLAG_VIDEO_LINEAR}, *vf=&frame;
     struct {u32 global_debug;} layer_data={0}, *layer=&layer_data;
     struct hw_vd_reg_s mif={.vd_if0_gen_reg=1, .vd_if0_gen_reg2=2,
-                           .viu_vd_fmt_ctrl=3}, *vd_mif_reg=&mif, *vd2_mif_reg=&mif;
+        .viu_vd_fmt_ctrl=3,.vd_if0_rpt_loop=4,.vd_if0_luma0_rpt_pat=5,
+        .vd_if0_chroma0_rpt_pat=6,.vd_if0_luma1_rpt_pat=7,.vd_if0_chroma1_rpt_pat=8},
+        *vd_mif_reg=&mif, *vd2_mif_reg=&mif;
 '''
-    body += control + formatter + '\n}\n'
+    body += control + formatter + repeat + '\n}\n'
 body += r'''
-static void compare(unsigned int index, u32 width, u32 height, u32 pitch, bool nv21)
+static void compare(unsigned int index, u32 width, u32 height, u32 pitch, bool nv21,u32 skip)
 {
     struct meson_t7_video_frame f={.format=nv21?DRM_FORMAT_NV21:DRM_FORMAT_NV12,
         .width=width, .height=height, .x=2, .y=4, .crop_width=width-4, .crop_height=height-8,
+        .vskip=skip,
         .pitch={pitch,pitch+32}, .address={0x100000,0x2000000},
         .size={(u64)pitch*height,(u64)(pitch+32)*height/2}};
     struct meson_t7_video_mif m;
     assert(!meson_t7_video_mif_prepare(&f,index,&m));
     assert(!(m.gen & 1));
-    (index ? vendor_dcu1 : vendor_dcu0)(nv21?VIDTYPE_VIU_NV21:VIDTYPE_VIU_NV12);
+    (index ? vendor_dcu1 : vendor_dcu0)(nv21?VIDTYPE_VIU_NV21:VIDTYPE_VIU_NV12,skip);
     if (m.gen != (regs[1] & ~1U))
         fprintf(stderr,"index=%u gen=%x vendor=%x\n",index,m.gen,regs[1]);
     assert(m.gen == (regs[1] & ~1U));
     assert(m.gen2 == regs[2]);
     assert(m.format_ctrl == regs[3]);
+    assert(regs[4]==0);
+    for(unsigned int i=5;i<=8;i++) assert(m.repeat_pattern==regs[i]);
     u32 base=index?SC2_VD2_IF0_GEN_REG:SC2_VD1_IF0_GEN_REG;
     assert(m.base==base);
     struct video_layer_s l={.vd_mif_linear_reg={base+0x20,base+0x21,base+0x22,
@@ -199,6 +209,13 @@ static void compare(unsigned int index, u32 width, u32 height, u32 pitch, bool n
     f.address[1]=UINT32_MAX-15;
     assert(meson_t7_video_mif_prepare(&f,index,&m)==-ERANGE);
     f.address[1]=0x2000000;
+    f.vskip=2;
+    assert(meson_t7_video_mif_prepare(&f,index,&m)==-EINVAL);
+    f.vskip=1; f.y=2;
+    assert(meson_t7_video_mif_prepare(&f,index,&m)==-EINVAL);
+    f.y=4; f.crop_height-=2;
+    assert(meson_t7_video_mif_prepare(&f,index,&m)==-EINVAL);
+    f.crop_height+=2; f.vskip=skip;
     f.x=1;
     assert(meson_t7_video_mif_prepare(&f,index,&m)==-EINVAL);
     f.x=width;
@@ -217,7 +234,9 @@ int main(void)
         for (unsigned int index=0;index<2;index++)
             for (unsigned int uv=0;uv<2;uv++)
                 for (unsigned int extra=0;extra<2;extra++)
-                    compare(index,geometry[i][0],geometry[i][1],ALIGN(geometry[i][0],64)+extra*32,uv);
+                    for(unsigned int skip=0;skip<2;skip++)
+                        compare(index,geometry[i][0],geometry[i][1],
+                                ALIGN(geometry[i][0],64)+extra*32,uv,skip);
 }
 '''
 with tempfile.TemporaryDirectory() as work:
@@ -228,4 +247,4 @@ with tempfile.TemporaryDirectory() as work:
                     '-fsanitize=undefined', str(root / 'video.c'), '-o', str(root / 'video')],
                    check=True)
     subprocess.run([str(root / 'video')], check=True)
-print('T7 MIF: 64 vendor address/control/formatter cases and rejection paths passed')
+print('T7 MIF: 128 vendor address/control/formatter/line-skip cases and rejection paths passed')

@@ -43,6 +43,11 @@ int meson_t7_video_mif_prepare(const struct meson_t7_video_frame *frame,
 		return -EINVAL;
 	if (frame->format != DRM_FORMAT_NV12 && frame->format != DRM_FORMAT_NV21)
 		return -EINVAL;
+	/* Progressive vskip=1 uses the vendor's 0x8 pattern on both Y and UV.
+	 * Keep complete pairs of chroma rows; other skip factors are not exposed.
+	 */
+	if (frame->vskip > 1 || (frame->vskip && ((frame->y | frame->crop_height) & 3)))
+		return -EINVAL;
 	if (!frame->width || !frame->height || frame->width > 3840 || frame->height > 2160 ||
 	    !frame->crop_width || !frame->crop_height ||
 	    ((frame->width | frame->height | frame->x | frame->y |
@@ -73,6 +78,7 @@ int meson_t7_video_mif_prepare(const struct meson_t7_video_frame *frame,
 	next.chroma_x = (frame->x >> 1) | (right >> 1) << 16;
 	next.chroma_y = (frame->y >> 1) | (bottom >> 1) << 16;
 	next.format_width = frame->crop_width << 16 | frame->crop_width >> 1;
+	next.repeat_pattern = frame->vskip ? 0x8 : 0;
 	/* Progressive 4:2:0: H 2:1, V phase 8/16, initial phase 12, repeat line 0. */
 	next.format_ctrl = BIT(29) | BIT(21) | BIT(20) | BIT(16) | 12 << 8 | 8 << 1 | BIT(0);
 	/* Urgent Y/C, eight hold lines, repeat chroma, linear separate planes. */

@@ -130,6 +130,17 @@ static int video_frame(struct drm_plane_state *state, struct meson_t7_video_fram
 	return 0;
 }
 
+static u32 video_vskip(const struct meson_t7_video_frame *frame,
+		       const struct drm_plane_state *state,
+		       const struct drm_crtc_state *crtc)
+{
+	const struct drm_display_mode *mode = &crtc->adjusted_mode;
+
+	/* T7 vpp_process_speed_check(): uncompressed 4K downscale above 30Hz. */
+	return frame->crop_height > 2048 && drm_rect_height(&state->dst) < 2048 &&
+		(u64)mode->clock * 1000 > 30ULL * mode->htotal * mode->vtotal;
+}
+
 static int video_plane_check(struct drm_plane *plane, struct drm_atomic_commit *commit)
 {
 	struct drm_plane_state *state = drm_atomic_get_new_plane_state(commit, plane);
@@ -140,11 +151,13 @@ static int video_plane_check(struct drm_plane *plane, struct drm_atomic_commit *
 	struct meson_t7_video_mif mif;
 	const struct drm_display_mode *mode;
 	u64 required;
-	u32 height;
+	u32 height, input_height;
 	int ret;
 
 	if (state->crtc && !meson_t7_display_ready(state->crtc))
 		return -EIO;
+	if (state->crtc && !crtc)
+		return -EINVAL;
 	ret = drm_atomic_helper_check_plane_state(state, crtc, 1 << 14, 4 << 16, true, false);
 	if (ret || !state->visible)
 		return ret;
@@ -153,10 +166,12 @@ static int video_plane_check(struct drm_plane *plane, struct drm_atomic_commit *
 	ret = video_frame(state, &frame);
 	if (ret)
 		return ret;
+	frame.vskip = video_vskip(&frame, state, crtc);
+	input_height = frame.crop_height >> frame.vskip;
 	ret = meson_t7_video_mif_prepare(&frame, 0, &mif);
 	if (ret)
 		return ret;
-	ret = meson_t7_video_phase_prepare(frame.crop_width, frame.crop_height,
+	ret = meson_t7_video_phase_prepare(frame.crop_width, input_height,
 					   drm_rect_width(&state->dst),
 					   drm_rect_height(&state->dst), &phase);
 	if (ret)
@@ -165,12 +180,8 @@ static int video_plane_check(struct drm_plane *plane, struct drm_atomic_commit *
 	height = drm_rect_height(&state->dst);
 	if (!mode->htotal || !mode->vtotal || !mode->clock)
 		return -EINVAL;
-	/* Vendor vpp_process_speed_check(): these uncompressed frames require vskip. */
-	if (frame.crop_height > 2048 && height < 2048 &&
-	    (u64)mode->clock * 1000 > 30ULL * mode->htotal * mode->vtotal)
-		return -EINVAL;
 	/* VPP_SPEED_FACTOR=0x110; cancel vtotal and reduce 0x110/256 to 17/16. */
-	required = div_u64(17ULL * frame.crop_width * max(frame.crop_height, height) *
+	required = div_u64(17ULL * frame.crop_width * max(input_height, height) *
 			   mode->clock * 1000, 16 * height * mode->htotal);
 	if (required > meson_t7_display_clock_rate(state->crtc))
 		return -EINVAL;
@@ -349,6 +360,7 @@ int meson_t7_video_flip(struct meson_t7_video_kms *video, struct drm_atomic_comm
 		struct drm_plane_state *old = drm_atomic_get_old_plane_state(commit, plane);
 		struct drm_plane_state *state = drm_atomic_get_new_plane_state(commit, plane);
 		struct meson_t7_video_frame frame;
+		struct drm_crtc_state *crtc;
 
 		if (!old || !state)
 			return 0;
@@ -357,6 +369,12 @@ int meson_t7_video_flip(struct meson_t7_video_kms *video, struct drm_atomic_comm
 			return 0;
 		if (!enabled[i])
 			continue;
+		/* Modeset blanking disconnected the MIF, even if the FB geometry is
+		 * unchanged. Rebuild its PPS/skip profile and reconnect in two phases.
+		 */
+		crtc = drm_atomic_get_new_crtc_state(commit, state->crtc);
+		if (!crtc || drm_atomic_crtc_needs_modeset(crtc))
+			return 0;
 		if (state->crtc != old->crtc || state->normalized_zpos != old->normalized_zpos ||
 		    !drm_rect_equals(&state->src, &old->src) ||
 		    !drm_rect_equals(&state->dst, &old->dst) ||
@@ -399,6 +417,8 @@ int meson_t7_video_build(struct meson_t7_video_kms *video, struct drm_atomic_com
 	if (ret)
 		return ret;
 	for (i = 0; i < 2; i++) {
+		struct drm_crtc_state *crtc;
+
 		states[i] = drm_atomic_get_new_plane_state(commit, &video->planes[i]);
 		if (blank || !states[i] || !states[i]->visible || !states[i]->fb) {
 			states[i] = NULL;
@@ -407,6 +427,10 @@ int meson_t7_video_build(struct meson_t7_video_kms *video, struct drm_atomic_com
 		ret = video_frame(states[i], &frames[i]);
 		if (ret)
 			return ret;
+		crtc = drm_atomic_get_new_crtc_state(commit, states[i]->crtc);
+		if (!crtc)
+			return -EINVAL;
+		frames[i].vskip = video_vskip(&frames[i], states[i], crtc);
 		ret = meson_t7_video_mif_prepare(&frames[i], i, &mif[i]);
 		if (ret)
 			return ret;
@@ -414,10 +438,12 @@ int meson_t7_video_build(struct meson_t7_video_kms *video, struct drm_atomic_com
 	for (i = 0; i < 2; i++) {
 		u32 base = 0x4800 + i * 0x80;
 		struct meson_t7_video_mif *m = &mif[i];
+		u32 input_height;
 
 		video_write(&next, base, enable && states[i] ? m->gen | BIT(0) : 0);
 		if (!states[i])
 			continue;
+		input_height = frames[i].crop_height >> frames[i].vskip;
 		if (enable) {
 			source[ports[i]] |= (i + 1) << 8;
 			if (!i)
@@ -427,7 +453,8 @@ int meson_t7_video_build(struct meson_t7_video_kms *video, struct drm_atomic_com
 			continue;
 		}
 		ret = meson_t7_video_pps_build(next, pairs - (next - table) / 2, i,
-					       frames[i].crop_width, frames[i].crop_height,
+					       frames[i].crop_width,
+					       input_height,
 					       drm_rect_width(&states[i]->dst),
 					       drm_rect_height(&states[i]->dst),
 					       video_read(video, i ? 0x394c : 0x1d36));
@@ -444,7 +471,7 @@ int meson_t7_video_build(struct meson_t7_video_kms *video, struct drm_atomic_com
 		video_write(&next, base + 5, m->chroma_x);
 		video_write(&next, base + 6, m->chroma_y);
 		for (j = 0xb; j <= 0x11; j++)
-			video_write(&next, base + j, 0);
+			video_write(&next, base + j, j >= 0xc && j <= 0xf ? m->repeat_pattern : 0);
 		video_write(&next, base + 0x19,
 			    (video_read(video, base + 0x19) & ~m->gen2_mask) | m->gen2);
 		video_write(&next, base + 0x1c,
@@ -452,7 +479,7 @@ int meson_t7_video_build(struct meson_t7_video_kms *video, struct drm_atomic_com
 		video_write(&next, base + 0x1d, m->format_ctrl);
 		video_write(&next, base + 0x1e, m->format_width);
 		video_write(&next, base + 0x38, video_read(video, base + 0x38) & ~GENMASK(14, 13));
-		video_write(&next, 0x1a57 + i, frames[i].crop_height << 16 | frames[i].crop_width);
+		video_write(&next, 0x1a57 + i, input_height << 16 | frames[i].crop_width);
 		/* SDR YUV already matches the blend space; bypass only this input's HDR core. */
 		video_write(&next, i ? 0x3850 : 0x3800,
 			    video_read(video, i ? 0x3850 : 0x3800) & ~(BIT(13) | GENMASK(4, 0)));
@@ -465,9 +492,9 @@ int meson_t7_video_build(struct meson_t7_video_kms *video, struct drm_atomic_com
 			    states[i]->dst.y1 << 16 | (states[i]->dst.y2 - 1));
 		if (!i) {
 			video_write(&next, 0x1d01, frames[i].crop_width);
-			video_write(&next, 0x1d02, frames[i].crop_height);
+			video_write(&next, 0x1d02, input_height);
 			video_write(&next, 0x1da6,
-				    frames[i].crop_width << 16 | frames[i].crop_height);
+				    frames[i].crop_width << 16 | input_height);
 			video_write(&next, 0x1d1a, frames[i].crop_width - 1);
 			video_write(&next, 0x1d1b, 2303);
 			video_write(&next, 0x1d20, frames[i].crop_width);

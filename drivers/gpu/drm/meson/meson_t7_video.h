@@ -8,6 +8,7 @@
 struct meson_t7_video_frame {
 	u32 format, width, height;
 	u32 x, y, crop_width, crop_height;
+	u32 vskip;
 	u32 pitch[2];
 	u64 address[2], size[2];
 };
@@ -17,6 +18,7 @@ struct meson_t7_video_mif {
 	u32 address[3], stride0, stride1;
 	u32 luma_x, luma_y, chroma_x, chroma_y;
 	u32 format_width, format_ctrl;
+	u32 repeat_pattern;
 	u32 gen, gen2, gen3;
 	u32 gen2_mask, gen3_mask, stride1_mask;
 };

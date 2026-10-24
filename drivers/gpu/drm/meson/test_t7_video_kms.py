@@ -156,7 +156,20 @@ int main(void)
     assert(!video_plane_check(&video.planes[0],&commit));
     assert(!video_plane_check(&video.planes[1],&commit));
     running.adjusted_mode.clock=148500;
-    assert(video_plane_check(&video.planes[0],&commit)==-EINVAL); /* 4K->1080p60 vskip. */
+    assert(!video_plane_check(&video.planes[0],&commit)); /* 4K->1080p60 vskip. */
+    memset(tx,0xa5,sizeof(tx));
+    int skip_bytes=meson_t7_video_build(&video,&commit,false,false,osd,tx,
+                                       MESON_T7_VIDEO_KMS_PAIRS);
+    apply(skip_bytes);
+    for(unsigned int layer=0;layer<2;layer++)
+        for(unsigned int pat=0xc;pat<=0xf;pat++)
+            assert(hw[0x4800+layer*0x80+pat]==8);
+    assert(hw[0x1d08]==1U<<24 && hw[0x3938]==3U<<23);
+    assert(hw[0x1d02]==1080 && hw[0x1a57]==(1080U<<16|3840));
+    assert(hw[0x4804]==(2159U<<16)); /* Full allocation scope; MIF skips rows. */
+    states[0].src_h-=2U<<16;
+    assert(video_plane_check(&video.planes[0],&commit)==-EINVAL);
+    states[0].src_h+=2U<<16;
     running.adjusted_mode=(struct drm_display_mode){3840,2160,594000,4400,2250};
     states[0].crtc_w=3840; states[0].crtc_h=2160;
     assert(!video_plane_check(&video.planes[0],&commit)); /* Native 4K60. */
@@ -174,6 +187,9 @@ int main(void)
     int bytes=meson_t7_video_build(&video,&commit,false,false,osd,tx,
                                   MESON_T7_VIDEO_KMS_PAIRS);
     apply(bytes);
+    for(unsigned int layer=0;layer<2;layer++)
+        for(unsigned int pat=0xc;pat<=0xf;pat++)
+            assert(!hw[0x4800+layer*0x80+pat]); /* 30Hz restores every row. */
     assert(!hw[0x4800] && !hw[0x4880]); /* Configuration cannot initiate DMA. */
     assert(hw[0x4820]==y.dma_addr>>4 && hw[0x4821]==uv.dma_addr>>4);
     assert(hw[0x48a0]==y.dma_addr>>4 && hw[0x48a1]==uv.dma_addr>>4);
@@ -190,6 +206,9 @@ int main(void)
     CHECK_VENDOR_PORTS(0,1);
     struct drm_plane_state old[2]={states[0],states[1]};
     previous[0]=&old[0]; previous[1]=&old[1];
+    running.modeset=true;
+    assert(!meson_t7_video_flip(&video,&commit,false,tx,6));
+    running.modeset=false;
     bytes=meson_t7_video_flip(&video,&commit,false,tx,6);
     assert(bytes==48);
     for (int i=0;i<bytes/4;i+=2)
