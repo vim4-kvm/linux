@@ -408,8 +408,12 @@ static int khadas_mcu_fan_suspend(struct device *dev)
 
 	if (ctx->power) {
 		ret = regulator_disable(ctx->power);
-		if (ret)
+		if (ret) {
+			/* A failed suspend is not followed by this device's resume. */
+			if (khadas_mcu_fan_set_level(ctx, level_save))
+				dev_err_ratelimited(dev, "Failed to restore fan speed\n");
 			goto restart_work;
+		}
 	}
 
 	return 0;
@@ -432,6 +436,8 @@ static int khadas_mcu_fan_resume(struct device *dev)
 	}
 
 	if (ctx->quiet) {
+		/* The first new temperature must bypass the pre-sleep ramp. */
+		ctx->quiet_started = false;
 		schedule_delayed_work(&ctx->quiet_work, 0);
 		return 0;
 	}
