@@ -65,6 +65,7 @@
 			compatible = "arm,cortex-a73";
 			reg = <0x0 0x0>;
 			enable-method = "psci";
+			cpu-idle-states = <&cpu_sleep>;
 			clocks = <&cpu_clkc CLKID_A73_CPU>;
 			capacity-dmips-mhz = <1024>;
 			dynamic-power-coefficient = <550>;
@@ -83,6 +84,7 @@
 			compatible = "arm,cortex-a73";
 			reg = <0x0 0x1>;
 			enable-method = "psci";
+			cpu-idle-states = <&cpu_sleep>;
 			clocks = <&cpu_clkc CLKID_A73_CPU>;
 			capacity-dmips-mhz = <1024>;
 			dynamic-power-coefficient = <550>;
@@ -101,6 +103,7 @@
 			compatible = "arm,cortex-a73";
 			reg = <0x0 0x2>;
 			enable-method = "psci";
+			cpu-idle-states = <&cpu_sleep>;
 			clocks = <&cpu_clkc CLKID_A73_CPU>;
 			capacity-dmips-mhz = <1024>;
 			dynamic-power-coefficient = <550>;
@@ -119,6 +122,7 @@
 			compatible = "arm,cortex-a73";
 			reg = <0x0 0x3>;
 			enable-method = "psci";
+			cpu-idle-states = <&cpu_sleep>;
 			clocks = <&cpu_clkc CLKID_A73_CPU>;
 			capacity-dmips-mhz = <1024>;
 			dynamic-power-coefficient = <550>;
@@ -137,6 +141,7 @@
 			compatible = "arm,cortex-a53";
 			reg = <0x0 0x100>;
 			enable-method = "psci";
+			cpu-idle-states = <&cpu_sleep>;
 			clocks = <&cpu_clkc CLKID_A53_CPU>;
 			capacity-dmips-mhz = <632>;
 			dynamic-power-coefficient = <110>;
@@ -155,6 +160,7 @@
 			compatible = "arm,cortex-a53";
 			reg = <0x0 0x101>;
 			enable-method = "psci";
+			cpu-idle-states = <&cpu_sleep>;
 			clocks = <&cpu_clkc CLKID_A53_CPU>;
 			capacity-dmips-mhz = <632>;
 			dynamic-power-coefficient = <110>;
@@ -173,6 +179,7 @@
 			compatible = "arm,cortex-a53";
 			reg = <0x0 0x102>;
 			enable-method = "psci";
+			cpu-idle-states = <&cpu_sleep>;
 			clocks = <&cpu_clkc CLKID_A53_CPU>;
 			capacity-dmips-mhz = <632>;
 			dynamic-power-coefficient = <110>;
@@ -191,6 +198,7 @@
 			compatible = "arm,cortex-a53";
 			reg = <0x0 0x103>;
 			enable-method = "psci";
+			cpu-idle-states = <&cpu_sleep>;
 			clocks = <&cpu_clkc CLKID_A53_CPU>;
 			capacity-dmips-mhz = <632>;
 			dynamic-power-coefficient = <110>;
@@ -202,6 +210,21 @@
 			i-cache-sets = <32>;
 			next-level-cache = <&l2_cache_l>;
 			#cooling-cells = <2>;
+		};
+
+		idle-states {
+			entry-method = "psci";
+
+			cpu_sleep: cpu-sleep {
+				compatible = "arm,idle-state";
+				/* Power-down entry/exit has not been verified on VIM4. */
+				status = "disabled";
+				arm,psci-suspend-param = <0x10000>;
+				local-timer-stop;
+				entry-latency-us = <4000>;
+				exit-latency-us = <5000>;
+				min-residency-us = <10000>;
+			};
 		};
 
 		l2_cache_l: l2-cache-cluster0 {
@@ -1507,6 +1530,7 @@
 					type = "critical";
 				};
 			};
+
 		};
 
 		hevc_thermal: hevc-thermal {

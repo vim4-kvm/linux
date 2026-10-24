@@ -1685,11 +1685,23 @@ static const struct of_device_id t7_vdin_match[] = {
 };
 MODULE_DEVICE_TABLE(of, t7_vdin_match);
 
+static int t7_vdin_prepare(struct device *dev)
+{
+	/* Even an idle queue lacks a system-sleep context restore sequence. */
+	dev_err_ratelimited(dev, "System sleep requires capture context restore\n");
+	return -EBUSY;
+}
+
+static const struct dev_pm_ops t7_vdin_pm_ops = {
+	.prepare = t7_vdin_prepare,
+};
+
 static struct platform_driver t7_vdin_driver = {
 	.probe = t7_vdin_probe,
 	.driver = {
 		.name = "t7-vdin-test",
 		.of_match_table = t7_vdin_match,
+		.pm = pm_sleep_ptr(&t7_vdin_pm_ops),
 		.suppress_bind_attrs = true,
 	},
 };

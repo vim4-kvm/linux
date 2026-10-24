@@ -1500,6 +1500,12 @@ S:	Odd Fixes
 F:	Documentation/devicetree/bindings/usb/amlogic,t7-crg-udc.yaml
 F:	drivers/usb/gadget/udc/crg/
 
+AMLOGIC T7 PLATFORM PM EXPERIMENT
+M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+S:	Odd Fixes
+F:	arch/arm64/boot/dts/amlogic/amlogic-t7-a311d2-khadas-vim4-pm-test.dts
+F:	tools/testing/panfrost/
+
 AMLOGIC T7 HDMI RECEIVER AND CAPTURE EXPERIMENT
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 L:	linux-media@vger.kernel.org
@@ -2397,6 +2403,7 @@ F:	Documentation/gpu/panfrost.rst
 F:	drivers/gpu/drm/ci/xfails/panfrost*
 F:	drivers/gpu/drm/panfrost/
 F:	include/uapi/drm/panfrost_drm.h
+F:	tools/testing/panfrost/
 
 ARM MALI-C55 ISP DRIVER
 M:	Daniel Scally <dan.scally@ideasonboard.com>
