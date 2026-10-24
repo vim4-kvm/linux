@@ -77,7 +77,7 @@ struct aml_video_fmt {
  * @m2m_dev_dec: Mem2mem device associated to this device.
  * @vfd: Video_device associated to this device.
  * @mdev: Media_device associated to this device.
- * @open_count: File contexts holding runtime PM references, under dev_mutex.
+ * @open_count: Number of live file contexts, under dev_mutex.
  * @dec_hw: Decoder hardware resources. See struct aml_vdec_hw.
  * @pvdec_data: Decoder platform data. See struct aml_dev_platform_data.
  * @dev_mutex: video_device lock.
@@ -133,6 +133,7 @@ struct dec_pic_info {
  * @curr_dec_type: Current decoder type. (CODEC_TYPE_H264, etc.)
  * @codec_priv: Pointer to current decoder instance.
  * @decode_result: Result signaled by the firmware IRQ; completed after stop.
+ * @buffers_held: Queue mmap locks and per-job DMA pins are held.
  */
 struct aml_vdec_ctx {
 	struct aml_vdec_dev *dev;
@@ -155,6 +156,7 @@ struct aml_vdec_ctx {
 	u32 curr_dec_type;
 	void *codec_priv;
 	int decode_result;
+	bool buffers_held;
 };
 
 void aml_vdec_fault(struct aml_vdec_ctx *ctx);
