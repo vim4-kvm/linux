@@ -455,6 +455,11 @@ static ssize_t link_state_show(struct device *dev, struct device_attribute *attr
 			       cor_read(tx, TPI_SC), cor_read(tx, P2T_CTRL), cor_read(tx, SCRCTL),
 			       cor_read(tx, CLKRATIO), cor_read(tx, GCP_CNTL),
 			       cor_read(tx, CSC0_CTRL), cor_read(tx, CSC1_CTRL));
+	count += sysfs_emit_at(buf, count,
+			       "csc_hi=%02x/%02x input_mask=%02x output_map=%02x%02x output_mask=%02x\n",
+			       cor_read(tx, CSC0_CTRL2), cor_read(tx, CSC1_CTRL2),
+			       cor_read(tx, VP_INPUT_MASK), cor_read(tx, VP_OUTPUT_MAPPING_HI),
+			       cor_read(tx, VP_OUTPUT_MAPPING), cor_read(tx, VP_OUTPUT_MASK));
 	for (i = 0; i < ARRAY_SIZE(banks); i++) {
 		u8 enabled = meson_hdmitx21_read_packet(tx, banks[i], packet);
 
