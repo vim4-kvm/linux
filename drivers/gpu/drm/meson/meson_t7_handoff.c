@@ -764,6 +764,8 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	if (!wait_event_timeout(display->wait, READ_ONCE(display->vsync_count) >= 2,
 				msecs_to_jiffies(100)))
 		return dev_err_probe(dev, -ETIMEDOUT, "No firmware VIU1 vsync IRQ\n");
+	/* This also enables the bridge connector's HPD callbacks. */
+	drmm_kms_helper_poll_init(drm);
 	return drm_dev_register(drm, 0);
 }
 
