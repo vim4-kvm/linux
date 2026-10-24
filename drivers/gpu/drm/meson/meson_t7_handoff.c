@@ -642,6 +642,8 @@ static void meson_t7_handoff_enable(struct drm_crtc *crtc,
 	struct meson_t7_handoff *display = to_handoff(crtc->dev);
 	struct drm_plane_state *plane = drm_atomic_get_new_plane_state(state, &display->plane);
 	struct drm_crtc_state *new = drm_atomic_get_new_crtc_state(state, crtc);
+	struct drm_connector *connector;
+	struct drm_connector_state *conn = NULL;
 	int ret;
 
 	if (display->native_modeset) {
@@ -649,7 +651,10 @@ static void meson_t7_handoff_enable(struct drm_crtc *crtc,
 		display->layers_valid = false;
 		writel(readl(display->osd + OSD_REG(VIU_OSD1_CTRL_STAT)) & ~BIT(0),
 		       display->osd + OSD_REG(VIU_OSD1_CTRL_STAT));
-		ret = meson_t7_modeset_enable(display->modeset, &new->adjusted_mode);
+		connector = drm_atomic_get_new_connector_for_encoder(state, &display->encoder);
+		if (connector && connector->hdmi.funcs)
+			conn = drm_atomic_get_new_connector_state(state, connector);
+		ret = meson_t7_modeset_enable(display->modeset, &new->adjusted_mode, conn);
 		if (ret) {
 			WRITE_ONCE(display->faulted, true);
 			drm_err(crtc->dev, "ENC2 modeset failed: %d; restart required\n", ret);
@@ -1172,10 +1177,21 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 	connector = drm_bridge_connector_init(drm, &display->encoder);
 	if (IS_ERR(connector))
 		return PTR_ERR(connector);
-	if (display->native_modeset) {
+	if (display->native_modeset && !connector->hdmi.funcs) {
 		/* AUTO has only one choice while the inherited matrix is retained. */
 		ret = drm_connector_attach_color_format_property(connector,
 					BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR444));
+		if (ret)
+			return ret;
+	}
+	if (connector->hdmi.funcs) {
+		u32 colorspaces = BIT(DRM_MODE_COLORIMETRY_BT709_YCC) |
+				  BIT(DRM_MODE_COLORIMETRY_BT2020_YCC);
+
+		ret = drm_mode_create_hdmi_colorspace_property(connector, colorspaces);
+		if (ret)
+			return ret;
+		ret = drm_connector_attach_colorspace_property(connector);
 		if (ret)
 			return ret;
 	}

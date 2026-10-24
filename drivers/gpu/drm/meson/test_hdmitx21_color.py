@@ -53,7 +53,7 @@ static void meson_hdmitx21_write_infoframe(struct meson_hdmitx21 *tx, u8 sel,
 '''
 program += '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 program += '\n' + function('static void meson_hdmitx21_write_avi',
-                           'static void meson_hdmitx21_write_vendor')
+                           'static int meson_hdmitx21_write_avi_infoframe')
 program += function('static bool meson_hdmitx21_yuv_sink',
                     'static int meson_hdmitx21_bridge_attach')
 program += r'''

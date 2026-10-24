@@ -126,6 +126,12 @@ static bool drm_atomic_crtc_needs_modeset(struct drm_crtc_state *state)
 struct drm_plane { struct drm_device *dev; struct drm_plane_state *state; };
 struct drm_crtc { struct drm_device *dev; struct drm_crtc_state *state; };
 struct drm_encoder { int unused; };
+struct drm_connector { struct {void *funcs;} hdmi; };
+struct drm_connector_state {int unused;};
+static struct drm_connector *drm_atomic_get_new_connector_for_encoder(void *s, void *e)
+{return NULL;}
+static struct drm_connector_state *drm_atomic_get_new_connector_state(void *s, void *c)
+{return NULL;}
 struct drm_format_info { unsigned int format; unsigned int cpp[2]; unsigned int num_planes; };
 static int drm_format_info_plane_width(const struct drm_format_info *f, int w, int p)
 {return p ? w/2 : w;}
@@ -200,7 +206,8 @@ static unsigned int writes, vblanks;
 static bool fail_modeset;
 static unsigned int timing_stops;
 struct meson_t7_modeset;
-static int meson_t7_modeset_enable(struct meson_t7_modeset *hw, const void *mode)
+static int meson_t7_modeset_enable(struct meson_t7_modeset *hw, const void *mode,
+                                 const struct drm_connector_state *conn)
 {
     assert(!(osd[0] & 1)); /* Fetch must be blank before changing timing. */
     return fail_modeset ? -ETIMEDOUT : 0;
