@@ -77,11 +77,10 @@ struct aml_video_fmt {
  * @m2m_dev_dec: Mem2mem device associated to this device.
  * @vfd: Video_device associated to this device.
  * @mdev: Media_device associated to this device.
- * @dec_ctx: Decoder context. See struct aml_vdec_ctx.
+ * @open_count: Number of live file contexts, under dev_mutex.
  * @dec_hw: Decoder hardware resources. See struct aml_vdec_hw.
  * @pvdec_data: Decoder platform data. See struct aml_dev_platform_data.
  * @dev_mutex: video_device lock.
- * @filp: v4l2 file handle pointer.
  */
 struct aml_vdec_dev {
 	struct platform_device *plat_dev;
@@ -90,12 +89,11 @@ struct aml_vdec_dev {
 	struct video_device *vfd;
 	struct media_device mdev;
 
-	struct aml_vdec_ctx *dec_ctx;
+	unsigned int open_count;
 	struct aml_vdec_hw *dec_hw;
 	const struct aml_dev_platform_data *pvdec_data;
 
 	struct mutex dev_mutex;
-	struct file *filp;
 };
 
 /**
@@ -134,6 +132,10 @@ struct dec_pic_info {
  * @pic_info: Pic information for curr decoder context. See struct dec_pic_info.
  * @curr_dec_type: Current decoder type. (CODEC_TYPE_H264, etc.)
  * @codec_priv: Pointer to current decoder instance.
+ * @decode_result: Result signaled by the firmware IRQ; completed after stop.
+ * @buffers_held: Queue mmap locks and per-job DMA pins are held.
+ * @decode_failed: A timed-out context rejects further jobs until close.
+ * @diag_started: The initial T7 decode snapshot has been recorded.
  */
 struct aml_vdec_ctx {
 	struct aml_vdec_dev *dev;
@@ -155,7 +157,13 @@ struct aml_vdec_ctx {
 	struct dec_pic_info pic_info;
 	u32 curr_dec_type;
 	void *codec_priv;
+	int decode_result;
+	bool buffers_held;
+	bool decode_failed;
+	bool diag_started;
 };
+
+void aml_vdec_fault(struct aml_vdec_ctx *ctx);
 
 static inline struct aml_vdec_ctx *fh_to_dec_ctx(struct file *file)
 {

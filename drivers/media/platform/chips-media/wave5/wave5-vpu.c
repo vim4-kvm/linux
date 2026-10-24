@@ -13,6 +13,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/pm_domain.h>
 #include <linux/reset.h>
+#include <media/meson-t7-dos.h>
 #include "wave5-vpu.h"
 #include "wave5-regdefine.h"
 #include "wave5-vpuconfig.h"
@@ -20,6 +21,10 @@
 
 #define VPU_PLATFORM_DEVICE_NAME "vdec"
 #define VPU_CLK_NAME "vcodec"
+
+static bool t7_decode_test;
+module_param(t7_decode_test, bool, 0400);
+MODULE_PARM_DESC(t7_decode_test, "Unverified T7 decode-only experiment; requires local RESET access");
 
 #define WAVE5_IS_ENC BIT(0)
 #define WAVE5_IS_DEC BIT(1)
@@ -393,11 +398,21 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 	const struct wave5_match_data *match_data;
 	u32 fw_revision;
 	bool power_held = false;
+	int flags;
 
 	match_data = device_get_match_data(&pdev->dev);
 	if (!match_data) {
 		dev_err(&pdev->dev, "missing device match data\n");
 		return -EINVAL;
+	}
+	flags = match_data->flags;
+	if (match_data->legacy_firmware && t7_decode_test)
+		flags = (flags & ~WAVE5_IS_ENC) | WAVE5_IS_DEC;
+
+	if (match_data->legacy_firmware) {
+		ret = devm_meson_t7_dos_get_shared(&pdev->dev);
+		if (ret)
+			return ret;
 	}
 
 	/* physical addresses limited to 32 bits */
@@ -424,6 +439,7 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 	dev_set_drvdata(&pdev->dev, dev);
 	dev->dev = &pdev->dev;
 	dev->legacy_firmware = match_data->legacy_firmware;
+	dev->experimental_decoder = dev->legacy_firmware && t7_decode_test;
 
 	dev->resets = devm_reset_control_array_get_optional_exclusive(&pdev->dev);
 	if (IS_ERR(dev->resets)) {
@@ -510,14 +526,14 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 		goto err_irq_release;
 	}
 
-	if (match_data->flags & WAVE5_IS_DEC) {
+	if (flags & WAVE5_IS_DEC) {
 		ret = wave5_vpu_dec_register_device(dev);
 		if (ret) {
 			dev_err(&pdev->dev, "wave5_vpu_dec_register_device, fail: %d\n", ret);
 			goto err_v4l2_unregister;
 		}
 	}
-	if (match_data->flags & WAVE5_IS_ENC) {
+	if (flags & WAVE5_IS_ENC) {
 		ret = wave5_vpu_enc_register_device(dev);
 		if (ret) {
 			dev_err(&pdev->dev, "wave5_vpu_enc_register_device, fail: %d\n", ret);
@@ -542,8 +558,8 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 	}
 
 	dev_info(&pdev->dev, "Added wave5 driver with caps: %s %s\n",
-		 (match_data->flags & WAVE5_IS_ENC) ? "'ENCODE'" : "",
-		 (match_data->flags & WAVE5_IS_DEC) ? "'DECODE'" : "");
+		 (flags & WAVE5_IS_ENC) ? "'ENCODE'" : "",
+		 (flags & WAVE5_IS_DEC) ? "'DECODE'" : "");
 	dev_info(&pdev->dev, "Product Code:      0x%x\n", dev->product_code);
 	dev_info(&pdev->dev, "Firmware Revision: %u\n", fw_revision);
 
@@ -565,10 +581,10 @@ static int wave5_vpu_probe(struct platform_device *pdev)
 	return 0;
 
 err_enc_unreg:
-	if (match_data->flags & WAVE5_IS_ENC)
+	if (flags & WAVE5_IS_ENC)
 		wave5_vpu_enc_unregister_device(dev);
 err_dec_unreg:
-	if (match_data->flags & WAVE5_IS_DEC)
+	if (flags & WAVE5_IS_DEC)
 		wave5_vpu_dec_unregister_device(dev);
 err_v4l2_unregister:
 	v4l2_device_unregister(&dev->v4l2_dev);
@@ -648,9 +664,11 @@ static void wave5_vpu_remove(struct platform_device *pdev)
 			stopped = pm_runtime_put_sync_suspend(&pdev->dev) >= 0;
 		else
 			pm_runtime_put_noidle(&pdev->dev);
-		if (!stopped)
+		if (!stopped) {
+			meson_t7_dos_poison();
 			dev_err(&pdev->dev,
 				"T7 DMA stop failed; retaining firmware memory and clocks until reboot\n");
+		}
 	}
 
 	pm_runtime_dont_use_autosuspend(&pdev->dev);

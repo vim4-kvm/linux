@@ -309,6 +309,13 @@ static int handle_dynamic_resolution_change(struct vpu_instance *inst)
 	struct dec_info *p_dec_info = &inst->codec_info->dec_info;
 	struct dec_initial_info *initial_info = &inst->codec_info->dec_info.initial_info;
 
+	if (inst->dev->experimental_decoder &&
+	    (initial_info->pic_width > 640 || initial_info->pic_height > 480 ||
+	     !initial_info->pic_width || !initial_info->pic_height ||
+	     (initial_info->pic_width & 7) || (initial_info->pic_height & 7) ||
+	     initial_info->luma_bitdepth != 8 || initial_info->chroma_bitdepth != 8))
+		return -EINVAL;
+
 	lockdep_assert_held(&inst->state_spinlock);
 
 	dev_dbg(inst->dev->dev, "%s: rd_ptr %pad", __func__, &initial_info->rd_ptr);
@@ -706,6 +713,11 @@ static int wave5_vpu_dec_s_fmt_out(struct file *file, void *fh, struct v4l2_form
 	const struct vpu_format *vpu_fmt;
 	int i, ret;
 
+	if (inst->dev->experimental_decoder &&
+	    (!f->fmt.pix_mp.width || !f->fmt.pix_mp.height ||
+	     f->fmt.pix_mp.width > 640 || f->fmt.pix_mp.height > 480 ||
+	     (f->fmt.pix_mp.width & 7) || (f->fmt.pix_mp.height & 7)))
+		return -EINVAL;
 	dev_dbg(inst->dev->dev,
 		"%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
 		__func__, f->fmt.pix_mp.pixelformat, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
@@ -1967,7 +1979,8 @@ static int wave5_vpu_open_dec(struct file *filp)
 		goto cleanup_inst;
 	}
 
-	inst->id = ida_alloc(&inst->dev->inst_ida, GFP_KERNEL);
+	inst->id = ida_alloc_range(&inst->dev->inst_ida, 0,
+				   dev->experimental_decoder ? 0 : INT_MAX, GFP_KERNEL);
 	if (inst->id < 0) {
 		dev_warn(inst->dev->dev, "Allocating instance ID, fail: %d\n", inst->id);
 		ret = inst->id;

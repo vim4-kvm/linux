@@ -292,6 +292,11 @@ struct platform_driver {
 	 * to setup and manage their own I/O address space.
 	 */
 	bool driver_managed_dma;
+	/*
+	 * The driver attaches its PM domains explicitly, without powering them
+	 * before probe. It must detach them on every error and remove path.
+	 */
+	bool driver_managed_pm;
 };
 
 #define to_platform_driver(drv)	(container_of((drv), struct platform_driver, \

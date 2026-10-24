@@ -111,6 +111,28 @@ struct pm_pd_s {
  * @gates: Clk instance used by curr decoder context.
  * @dec_irq: Irq registered.
  * @curr_ctx: Pointer to curr decoder context.
+ * @has_dbus_ctrl: Isolate VDEC through DOS instead of DMC; no local PD writes.
+ * @faulted: DMA ownership could not be returned; reset the system to recover.
+ * @powered: Domain and functional clocks are held.
+ * @power_test_passed: Explicit read-only DOS access and power-off succeeded.
+ * @power_test_reset: Cached DOS_SW_RESET0 sample; not a silicon identifier.
+ * @mdec_test_passed: Explicit MDEC read and subsequent power-off succeeded.
+ * @mdec_test_value: Cached MDEC_PIC_DC_CTRL sample.
+ * @secure_swap: Scratch G supplied by the secure microcode loader.
+ * @irq_count: Hard IRQ entries, including entries without an active job.
+ * @threaded_irq_count: Threaded IRQ entries.
+ * @nic3_dev: Parent domain held explicitly for DOS-top access before VDEC on.
+ * @nic3_held: An explicit parent runtime PM reference is owned.
+ * @clocks_held: DOS bus and VDEC functional clocks are owned.
+ * @probe_step: Last completed single-register diagnostic step, zero if idle.
+ * @probe_value: Cached value of the last diagnostic read.
+ * @probe_en0: DOS-top gate sample, including the shared HCODEC bits.
+ * @probe_failed: A failed diagnostic prohibits another attempt in this probe.
+ * @probe_pinned: Module reference held across diagnostic sysfs writes.
+ * @clkctrl: Clock provider's regmap, used only to verify physical gate state.
+ * @apb_gates: CPU APB bridge gates retained during experimental T7 power-on.
+ * @apb_held: APB references remain held until secure power-off completes.
+ * @vdec_p0: Functional clock path selected by the live T7 vendor decoder.
  */
 struct aml_vdec_hw {
 	struct platform_device *pdev;
@@ -123,6 +145,28 @@ struct aml_vdec_hw {
 	struct clk_bulk_data gates[DOS_CLK_MAX];
 	int dec_irq;
 	void *curr_ctx;
+	bool has_dbus_ctrl;
+	bool faulted;
+	bool powered;
+	bool power_test_passed;
+	u32 power_test_reset;
+	bool mdec_test_passed;
+	u32 mdec_test_value;
+	u32 secure_swap;
+	u32 irq_count;
+	u32 threaded_irq_count;
+	struct device *nic3_dev;
+	bool nic3_held;
+	bool clocks_held;
+	u32 probe_step;
+	u32 probe_value;
+	u32 probe_en0;
+	bool probe_failed;
+	bool probe_pinned;
+	struct regmap *clkctrl;
+	struct clk_bulk_data apb_gates[2];
+	bool apb_held;
+	struct clk *vdec_p0;
 };
 
 /**
@@ -138,8 +182,8 @@ struct power_manager_s {
 	struct pm_pd_s *pd_data;
 	int (*init)(struct aml_vdec_hw *hw);
 	void (*release)(struct aml_vdec_hw *hw);
-	void (*power_on)(struct aml_vdec_hw *hw, int id);
-	void (*power_off)(struct aml_vdec_hw *hw, int id);
+	int (*power_on)(struct aml_vdec_hw *hw, int id);
+	int (*power_off)(struct aml_vdec_hw *hw, int id);
 	bool (*power_state)(struct aml_vdec_hw *hw, int id);
 };
 
@@ -149,10 +193,14 @@ struct aml_vdec_hw *vdec_get_hw(void *priv);
 u32 read_dos_reg(struct aml_vdec_hw *hw, u32 reg_addr);
 int vdec_enable(struct aml_vdec_hw *hw);
 int vdec_disable(struct aml_vdec_hw *hw);
+int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3);
+int aml_vdec_t7_power_test(struct aml_vdec_hw *hw);
+int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw);
+int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
-void aml_stop_vdec_hw(struct aml_vdec_hw *hw);
+int aml_stop_vdec_hw(struct aml_vdec_hw *hw);
 int load_firmware(struct aml_vdec_hw *hw, const char *path);
-void aml_vdec_reset_core(struct aml_vdec_hw *hw);
+int aml_vdec_reset_core(struct aml_vdec_hw *hw);
 
 #endif

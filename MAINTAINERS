@@ -1489,7 +1489,9 @@ L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/amlogic,s4-vcodec-dec.yaml
 F:	Documentation/devicetree/bindings/media/amlogic,t7-vcodec-dec.yaml
+F:	drivers/media/platform/amlogic/t7-dos.c
 F:	drivers/media/platform/amlogic/vdec/
+F:	include/media/meson-t7-dos.h
 
 AMPHENOL CHIPCAP 2 DRIVER
 M:	Javier Carrasco <javier.carrasco.cruz@gmail.com>

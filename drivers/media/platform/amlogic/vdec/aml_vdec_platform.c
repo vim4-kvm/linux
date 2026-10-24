@@ -69,6 +69,7 @@ const struct aml_codec_ops aml_S4_dec_ops[] = {
 		.init = aml_h264_init,
 		.exit = aml_h264_exit,
 		.run = aml_h264_dec_run,
+		.finish = aml_h264_finish,
 	},
 };
 
@@ -82,4 +83,18 @@ const struct aml_dev_platform_data aml_vdec_s4_pdata = {
 	.fw_path = {
 		VIDEO_DEC_H264,
 	},
+};
+
+/*
+ * T7 uses the H264 frame protocol with secure firmware instead of S4's raw
+ * firmware and DMC isolation. The restricted experiment is opt-in at probe.
+ */
+const struct aml_dev_platform_data aml_vdec_t7_pdata = {
+	.codec_ops = aml_S4_dec_ops,
+	.dec_fmt = aml_s4_video_formats,
+	.num_fmts = ARRAY_SIZE(aml_s4_video_formats),
+	.power_type = AML_PM_PD,
+	.req_hw_resource = dev_request_hw_resources,
+	.destroy_hw_resource = dev_destroy_hw_resources,
+	.has_dbus_ctrl = true,
 };
