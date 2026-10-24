@@ -453,6 +453,9 @@ static int setup_wave5_properties(struct device *dev)
 	/* Older T7 hardware does not report encoder capability in STD_DEF1. */
 	if (vpu_dev->encoder_mask)
 		p_attr->support_encoders = vpu_dev->encoder_mask;
+	/* Explicit experiment only: legacy firmware has no usable capability bits. */
+	if (vpu_dev->experimental_decoder)
+		p_attr->support_decoders = BIT(STD_AVC) | BIT(STD_HEVC);
 	setup_wave5_interrupts(vpu_dev);
 
 	return 0;

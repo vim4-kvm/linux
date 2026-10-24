@@ -15,7 +15,8 @@
  * struct aml_codec_ops - codec mode specific operations
  * @init: Used for decoder initialization.
  * @exit: If needed, can be used to undo the .init phase.
- * @run: Start a single decoding job. Called from atomic context.
+ * @run: Execute a single decoding job in sleepable context.
+ * @finish: Release per-job canvas ownership after hardware stop.
  * Caller should ensure that a pair of buffers is ready and the
  * hardware is powered on and clk is enabled. Returns zero if OK,
  * a negative value in error cases.
@@ -24,6 +25,7 @@ struct aml_codec_ops {
 	int (*init)(void *priv);
 	void (*exit)(void *priv);
 	int (*run)(void *priv);
+	void (*finish)(void *priv);
 };
 
 /**
@@ -34,6 +36,7 @@ struct aml_codec_ops {
  * @destroy_hw_resource: Operation function to release the hardware resource.
  * @power_type: Type of power that the current chip need. See aml_power_type_e.
  * @fw_path: Path of the firmware.bin.
+ * @has_dbus_ctrl: Use DOS DBUS isolation instead of a DMC request bit.
  */
 struct aml_dev_platform_data {
 	const struct aml_codec_ops *codec_ops;
@@ -43,8 +46,10 @@ struct aml_dev_platform_data {
 	void (*destroy_hw_resource)(void *priv);
 	int power_type;
 	const char *fw_path[MAX_DEC_FORMAT];
+	bool has_dbus_ctrl;
 };
 
 extern const struct aml_dev_platform_data aml_vdec_s4_pdata;
+extern const struct aml_dev_platform_data aml_vdec_t7_pdata;
 
 #endif
