@@ -6,7 +6,12 @@ VIM4 offline regression fixtures
 Run from a clean kernel checkout on a Linux ARM64 host with Python 3, a host
 C compiler and Pillow (the JPEG fixture decodes its generated JPEG stream)::
 
+  export VIM4_VENDOR=/path/to/common_drivers
   python3 scripts/vim4/offline-tests.py --output /tmp/vim4-host-results
+
+The vendor checkout can also be passed with ``--vendor``. Display fixtures
+execute local vendor C fragments for comparison. The report records that
+checkout's revision; it is never fetched or modified by this runner.
 
 The output directory must be new and outside the source tree. All tracked
 ``test_*.py`` fixtures in the supported driver directories run independently.
