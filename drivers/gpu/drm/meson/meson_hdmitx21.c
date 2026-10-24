@@ -1126,6 +1126,14 @@ static int meson_hdmitx21_bridge_atomic_check(struct drm_bridge *bridge,
 		    !(info->hdr_sink_metadata.hdmi_type1.eotf & BIT(eotf)))
 			return -EINVAL;
 	}
+	/* T7 uses per-OSD HDR2 in the vendor path, not the optional 0x3910
+	 * matrix used by other SoCs. Its inherited routing and LUT ownership
+	 * are not yet acquired here. Never tag unconverted pixels as BT.2020.
+	 */
+	if (bt2020) {
+		drm_dbg_kms(bridge->dev, "BT.2020 needs exclusive T7 OSD HDR2 ownership\n");
+		return -EOPNOTSUPP;
+	}
 	conn->hdmi.is_limited_range = false;
 	avi->quantization_range = rgb ? HDMI_QUANTIZATION_RANGE_FULL :
 					HDMI_QUANTIZATION_RANGE_DEFAULT;

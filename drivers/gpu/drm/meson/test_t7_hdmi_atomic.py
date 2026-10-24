@@ -37,6 +37,7 @@ typedef uint32_t u32;
 #define min(a,b) ((a)<(b)?(a):(b))
 #define DIV_ROUND_CLOSEST(a,b) (((a)+(b)/2)/(b))
 #define IS_ENABLED(x) 1
+#define drm_dbg_kms(...) do {} while (0)
 #define DRM_OUTPUT_COLOR_FORMAT_RGB444 0
 #define DRM_OUTPUT_COLOR_FORMAT_YCBCR444 1
 #define DRM_OUTPUT_COLOR_FORMAT_YCBCR420 3
@@ -122,10 +123,11 @@ int main(void) {
     conn.colorspace=DRM_MODE_COLORIMETRY_BT2020_YCC;
     conn.hdmi.output_bpc=10;conn.hdmi.tmds_char_rate=185625000;
     connector.display_info.hdr_sink_metadata.hdmi_type1.eotf=BIT(2)|BIT(3);
-    assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn) && crtc.mode_changed);
+    assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==-EOPNOTSUPP);
     for(unsigned int e=0;e<8;e++) {
         hdr.hdmi_metadata_type1.eotf=e;
-        assert((meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==0)==(e==2||e==3));
+        assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==
+               ((e==2||e==3)?-EOPNOTSUPP:-EINVAL));
     }
     hdr.hdmi_metadata_type1.eotf=2;blob.length--;
     assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==-EINVAL);
@@ -136,14 +138,16 @@ int main(void) {
     struct drm_framebuffer fb={.format=(void *)&format};
     test_plane_state.crtc=crtc.crtc;test_plane_state.fb=&fb;
     assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==-EINVAL);
-    test_plane_state.fb=NULL; /* Detached video must not block an HDR OSD commit. */
-    assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn));
+    test_plane_state.fb=NULL; /* RMFB must reach the matrix ownership guard safely. */
+    assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==-EOPNOTSUPP);
     crtc.adjusted_mode.clock=594000;crtc.adjusted_mode.hdisplay=3840;crtc.adjusted_mode.htotal=4400;
     conn.hdmi.output_format=DRM_OUTPUT_COLOR_FORMAT_YCBCR420;
     conn.hdmi.tmds_char_rate=371250000;
     assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==-EINVAL);
     connector.display_info.hdmi.scdc.supported=true;
     connector.display_info.hdmi.scdc.scrambling.supported=true;
+    assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==-EOPNOTSUPP);
+    conn.hdr_output_metadata=NULL;conn.colorspace=DRM_MODE_COLORIMETRY_BT709_YCC;
     assert(!meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn));
     crtc.adjusted_mode.htotal++;
     assert(meson_hdmitx21_bridge_atomic_check(NULL,NULL,&crtc,&conn)==-EINVAL);

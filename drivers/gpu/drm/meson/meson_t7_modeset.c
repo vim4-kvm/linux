@@ -274,9 +274,9 @@ void meson_t7_modeset_disable(struct meson_t7_modeset *hw)
 
 static void meson_t7_osd_matrix(struct meson_t7_modeset *hw, bool bt2020)
 {
-	/* amcsc.c / osd_hw.c RGB2020/709 -> limited YUV, COEFF_NORM().
-	 * This matrix follows the OSD blend, so every OSD uses the same gamut.
-	 * Userspace supplies already transfer-encoded pixels; there is no OETF.
+	/* Optional VPP matrix recipe from amcsc.c / osd_hw.c, COEFF_NORM().
+	 * T7's per-OSD HDR2 routing needs separate ownership; the bridge rejects
+	 * BT.2020 until that is acquired. This recipe does not program an OETF.
 	 */
 	static const int coeff[2][9] = {
 		{ 186, 627, 63, -103, -345, 448, 448, -407, -41 },
