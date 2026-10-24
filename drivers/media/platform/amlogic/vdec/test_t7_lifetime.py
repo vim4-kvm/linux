@@ -54,6 +54,59 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_streamoff_releases_own_canvas_after_hardware_owner_is_cleared(self):
+        functions = "\n".join(function(HERE / "h264.c", name) for name in (
+            "release_canvas_index", "h264_release_decode_spec", "aml_h264_finish"))
+        run_c(COMMON + """
+#define dev_dbg(...) ((void)0)
+struct h264_decode_buf_spec {
+    int y_canvas_index, u_canvas_index, v_canvas_index, used;
+    void *dpb;
+};
+struct aml_h264_ctx {
+    struct h264_decode_buf_spec curr_spec, ref_list0[1], ref_list1[1];
+    int list_size[2], init_flag;
+};
+struct aml_vdec_hw { void *dev, *canvas, *curr_ctx; };
+struct dev { struct aml_vdec_hw *dec_hw; };
+struct aml_vdec_ctx { struct dev *dev; struct aml_h264_ctx *codec_priv; };
+static unsigned int freed;
+static void meson_canvas_free(void *canvas, int index)
+{
+    assert(index >= 0 && index < 16 && !(freed & BIT(index)));
+    freed |= BIT(index);
+}
+""" + functions + """
+int main(void)
+{
+    struct aml_h264_ctx a = {
+        .curr_spec = { .y_canvas_index = 1, .u_canvas_index = 2 },
+        .ref_list0 = {{ .y_canvas_index = 3, .u_canvas_index = 4, .used = 1 }},
+        .ref_list1 = {{ .y_canvas_index = 5, .u_canvas_index = 6, .used = 1 }},
+        .list_size = { 1, 1 }, .init_flag = 1,
+    };
+    struct aml_h264_ctx b = {
+        .curr_spec = { .y_canvas_index = 7, .u_canvas_index = 8 }, .init_flag = 1,
+    };
+    struct aml_vdec_hw hw = { .curr_ctx = &a };
+    struct dev dev = { &hw };
+    struct aml_vdec_ctx first = { &dev, &a }, second = { &dev, &b };
+    aml_h264_finish(&second); /* Closing B must not touch active A. */
+    assert(freed == (BIT(7) | BIT(8)) && hw.curr_ctx == &a);
+    assert(a.init_flag && !b.init_flag && a.curr_spec.y_canvas_index == 1);
+    hw.curr_ctx = NULL; /* Job finished before STREAMOFF, as in the panic. */
+    aml_h264_finish(&first);
+    assert(freed == 0x1fe && !a.init_flag);
+    assert(!a.list_size[0] && !a.list_size[1]);
+    assert(!a.ref_list0[0].used && !a.ref_list1[0].used);
+    aml_h264_finish(&first); /* Repeated finish cannot free a canvas twice. */
+    second.codec_priv = NULL;
+    aml_h264_finish(&second);
+    assert(freed == 0x1fe);
+    return 0;
+}
+""")
+
     def test_job_pins_unwind_and_quarantine_without_idle_mapped_flags(self):
         functions = "\n".join(function(HERE / "aml_vdec.c", name) for name in (
             "aml_vdec_pin_buffer", "vb2_ops_vdec_buf_cleanup",
