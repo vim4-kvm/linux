@@ -26,6 +26,12 @@ struct meson_t7_video_phase {
 	u32 vphase, vreceive_repeat;
 };
 
+/* Progressive four-tap PPS, with prescaling and super-resolution disabled. */
+#define MESON_T7_VIDEO_PPS_PAIRS 92
+int meson_t7_video_pps_build(u32 *table, unsigned int pairs, unsigned int index,
+			     u32 width, u32 height, u32 output_width, u32 output_height,
+			     u32 clock_gate);
+
 /* Progressive PPS math only; no prescaler, clipping, or super-resolution. */
 int meson_t7_video_phase_prepare(u32 width, u32 height, u32 output_width,
 				 u32 output_height, struct meson_t7_video_phase *phase);
