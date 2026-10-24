@@ -23,6 +23,8 @@
 #define  TDMIN_CTRL_LSB_FIRST		BIT(5)
 #define  TDMIN_CTRL_BITNUM_MASK	GENMASK(4, 0)
 #define  TDMIN_CTRL_BITNUM(x)		((x) << 0)
+#define  T7_TDMIN_CTRL_SLOTNUM_MASK	GENMASK(12, 8)
+#define  T7_TDMIN_CTRL_SLOTNUM(x)		((x) << 8)
 #define TDMIN_SWAP			0x04
 #define TDMIN_MASK0			0x08
 #define TDMIN_MASK1			0x0c
@@ -108,11 +110,20 @@ static void axg_tdmin_disable(struct regmap *map)
 	regmap_update_bits(map, TDMIN_CTRL, TDMIN_CTRL_ENABLE, 0);
 }
 
+static void t7_tdmin_enable(struct regmap *map)
+{
+	regmap_update_bits(map, TDMIN_CTRL, BIT(26), BIT(26));
+	axg_tdmin_enable(map);
+}
+
 static int axg_tdmin_prepare(struct regmap *map,
 			     const struct axg_tdm_formatter_hw *quirks,
 			     struct axg_tdm_stream *ts)
 {
 	unsigned int val, skew = quirks->skew_offset;
+
+	if (quirks->slot_num_mask && ts->iface->slots - 1 > (quirks->slot_num_mask >> 8))
+		return -EINVAL;
 
 	/* Set stream skew */
 	switch (ts->iface->fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
@@ -157,6 +168,10 @@ static int axg_tdmin_prepare(struct regmap *map,
 			   (TDMIN_CTRL_IN_BIT_SKEW_MASK | TDMIN_CTRL_WS_INV |
 			    TDMIN_CTRL_I2S_MODE | TDMIN_CTRL_LSB_FIRST |
 			    TDMIN_CTRL_BITNUM_MASK), val);
+
+	if (quirks->slot_num_mask)
+		regmap_update_bits(map, TDMIN_CTRL, quirks->slot_num_mask,
+				   T7_TDMIN_CTRL_SLOTNUM(ts->iface->slots - 1));
 
 	/* Set static swap mask configuration */
 	regmap_write(map, TDMIN_SWAP, 0x76543210);
@@ -232,6 +247,33 @@ static const struct axg_tdm_formatter_driver axg_tdmin_drv = {
 	},
 };
 
+static const struct axg_tdm_formatter_ops t7_tdmin_ops = {
+	.get_stream = axg_tdmin_get_tdm_stream,
+	.prepare = axg_tdmin_prepare,
+	.enable = t7_tdmin_enable,
+	.disable = axg_tdmin_disable,
+};
+
+static const struct axg_tdm_formatter_driver t7_tdmin_drv = {
+	.component_drv = &axg_tdmin_component_drv,
+	.regmap_cfg = &axg_tdmin_regmap_cfg,
+	.ops = &t7_tdmin_ops,
+	.quirks = &(const struct axg_tdm_formatter_hw) {
+		.skew_offset = 3,
+		.slot_num_mask = T7_TDMIN_CTRL_SLOTNUM_MASK,
+	},
+};
+
+static const struct axg_tdm_formatter_driver t7_tdmin_lb_drv = {
+	.component_drv = &axg_tdmin_component_drv,
+	.regmap_cfg = &axg_tdmin_regmap_cfg,
+	.ops = &axg_tdmin_ops,
+	.quirks = &(const struct axg_tdm_formatter_hw) {
+		.skew_offset = 3,
+		.slot_num_mask = GENMASK(11, 8),
+	},
+};
+
 static const struct of_device_id axg_tdmin_of_match[] = {
 	{
 		.compatible = "amlogic,axg-tdmin",
@@ -242,6 +284,15 @@ static const struct of_device_id axg_tdmin_of_match[] = {
 	}, {
 		.compatible = "amlogic,sm1-tdmin",
 		.data = &axg_tdmin_drv,
+	}, {
+		.compatible = "amlogic,t7-tdmin",
+		.data = &t7_tdmin_drv,
+	}, {
+		.compatible = "amlogic,t7-tdmin-d",
+		.data = &t7_tdmin_drv,
+	}, {
+		.compatible = "amlogic,t7-tdmin-lb",
+		.data = &t7_tdmin_lb_drv,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, axg_tdmin_of_match);

@@ -326,6 +326,44 @@ static const struct axg_fifo_match_data sm1_toddr_match_data = {
 	.dai_drv		= &g12a_toddr_dai_drv
 };
 
+static int t7_toddr_pcm_format(struct axg_fifo *fifo,
+			       struct snd_pcm_hw_params *params,
+			       unsigned int source)
+{
+	unsigned int width = params_width(params);
+	unsigned int type, msb = 31, lsb;
+
+	if (source == 3) {
+		/* Preserve the IEC958 subframe, including its non-audio bits. */
+		if (params_format(params) != SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE)
+			return -EINVAL;
+		type = 3;
+		msb = 27;
+		lsb = 4;
+	} else {
+		switch (params_format(params)) {
+		case SNDRV_PCM_FORMAT_S8:
+		case SNDRV_PCM_FORMAT_S16_LE:
+		case SNDRV_PCM_FORMAT_S32_LE:
+			type = 0;
+			break;
+		case SNDRV_PCM_FORMAT_S24_LE:
+			type = 4;
+			break;
+		default:
+			return -EINVAL;
+		}
+		lsb = 32 - width;
+	}
+
+	return regmap_update_bits(fifo->map, FIFO_CTRL0,
+				  CTRL0_TODDR_TYPE | CTRL0_TODDR_MSB_POS |
+				  CTRL0_TODDR_LSB_POS,
+				  FIELD_PREP(CTRL0_TODDR_TYPE, type) |
+				  FIELD_PREP(CTRL0_TODDR_MSB_POS, msb) |
+				  FIELD_PREP(CTRL0_TODDR_LSB_POS, lsb));
+}
+
 static int t7_toddr_dai_hw_params(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *params,
 				struct snd_soc_dai *dai)
@@ -350,7 +388,7 @@ static int t7_toddr_dai_hw_params(struct snd_pcm_substream *substream,
 			FIELD_PREP(CTRL0_TODDR_MSB_POS, 27) |
 			FIELD_PREP(CTRL0_TODDR_LSB_POS, 12));
 	} else {
-		ret = axg_toddr_dai_hw_params(substream, params, dai);
+		ret = t7_toddr_pcm_format(fifo, params, source);
 	}
 	if (ret)
 		return ret;
@@ -380,21 +418,33 @@ static const struct snd_soc_dai_ops t7_toddr_ops = {
 static struct snd_soc_dai_driver t7_toddr_dai_drv = {
 	.name = "TODDR",
 	.capture = {
-		.stream_name = "Capture", .channels_min = 1, .channels_max = AXG_FIFO_CH_MAX,
-		.rates = SNDRV_PCM_RATE_CONTINUOUS, .rate_min = 5515, .rate_max = 768000,
-		.formats = AXG_FIFO_FORMATS,
+		.stream_name = "Capture",
+		.channels_min = 1,
+		.channels_max = AXG_FIFO_CH_MAX,
+		.rates = SNDRV_PCM_RATE_CONTINUOUS,
+		.rate_min = 5515,
+		.rate_max = 768000,
+		.formats = AXG_FIFO_FORMATS & ~SNDRV_PCM_FMTBIT_S20_LE,
 	},
 	.ops = &t7_toddr_ops,
 };
 
-/* T7 moves the source selector below bit 31 and widens it to five bits.
- * Keep the known first sixteen sources; clear all five hardware bits so a
- * previous boot cannot leave the FIFO connected to a different input.
- */
+static const char * const t7_toddr_sel_texts[] = {
+	"IN 0", "IN 1", "IN 2", "IN 3", "IN 4", "IN 5", "IN 6", "IN 7",
+	"IN 8", "IN 9", "IN 10", "IN 11", "IN 12", "IN 13", "IN 14", "IN 15",
+	"IN 18",
+};
+
+static const unsigned int t7_toddr_sel_values[] = {
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18,
+};
+
+/* Keep the full five-bit mask, including for sparse source values. */
 static const struct soc_enum t7_toddr_sel_enum = {
 	.reg = FIFO_CTRL1, .shift_l = 26, .shift_r = 26,
-	.items = ARRAY_SIZE(sm1_toddr_sel_texts),
-	.texts = sm1_toddr_sel_texts, .mask = 0x1f,
+	.items = ARRAY_SIZE(t7_toddr_sel_texts),
+	.texts = t7_toddr_sel_texts, .mask = 0x1f,
+	.values = t7_toddr_sel_values,
 };
 
 static const struct snd_kcontrol_new t7_toddr_in_mux =
@@ -418,9 +468,21 @@ static const struct snd_soc_dapm_widget t7_toddr_dapm_widgets[] = {
 	SND_SOC_DAPM_AIF_IN("IN 13", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("IN 14", NULL, 0, SND_SOC_NOPM, 0, 0),
 	SND_SOC_DAPM_AIF_IN("IN 15", NULL, 0, SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_AIF_IN("IN 18", NULL, 0, SND_SOC_NOPM, 0, 0),
 };
 
+static const struct snd_soc_dapm_route t7_toddr_routes[] = {
+	{ "SRC SEL", "IN 18", "IN 18" },
+};
+
+static int t7_toddr_component_probe(struct snd_soc_component *component)
+{
+	return snd_soc_dapm_add_routes(snd_soc_component_to_dapm(component),
+				      t7_toddr_routes, ARRAY_SIZE(t7_toddr_routes));
+}
+
 static const struct snd_soc_component_driver t7_toddr_component_drv = {
+	.probe = t7_toddr_component_probe,
 	.dapm_widgets = t7_toddr_dapm_widgets,
 	.num_dapm_widgets = ARRAY_SIZE(t7_toddr_dapm_widgets),
 	.dapm_routes = sm1_toddr_dapm_routes,
