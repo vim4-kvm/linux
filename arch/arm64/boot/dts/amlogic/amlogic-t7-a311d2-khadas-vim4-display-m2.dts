@@ -15,9 +15,12 @@
 	      <0x0 0xff016820 0x0 0x4>,
 	      <0x0 0xff007484 0x0 0x4>,
 	      <0x0 0xff007694 0x0 0x4>,
-	      <0x0 0xff009c6c 0x0 0x4>;
+	      <0x0 0xff009c6c 0x0 0x4>,
+	      <0x0 0xff009d0c 0x0 0x4>,
+	      <0x0 0xff00e440 0x0 0x38>;
 	reg-names = "osd1", "venc", "rdma", "pll", "vid2", "vid-div",
-		    "vpp", "blend", "scaler", "post-size", "out-size", "hdmi-setting";
+		    "vpp", "blend", "scaler", "post-size", "out-size", "hdmi-setting",
+		    "hdmi-format", "osd-matrix";
 	amlogic,clock-controller = <&clkc_periphs>;
 	clocks = <&clkc_periphs CLKID_SYS_VPU_INTR>,
 		 <&clkc_periphs CLKID_VPU>, <&clkc_periphs CLKID_VAPB>,
