@@ -102,7 +102,7 @@ typedef int spinlock_t;
 typedef int wait_queue_head_t;
 typedef int irqreturn_t;
 struct drm_device { int event_lock; };
-struct dma_fence { int error; bool signaled; };
+struct dma_fence { int error; bool signaled; unsigned int refs; };
 struct completion { unsigned int completed, released; };
 struct drm_pending_event {
     struct dma_fence *fence;
@@ -269,6 +269,10 @@ static void drm_crtc_send_vblank_event(struct drm_crtc *crtc, void *event)
 }
 static void dma_fence_set_error(struct dma_fence *fence, int error) { fence->error=error; }
 static void dma_fence_signal(struct dma_fence *fence) { fence->signaled=true; }
+static struct dma_fence *dma_fence_get(struct dma_fence *fence)
+{if(fence) {assert(fence->refs);fence->refs++;}return fence;}
+static void dma_fence_put(struct dma_fence *fence)
+{if(fence) {assert(fence->refs>1);fence->refs--;}}
 static void complete_all(struct completion *completion) { completion->completed++; }
 static void release_completion(struct completion *completion) { completion->released++; }
 static void drm_event_cancel_free(struct drm_device *drm, struct drm_pending_event *event)
@@ -299,8 +303,11 @@ static void drm_framebuffer_put(struct drm_framebuffer *fb)
     assert(fb->references > 1);
     fb->references--;
 }
+static inline struct dma_fence *meson_t7_video_claim_reader(struct drm_plane_state *state)
+{return NULL;}
 struct meson_t7_video_kms {
     struct drm_framebuffer *frames[2];
+    struct dma_fence *readers[2];
     bool fail_enable;
     unsigned int configured, enabled;
 };
@@ -314,6 +321,12 @@ static int meson_t7_video_collect(struct meson_t7_video_kms *video,
 static bool meson_t7_video_in_use(struct meson_t7_video_kms *video,
     struct drm_atomic_commit *commit)
 { return video != NULL; }
+static int meson_t7_video_collect_readers(struct meson_t7_video_kms *video,
+    struct drm_atomic_commit *commit, bool blank, struct dma_fence **readers)
+{
+    if(video && !blank) for(unsigned int i=0;i<2;i++) readers[i]=video->readers[i];
+    return 0;
+}
 static int meson_t7_video_flip(struct meson_t7_video_kms *video,
     struct drm_atomic_commit *commit, bool blank, u32 *table, unsigned int pairs)
 { return 0; }
@@ -429,6 +442,7 @@ int main(void)
     rmfb.plane = &visible;
     display.faulted = false;
     display.buffers.faulted = false;
+    display.readers = (struct meson_t7_scanout_readers){0};
     assert(meson_t7_handoff_plane_check(&display.plane, &rmfb) == -EINVAL);
     display.linear_formats = true;
     assert(!meson_t7_handoff_plane_check(&display.plane, &rmfb));
@@ -636,7 +650,9 @@ int main(void)
     five.crtc.dev=&five.drm;
     struct drm_framebuffer va={.references=1}, vb={.references=1};
     struct drm_framebuffer vc={.references=1}, vd={.references=1};
-    struct meson_t7_video_kms video={.frames={&va,&vb}};
+    struct dma_fence fva={.refs=1},fvb={.refs=1},fvc={.refs=1},fvd={.refs=1};
+    struct dma_fence fve={.refs=1},fvf={.refs=1};
+    struct meson_t7_video_kms video={.frames={&va,&vb},.readers={&fva,&fvb}};
     five.video=&video;
     for (unsigned int i=0;i<3;i++) {
         struct drm_plane *p=i?&five.extra_planes[i-1]:&five.plane;
@@ -649,22 +665,31 @@ int main(void)
     meson_t7_handoff_flush(&five.crtc,&multi_commit);
     assert(vblanks-frame_start==4 && sent==previously_sent+1);
     assert(video.configured==1 && video.enabled==1);
+    assert(!fva.signaled && !fvb.signaled && fva.refs==2 && fvb.refs==2);
     assert(va.references==2 && vb.references==2 && (pipeline[0x4800]&1));
     video.frames[0]=&vc; video.frames[1]=&vd;
+    video.readers[0]=&fvc;video.readers[1]=&fvd;
     output.event=&event;
     meson_t7_handoff_flush(&five.crtc,&multi_commit);
     assert(va.references==1 && vb.references==1 && vc.references==2 && vd.references==2);
+    assert(fva.signaled && fvb.signaled && fva.refs==1 && fvb.refs==1);
+    assert(!fvc.signaled && !fvd.signaled);
     video.frames[0]=video.frames[1]=NULL;
     meson_t7_handoff_scanout_layers(&five,&multi_commit,true);
     assert(vc.references==1 && vd.references==1 && !(pipeline[0x4800]&1));
+    assert(fvc.signaled && fvd.signaled && fvc.refs==1 && fvd.refs==1);
     video.frames[0]=&va; video.frames[1]=&vb; video.fail_enable=true;
+    video.readers[0]=&fve;video.readers[1]=&fvf;
     output.event=&event; previously_sent=sent;
     meson_t7_handoff_flush(&five.crtc,&multi_commit);
     assert(five.faulted && five.buffers.faulted && !output.event && sent==previously_sent);
     assert(va.references==3 && vb.references==3); /* Both enabling generations pinned. */
+    assert(five.readers.faulted && !fve.signaled && !fvf.signaled);
+    assert(fve.refs==3 && fvf.refs==3);
     rdma[0x15]=RDMA_IRQ_STAT_CHAN1;
     meson_t7_handoff_rdma_irq(0,&five); meson_t7_handoff_irq(0,&five);
     assert(va.references==3 && vb.references==3);
+    assert(!fve.signaled && !fvf.signaled && fve.refs==3 && fvf.refs==3);
     puts("Video retirement: two-phase latch/drain, two video references, RMFB and enable failure pinning passed");
 }
 '''

@@ -13,6 +13,14 @@ prefix = r'''
 #include <stdbool.h>
 #include <stddef.h>
 #include <errno.h>
+#include <stdint.h>
+typedef uint32_t u32;
+struct dma_fence {unsigned int refs;bool signaled;};
+static struct dma_fence *dma_fence_get(struct dma_fence *f)
+{if(f) {assert(f->refs);f->refs++;}return f;}
+static void dma_fence_put(struct dma_fence *f)
+{if(f) {assert(f->refs>1);f->refs--;}}
+static void dma_fence_signal(struct dma_fence *f) {assert(f);f->signaled=true;}
 struct drm_framebuffer { unsigned int refs; };
 static void drm_framebuffer_get(struct drm_framebuffer *fb) { fb->refs++; }
 static void drm_framebuffer_put(struct drm_framebuffer *fb)
@@ -93,6 +101,68 @@ int main(void)
     assert(a.refs == 11); /* Blank latched, but the previous fetch may still run. */
     meson_t7_scanout_retire(&disabled, true); /* One further vsync drains it. */
     assert(a.refs == 6);
+
+    /* Every new latch can advance while the preceding reader drains. */
+    struct meson_t7_scanout_readers readers={0};
+    struct dma_fence frames[2][120]={0};
+    struct dma_fence *incoming[MESON_T7_MAX_LAYERS]={0};
+    u32 vsync=UINT32_MAX-1;
+    for(unsigned int frame=0;frame<120;frame++,vsync++) {
+        for(unsigned int plane=0;plane<2;plane++) {
+            frames[plane][frame].refs=1;
+            incoming[3+plane]=&frames[plane][frame];
+        }
+        meson_t7_scanout_readers_vsync(&readers,vsync);
+        assert(!meson_t7_scanout_readers_acquire(&readers,incoming));
+        assert(meson_t7_scanout_readers_advance(&readers,vsync));
+        meson_t7_scanout_readers_vsync(&readers,vsync);
+        for(unsigned int plane=0;plane<2;plane++) {
+            assert(!frames[plane][frame].signaled && frames[plane][frame].refs==2);
+            if(frame) {
+                assert(!frames[plane][frame-1].signaled);
+                assert(frames[plane][frame-1].refs==2);
+            }
+            if(frame>1) {
+                assert(frames[plane][frame-2].signaled);
+                assert(frames[plane][frame-2].refs==1);
+            }
+        }
+    }
+    /* An idle producer needs no further atomic commit to retire frame118. */
+    meson_t7_scanout_readers_vsync(&readers,vsync);
+    assert(frames[0][118].signaled && !frames[0][119].signaled);
+    for(unsigned int i=0;i<MESON_T7_MAX_LAYERS;i++) incoming[i]=NULL;
+    assert(!meson_t7_scanout_readers_acquire(&readers,incoming));
+    assert(meson_t7_scanout_readers_advance(&readers,vsync));
+    meson_t7_scanout_readers_vsync(&readers,vsync);
+    assert(!frames[0][119].signaled);
+    meson_t7_scanout_readers_vsync(&readers,vsync+1);
+    assert(frames[0][119].signaled && frames[1][119].signaled);
+
+    struct meson_t7_scanout_readers fault={0};
+    struct dma_fence first={.refs=1},second={.refs=1},third={.refs=1};
+    incoming[3]=&first;
+    assert(!meson_t7_scanout_readers_acquire(&fault,incoming));
+    incoming[3]=&second;
+    assert(meson_t7_scanout_readers_acquire(&fault,incoming)==-EBUSY);
+    assert(first.refs==2 && second.refs==1);
+    assert(meson_t7_scanout_readers_advance(&fault,10));
+    /* A two-phase transaction keeps the same reader alive without signaling. */
+    incoming[3]=&first;
+    assert(!meson_t7_scanout_readers_acquire(&fault,incoming));
+    assert(meson_t7_scanout_readers_advance(&fault,10));
+    assert(!first.signaled && first.refs==2);
+    incoming[3]=&second;
+    assert(!meson_t7_scanout_readers_acquire(&fault,incoming));
+    assert(meson_t7_scanout_readers_advance(&fault,11));
+    incoming[3]=&third;
+    assert(!meson_t7_scanout_readers_acquire(&fault,incoming));
+    assert(!meson_t7_scanout_readers_advance(&fault,11));
+    assert(fault.faulted && !first.signaled && !second.signaled && !third.signaled);
+    meson_t7_scanout_readers_vsync(&fault,1000);
+    assert(!first.signaled && !second.signaled && !third.signaled);
+    assert(first.refs==2 && second.refs==2 && third.refs==2);
+    assert(meson_t7_scanout_readers_acquire(&fault,incoming)==-EIO);
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
@@ -102,4 +172,4 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     str(code), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
-print('Five-layer retirement: shared buffers, 120 updates, RMFB/disable and timeout pinning passed')
+print('Five-layer retirement: aliases, pipelined readers, wrap, idle completion and fault pinning passed')

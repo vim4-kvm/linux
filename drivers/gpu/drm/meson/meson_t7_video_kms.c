@@ -19,6 +19,7 @@
 #include "meson_t7_layers.h"
 #include "meson_t7_video.h"
 #include "meson_t7_video_kms.h"
+#include "meson_t7_video_sync.h"
 
 static const struct {
 	const char *name;
@@ -194,7 +195,8 @@ static void video_plane_update(struct drm_plane *plane, struct drm_atomic_commit
 }
 
 static const struct drm_plane_helper_funcs video_plane_helpers = {
-	.prepare_fb = drm_gem_plane_helper_prepare_fb,
+	.prepare_fb = meson_t7_video_prepare_fb,
+	.cleanup_fb = meson_t7_video_cleanup_fb,
 	.atomic_check = video_plane_check,
 	.atomic_update = video_plane_update,
 	.atomic_disable = video_plane_update,
@@ -204,9 +206,9 @@ static const struct drm_plane_funcs video_plane_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
 	.destroy = drm_plane_cleanup,
-	.reset = drm_atomic_helper_plane_reset,
-	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
-	.atomic_destroy_state = drm_atomic_helper_plane_destroy_state,
+	.reset = meson_t7_video_plane_reset,
+	.atomic_duplicate_state = meson_t7_video_plane_duplicate_state,
+	.atomic_destroy_state = meson_t7_video_plane_destroy_state,
 };
 
 int meson_t7_video_planes_init(struct meson_t7_video_kms *video, struct drm_device *drm)
@@ -270,6 +272,27 @@ int meson_t7_video_collect(struct meson_t7_video_kms *video, struct drm_atomic_c
 
 		/* Affected-plane expansion omits disabled, unattached planes. */
 		frames[i] = state && !blank && state->visible ? state->fb : NULL;
+	}
+	return 0;
+}
+
+int meson_t7_video_collect_readers(struct meson_t7_video_kms *video,
+				   struct drm_atomic_commit *commit, bool blank,
+				   struct dma_fence **readers)
+{
+	unsigned int i;
+
+	if (!video || blank)
+		return 0;
+	for (i = 0; i < ARRAY_SIZE(video->planes); i++) {
+		struct drm_plane_state *state;
+
+		state = drm_atomic_get_new_plane_state(commit, &video->planes[i]);
+		if (!state || !state->visible || !state->fb)
+			continue;
+		readers[i] = meson_t7_video_claim_reader(state);
+		if (!readers[i])
+			return -EINVAL;
 	}
 	return 0;
 }
