@@ -14,6 +14,16 @@ struct meson_t7_clock {
 	bool fractional;
 };
 
+struct meson_t7_link_clock {
+	struct meson_t7_clock pll;
+	u32 tmds_khz;
+	u16 shift;
+	u8 shift_sel, od3, pixel_div;
+};
+
+int meson_t7_link_clock_calculate(unsigned int pixel_khz, unsigned int bpc,
+				  bool yuv420, struct meson_t7_link_clock *link);
+
 int meson_t7_clock_calculate(unsigned int pixel_khz, struct meson_t7_clock *clock);
 enum drm_mode_status meson_t7_mode_valid(const struct drm_display_mode *mode);
 struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev);

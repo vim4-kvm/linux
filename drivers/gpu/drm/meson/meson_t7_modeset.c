@@ -51,6 +51,50 @@ int meson_t7_clock_calculate(unsigned int pixel_khz, struct meson_t7_clock *cloc
 	return 0;
 }
 
+/* T7 hw_clk.c: deep colour changes the serializer PLL and VID_PLL divider.
+ * 420 runs ENC at the full pixel rate, with half-rate PNX/pixel clocks.
+ */
+int meson_t7_link_clock_calculate(unsigned int pixel_khz, unsigned int bpc,
+				  bool yuv420, struct meson_t7_link_clock *link)
+{
+	struct meson_t7_clock *clock = &link->pll;
+	u32 vco, div = 1, remainder;
+
+	if (pixel_khz < 25175 || pixel_khz > 594000 || (bpc != 8 && bpc != 10))
+		return -ERANGE;
+	link->tmds_khz = DIV_ROUND_CLOSEST(pixel_khz * bpc, yuv420 ? 16 : 8);
+	if (link->tmds_khz > 600000)
+		return -ERANGE;
+	vco = pixel_khz * (bpc == 10 ? 25 : 20) / 2;
+	if (yuv420 && bpc == 10)
+		vco /= 2;
+	while (vco < 3000000 && div < 16) {
+		vco *= 2;
+		div *= 2;
+	}
+	if (vco < 3000000 || vco >= 6000000)
+		return -ERANGE;
+	if (yuv420 && bpc == 8)
+		div *= 2;
+	clock->od1 = min(div, 4U);
+	clock->od2 = div / clock->od1;
+	if (clock->od2 > 4)
+		return -ERANGE;
+	clock->fractional = abs((int)vco - 5934066) <= div * 5;
+	clock->vco = clock->fractional ? 5940000 : vco;
+	clock->m = clock->vco / 24000;
+	remainder = clock->vco % 24000;
+	clock->frac = (remainder / 16 * (1 << 17) / 1500) +
+		     (remainder % 16 * (1 << 13) / 1500);
+	if (clock->fractional)
+		clock->frac = 0x8168;
+	link->od3 = yuv420 ? 1 : 2;
+	link->pixel_div = yuv420 ? 2 : 1;
+	link->shift = bpc == 10 ? 0 : 0x739c;
+	link->shift_sel = bpc == 10 ? 3 : 2;
+	return 0;
+}
+
 enum drm_mode_status meson_t7_mode_valid(const struct drm_display_mode *mode)
 {
 	struct meson_t7_clock clock;
