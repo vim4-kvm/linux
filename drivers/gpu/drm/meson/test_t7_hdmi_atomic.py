@@ -94,13 +94,21 @@ static void cor_write(struct meson_hdmitx21 *t,u32 reg,u8 value) {
     else if(reg==0x6df) enable[bank]=value;
     else {assert(reg>=0x6c0 && reg<0x6df);packets[bank][reg-0x6c0]=value;}
 }
+static u8 cor_read(struct meson_hdmitx21 *t,u32 reg) {
+    assert(locked);
+    if(reg==0x6bf) return bank;
+    if(reg==0x6df) return enable[bank];
+    assert(reg>=0x6c0 && reg<0x6df);
+    return packets[bank][reg-0x6c0];
+}
 '''
 program += '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 program += '\n' + header[header.index('struct meson_t7_clock {'):
                   header.index('int meson_t7_link_clock_calculate')]
 program += function(clock, 'meson_t7_link_clock_calculate')
 for name in ['meson_hdmitx21_bridge_atomic_check', 'meson_hdmitx21_write_infoframe',
-             'meson_hdmitx21_write_hdr_infoframe', 'meson_hdmitx21_clear_hdr_infoframe']:
+             'meson_hdmitx21_write_hdr_infoframe', 'meson_hdmitx21_clear_hdr_infoframe',
+             'meson_hdmitx21_read_packet']:
     program += '\n' + function(source, name)
 program += r'''
 int main(void) {
@@ -159,6 +167,13 @@ int main(void) {
     assert(enable[6]==0xe0 && packets[6][29]==30 && !packets[6][30]);
     assert(!meson_hdmitx21_clear_hdr_infoframe(NULL) && !enable[6]);
     assert(enable[2]==0xe0 && packets[2][0]==0x84 && !locked);
+    u8 snapshot[31];
+    for(unsigned int saved=0;saved<8;saved++) {
+        bank=saved;
+        assert(meson_hdmitx21_read_packet(&tx,2,snapshot)==0xe0);
+        assert(bank==saved && snapshot[0]==0x84 && !locked);
+        assert(enable[2]==0xe0); /* Observation must not stop audio packets. */
+    }
     puts("HDMI atomic: HDR/EOTF/depth/range, mixed-gamut refusal, 420/SCDC, RMFB and packet clearing passed");
 }
 '''

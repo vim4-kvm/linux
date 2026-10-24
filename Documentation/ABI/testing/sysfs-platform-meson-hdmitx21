@@ -1,0 +1,16 @@
+What:           /sys/bus/platform/devices/*hdmi*/link_state
+Date:           October 2026
+Contact:        localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+Description:
+                Read-only diagnostic snapshot for the T7 ENC2 HDMI transmitter.
+                Reports TOP active size, PHY controls, transport controls and
+                the AVI, audio and DRM InfoFrame banks as hexadecimal bytes.
+                SCDC TMDS configuration and status flags are read from the
+                connected sink; each read includes its Linux error result.
+                An unsupported or disconnected sink may return a negative
+                result. Reading never writes sink SCDC configuration.
+
+                Packet reads serialize against packet updates and restore the
+                previous bank selector. The complete snapshot is not atomic
+                with respect to a modeset; read it while the mode is stable.
+                This interface is available only for the ENC2 modeset profile.

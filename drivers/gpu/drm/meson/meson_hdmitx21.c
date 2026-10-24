@@ -327,7 +327,7 @@ static int meson_hdmitx21_ddc_wait_idle(struct meson_hdmitx21 *tx)
 	return -EBUSY;
 }
 
-static int meson_hdmitx21_ddc_read(struct meson_hdmitx21 *tx, u8 segment,
+static int meson_hdmitx21_ddc_read(struct meson_hdmitx21 *tx, u8 address, u8 segment,
 				   u8 offset, u8 *buf, unsigned int len)
 {
 	unsigned int timeout = len * 12 / 10 + 10;
@@ -339,7 +339,7 @@ static int meson_hdmitx21_ddc_read(struct meson_hdmitx21 *tx, u8 segment,
 		return ret;
 
 	cor_update(tx, TPI_DDC_MASTER_EN, TPI_DDC_HW_EN, TPI_DDC_HW_EN);
-	cor_write(tx, DDC_ADDR_REG, DDC_EDID_ADDR << 1);
+	cor_write(tx, DDC_ADDR_REG, address << 1);
 	cor_write(tx, DDC_SEGM, segment);
 	cor_write(tx, DDC_OFFSET, offset);
 	cor_write(tx, DDC_DIN_CNT2, len >> 8);
@@ -418,6 +418,74 @@ out:
 	return ret;
 }
 
+static u8 meson_hdmitx21_read_packet(struct meson_hdmitx21 *tx, u8 bank, u8 *packet)
+{
+	u8 saved, enabled;
+	unsigned int i;
+
+	/* Readers must not change the bank used by audio or an atomic commit. */
+	mutex_lock(&tx->packet_lock);
+	saved = cor_read(tx, TPI_INFO_FSEL);
+	cor_write(tx, TPI_INFO_FSEL, bank);
+	enabled = cor_read(tx, TPI_INFO_EN);
+	for (i = 0; i < TPI_INFO_EN - TPI_INFO_B0; i++)
+		packet[i] = cor_read(tx, TPI_INFO_B0 + i);
+	cor_write(tx, TPI_INFO_FSEL, saved);
+	mutex_unlock(&tx->packet_lock);
+	return enabled;
+}
+
+static ssize_t link_state_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct meson_hdmitx21 *tx = dev_get_drvdata(dev);
+	static const u8 banks[] = {
+		TPI_INFO_FSEL_AVI, TPI_INFO_FSEL_AUDIO, TPI_INFO_FSEL_DRM,
+	};
+	u8 packet[TPI_INFO_EN - TPI_INFO_B0], scdc_config = 0, scdc_status = 0;
+	int config_ret = -ENOLINK, status_ret = -ENOLINK;
+	unsigned int i;
+	ssize_t count;
+
+	count = sysfs_emit(buf, "top=%08x active=%08x phy0=%08x phy1=%08x phy3=%08x\n",
+			   top_read(tx, TOP_STAT0), top_read(tx, TOP_HV_ACTIVE),
+			   phy_read(tx, PHY_CTRL0), phy_read(tx, PHY_CTRL1),
+			   phy_read(tx, PHY_CTRL3));
+	count += sysfs_emit_at(buf, count,
+			       "tpi=%02x p2t=%02x scrctl=%02x clkratio=%02x gcp=%02x csc=%02x/%02x\n",
+			       cor_read(tx, TPI_SC), cor_read(tx, P2T_CTRL), cor_read(tx, SCRCTL),
+			       cor_read(tx, CLKRATIO), cor_read(tx, GCP_CNTL),
+			       cor_read(tx, CSC0_CTRL), cor_read(tx, CSC1_CTRL));
+	for (i = 0; i < ARRAY_SIZE(banks); i++) {
+		u8 enabled = meson_hdmitx21_read_packet(tx, banks[i], packet);
+
+		count += sysfs_emit_at(buf, count, "packet%u enable=%02x data=%*ph\n",
+				       banks[i], enabled, (int)sizeof(packet), packet);
+	}
+	/* Read sink status through the same bounded, serialized DDC master.
+	 * No SCDC configuration is written by this diagnostic interface.
+	 */
+	mutex_lock(&tx->ddc_lock);
+	if (gpiod_get_value_cansleep(tx->hpd) > 0) {
+		config_ret = meson_hdmitx21_ddc_read(tx, DDC_SCDC_ADDR, 0,
+						     SCDC_TMDS_CONFIG, &scdc_config, 1);
+		status_ret = meson_hdmitx21_ddc_read(tx, DDC_SCDC_ADDR, 0,
+						     0x40, &scdc_status, 1);
+	}
+	mutex_unlock(&tx->ddc_lock);
+	return count + sysfs_emit_at(buf, count, "scdc_config=%02x ret=%d status=%02x ret=%d\n",
+				    scdc_config, config_ret, scdc_status, status_ret);
+}
+static DEVICE_ATTR_RO(link_state);
+
+static struct attribute *meson_hdmitx21_link_attrs[] = {
+	&dev_attr_link_state.attr,
+	NULL,
+};
+
+static const struct attribute_group meson_hdmitx21_link_group = {
+	.attrs = meson_hdmitx21_link_attrs,
+};
+
 /*
  * The DDC master only does EDID style reads: optional segment write to
  * 0x30, offset write to 0x50, then a read from 0x50.
@@ -456,7 +524,7 @@ static int meson_hdmitx21_i2c_xfer(struct i2c_adapter *adap,
 			   msg->len == 1) {
 			offset = msg->buf[0];
 		} else if (msg->addr == DDC_EDID_ADDR && (msg->flags & I2C_M_RD)) {
-			ret = meson_hdmitx21_ddc_read(tx, segment, offset,
+			ret = meson_hdmitx21_ddc_read(tx, DDC_EDID_ADDR, segment, offset,
 						      msg->buf, msg->len);
 			if (ret)
 				break;
@@ -1447,6 +1515,7 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 		return PTR_ERR(tx);
 	tx->dev = dev;
 	tx->enc2_modeset = enc2;
+	platform_set_drvdata(pdev, tx);
 	tx->atomic_color = of_property_read_bool(dev->of_node, "amlogic,atomic-color");
 	if (tx->atomic_color && !enc2)
 		return -EINVAL;
@@ -1515,6 +1584,11 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	ret = devm_drm_bridge_add(dev, &tx->bridge);
 	if (ret || !monitor)
 		return ret;
+	if (enc2) {
+		ret = devm_device_add_group(dev, &meson_hdmitx21_link_group);
+		if (ret)
+			return ret;
+	}
 	/* Stop work before the managed bridge is removed. */
 	return devm_add_action_or_reset(dev, meson_hdmitx21_monitor_cleanup, tx);
 }
