@@ -89,6 +89,9 @@ struct meson_hdmitx21 {
 #define msecs_to_jiffies(x) (x)
 static int queued, cancelled, notifications, disconnected;
 static enum drm_connector_status notified;
+static int cec_invalidations;
+static void drm_connector_cec_phys_addr_invalidate(struct drm_connector *connector)
+{ cec_invalidations++; }
 static int gpiod_get_value_cansleep(struct gpio_desc *gpio) { return gpio->level; }
 static void meson_hdmitx21_audio_disconnect(struct meson_hdmitx21 *tx) { disconnected++; }
 static void schedule_delayed_work(struct delayed_work *w, int delay) { queued++; }
@@ -100,9 +103,17 @@ hpd += functions('static enum drm_connector_status\nmeson_hdmitx21_bridge_detect
                  'static const struct drm_edid *')
 hpd += functions('static void meson_hdmitx21_hpd_work',
                  'static void meson_hdmitx21_monitor_cleanup')
+hpd += functions('static void meson_hdmitx21_cec_hpd_notify',
+                 '/* GPIOW15 is the T7 HPD level.')
 hpd += r'''
 int main(void)
 {
+    struct drm_connector connector = {0};
+    meson_hdmitx21_cec_hpd_notify(NULL, &connector, connector_status_connected);
+    meson_hdmitx21_cec_hpd_notify(NULL, &connector, connector_status_unknown);
+    assert(cec_invalidations == 0);
+    meson_hdmitx21_cec_hpd_notify(NULL, &connector, connector_status_disconnected);
+    assert(cec_invalidations == 1);
     struct gpio_desc gpio = {0};
     struct meson_hdmitx21 tx = {.hpd = &gpio};
     meson_hdmitx21_monitor_hpd_enable(&tx.bridge);
@@ -236,7 +247,8 @@ struct hdmi_codec_daifmt { int fmt; };
 struct hdmi_codec_params { int channels, sample_rate, sample_width; };
 struct meson_hdmitx21 {
     struct drm_bridge bridge;
-    int audio_lock, pixel_khz;
+    int audio_lock;
+    unsigned long long tmds_hz;
     bool sink_hdmi, audio_enabled, audio_muted;
     struct hdmi_codec_params audio_params;
 };
@@ -258,12 +270,12 @@ int main(void)
     struct hdmi_codec_daifmt fmt = {HDMI_I2S};
     struct hdmi_codec_params params = {2,48000,24};
     /* Monitor-only handoff must not acquire audio register ownership. */
-    meson_hdmitx21_audio_mode(&tx, 148500, true);
+    meson_hdmitx21_audio_mode(&tx, 148500000, true);
     meson_hdmitx21_audio_disconnect(&tx);
-    assert(!tx.pixel_khz && !configured && !stopped);
+    assert(!tx.tmds_hz && !configured && !stopped);
     tx.bridge.ops = DRM_BRIDGE_OP_HDMI_AUDIO;
     assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -ENODEV);
-    tx.pixel_khz = 148500; /* DVI must not transmit audio packets */
+    tx.tmds_hz = 148500000; /* DVI must not transmit audio packets */
     assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -ENODEV);
     tx.sink_hdmi = true;
     int rates[] = {32000,44100,48000,88200,96000,176400,192000};
@@ -274,13 +286,13 @@ int main(void)
     assert(configured == 7 && tx.audio_enabled && !locked);
     /* HPD loss immediately closes prepare, even before userspace disables KMS. */
     meson_hdmitx21_audio_disconnect(&tx);
-    assert(!tx.pixel_khz && !tx.sink_hdmi && stopped == 1);
+    assert(!tx.tmds_hz && !tx.sink_hdmi && stopped == 1);
     assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -ENODEV);
-    meson_hdmitx21_audio_mode(&tx, 297000, true);
-    assert(tx.pixel_khz == 297000 && tx.sink_hdmi && configured == 8);
-    meson_hdmitx21_audio_mode(&tx, 148500, false);
+    meson_hdmitx21_audio_mode(&tx, 297000000, true);
+    assert(tx.tmds_hz == 297000000 && tx.sink_hdmi && configured == 8);
+    meson_hdmitx21_audio_mode(&tx, 148500000, false);
     assert(!tx.sink_hdmi && stopped == 2);
-    meson_hdmitx21_audio_mode(&tx, 148500, true);
+    meson_hdmitx21_audio_mode(&tx, 148500000, true);
     params.sample_rate = 12345;
     assert(meson_hdmitx21_audio_prepare(&tx.bridge, NULL, &fmt, &params) == -EINVAL);
     params.sample_rate = 48000; params.sample_width = 32;
@@ -292,7 +304,7 @@ int main(void)
     assert(configured == 9);
     meson_hdmitx21_audio_mute_stream(&tx.bridge, NULL, true, 0);
     assert(tx.audio_muted && muted == 1);
-    tx.pixel_khz = 0;
+    tx.tmds_hz = 0;
     meson_hdmitx21_audio_mute_stream(&tx.bridge, NULL, false, 0);
     assert(!tx.audio_muted && muted == 1);
     meson_hdmitx21_audio_shutdown(&tx.bridge, NULL);
@@ -321,7 +333,7 @@ struct hdmi_codec_params {
 };
 struct meson_hdmitx21 {
     struct hdmi_codec_params audio_params;
-    unsigned int pixel_khz;
+    unsigned long long tmds_hz;
     bool sink_hdmi, audio_muted;
     int packet_lock;
 };
@@ -343,7 +355,8 @@ static void cor_update(struct meson_hdmitx21 *tx, u32 reg, u8 mask, u8 value)
 { cor_write(tx, reg, (cor[reg] & ~mask) | (value & mask)); }
 static void drm_hdmi_acr_get_n_cts(unsigned long long clock, unsigned int rate,
                                   unsigned int *n, unsigned int *cts) {
-    assert(clock == 148500000 || clock == 297000000 || clock == 594000000);
+    assert(clock == 148500000 || clock == 297000000 || clock == 594000000 ||
+           clock == 185625000 || clock == 371250000 || clock == 92812500);
     assert(rate == 48000); *n=6144; *cts=clock / 1000; acr_calls++;
 }
 static ssize_t hdmi_audio_infoframe_pack(void *frame, u8 *buf, size_t size) {
@@ -360,12 +373,12 @@ audio_hw += r'''
 int main(void) {
     struct meson_hdmitx21 tx = {.audio_params = {.sample_rate=48000, .sample_width=24}};
     meson_hdmitx21_audio_config(&tx); assert(!writes);
-    tx.pixel_khz=148500;
+    tx.tmds_hz=148500000;
     meson_hdmitx21_audio_config(&tx); assert(!writes); /* DVI */
     tx.sink_hdmi=true; tx.audio_muted=true;
-    unsigned int clocks[] = {148500,297000,594000};
-    for (unsigned int i=0; i<3; i++) {
-        tx.pixel_khz=clocks[i]; top=~0U;
+    unsigned int clocks[] = {148500000,297000000,594000000,185625000,371250000,92812500};
+    for (unsigned int i=0; i<6; i++) {
+        tx.tmds_hz=clocks[i]; top=~0U;
         meson_hdmitx21_audio_config(&tx);
         assert(cor[0xa03] == 0 && cor[0xa04] == 24 && cor[0xa05] == 0);
         assert(cor[0xa01] == 2 && !cor[0xa13] && cor[0xa2f] == 0x80);
@@ -378,7 +391,7 @@ int main(void) {
     assert(cor[0xa13] == 3 && !(cor[0xa2f] & 0x80) && !(cor[0xa62] & 0x10));
     meson_hdmitx21_audio_off(&tx);
     assert(!cor[0xa13] && !(cor[0xa01] & 2) && !cor[0x6df] && !locked);
-    assert(acr_calls == 4);
+    assert(acr_calls == 7);
     puts("Audio registers: ACR clocks, DVI gating, persistent mute and packet-window locking passed");
 }
 '''

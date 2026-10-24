@@ -29,10 +29,13 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_connector.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_plane.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_print.h>
 #include <drm/display/drm_hdmi_helper.h>
+#include <drm/display/drm_hdmi_state_helper.h>
 #include <sound/hdmi-codec.h>
 #include <linux/hdmi.h>
 #include <linux/media-bus-format.h>
@@ -112,6 +115,7 @@
 #define  TPI_INFO_FSEL_AVI	0
 #define  TPI_INFO_FSEL_AUDIO	2
 #define  TPI_INFO_FSEL_VENDOR	5
+#define  TPI_INFO_FSEL_DRM	6
 #define TPI_INFO_B0		0x6c0
 #define TPI_INFO_EN		0x6df
 #define GCP_CNTL		0x6e1
@@ -185,13 +189,14 @@ struct meson_hdmitx21 {
 	bool audio_muted;
 	bool sink_hdmi;
 	struct hdmi_codec_params audio_params;
-	int pixel_khz;
+	unsigned long long tmds_hz;
 	struct gpio_desc *hpd;
 	struct delayed_work hpd_work;
 	enum drm_connector_status hpd_sample, hpd_reported;
 	bool hpd_polling;
 	bool boot_monitor;
 	bool enc2_modeset;
+	bool atomic_color;
 	void __iomem *phy;
 };
 
@@ -322,7 +327,7 @@ static int meson_hdmitx21_ddc_wait_idle(struct meson_hdmitx21 *tx)
 	return -EBUSY;
 }
 
-static int meson_hdmitx21_ddc_read(struct meson_hdmitx21 *tx, u8 segment,
+static int meson_hdmitx21_ddc_read(struct meson_hdmitx21 *tx, u8 address, u8 segment,
 				   u8 offset, u8 *buf, unsigned int len)
 {
 	unsigned int timeout = len * 12 / 10 + 10;
@@ -334,7 +339,7 @@ static int meson_hdmitx21_ddc_read(struct meson_hdmitx21 *tx, u8 segment,
 		return ret;
 
 	cor_update(tx, TPI_DDC_MASTER_EN, TPI_DDC_HW_EN, TPI_DDC_HW_EN);
-	cor_write(tx, DDC_ADDR_REG, DDC_EDID_ADDR << 1);
+	cor_write(tx, DDC_ADDR_REG, address << 1);
 	cor_write(tx, DDC_SEGM, segment);
 	cor_write(tx, DDC_OFFSET, offset);
 	cor_write(tx, DDC_DIN_CNT2, len >> 8);
@@ -413,6 +418,74 @@ out:
 	return ret;
 }
 
+static u8 meson_hdmitx21_read_packet(struct meson_hdmitx21 *tx, u8 bank, u8 *packet)
+{
+	u8 saved, enabled;
+	unsigned int i;
+
+	/* Readers must not change the bank used by audio or an atomic commit. */
+	mutex_lock(&tx->packet_lock);
+	saved = cor_read(tx, TPI_INFO_FSEL);
+	cor_write(tx, TPI_INFO_FSEL, bank);
+	enabled = cor_read(tx, TPI_INFO_EN);
+	for (i = 0; i < TPI_INFO_EN - TPI_INFO_B0; i++)
+		packet[i] = cor_read(tx, TPI_INFO_B0 + i);
+	cor_write(tx, TPI_INFO_FSEL, saved);
+	mutex_unlock(&tx->packet_lock);
+	return enabled;
+}
+
+static ssize_t link_state_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct meson_hdmitx21 *tx = dev_get_drvdata(dev);
+	static const u8 banks[] = {
+		TPI_INFO_FSEL_AVI, TPI_INFO_FSEL_AUDIO, TPI_INFO_FSEL_DRM,
+	};
+	u8 packet[TPI_INFO_EN - TPI_INFO_B0], scdc_config = 0, scdc_status = 0;
+	int config_ret = -ENOLINK, status_ret = -ENOLINK;
+	unsigned int i;
+	ssize_t count;
+
+	count = sysfs_emit(buf, "top=%08x active=%08x phy0=%08x phy1=%08x phy3=%08x\n",
+			   top_read(tx, TOP_STAT0), top_read(tx, TOP_HV_ACTIVE),
+			   phy_read(tx, PHY_CTRL0), phy_read(tx, PHY_CTRL1),
+			   phy_read(tx, PHY_CTRL3));
+	count += sysfs_emit_at(buf, count,
+			       "tpi=%02x p2t=%02x scrctl=%02x clkratio=%02x gcp=%02x csc=%02x/%02x\n",
+			       cor_read(tx, TPI_SC), cor_read(tx, P2T_CTRL), cor_read(tx, SCRCTL),
+			       cor_read(tx, CLKRATIO), cor_read(tx, GCP_CNTL),
+			       cor_read(tx, CSC0_CTRL), cor_read(tx, CSC1_CTRL));
+	for (i = 0; i < ARRAY_SIZE(banks); i++) {
+		u8 enabled = meson_hdmitx21_read_packet(tx, banks[i], packet);
+
+		count += sysfs_emit_at(buf, count, "packet%u enable=%02x data=%*ph\n",
+				       banks[i], enabled, (int)sizeof(packet), packet);
+	}
+	/* Read sink status through the same bounded, serialized DDC master.
+	 * No SCDC configuration is written by this diagnostic interface.
+	 */
+	mutex_lock(&tx->ddc_lock);
+	if (gpiod_get_value_cansleep(tx->hpd) > 0) {
+		config_ret = meson_hdmitx21_ddc_read(tx, DDC_SCDC_ADDR, 0,
+						     SCDC_TMDS_CONFIG, &scdc_config, 1);
+		status_ret = meson_hdmitx21_ddc_read(tx, DDC_SCDC_ADDR, 0,
+						     0x40, &scdc_status, 1);
+	}
+	mutex_unlock(&tx->ddc_lock);
+	return count + sysfs_emit_at(buf, count, "scdc_config=%02x ret=%d status=%02x ret=%d\n",
+				    scdc_config, config_ret, scdc_status, status_ret);
+}
+static DEVICE_ATTR_RO(link_state);
+
+static struct attribute *meson_hdmitx21_link_attrs[] = {
+	&dev_attr_link_state.attr,
+	NULL,
+};
+
+static const struct attribute_group meson_hdmitx21_link_group = {
+	.attrs = meson_hdmitx21_link_attrs,
+};
+
 /*
  * The DDC master only does EDID style reads: optional segment write to
  * 0x30, offset write to 0x50, then a read from 0x50.
@@ -451,7 +524,7 @@ static int meson_hdmitx21_i2c_xfer(struct i2c_adapter *adap,
 			   msg->len == 1) {
 			offset = msg->buf[0];
 		} else if (msg->addr == DDC_EDID_ADDR && (msg->flags & I2C_M_RD)) {
-			ret = meson_hdmitx21_ddc_read(tx, segment, offset,
+			ret = meson_hdmitx21_ddc_read(tx, DDC_EDID_ADDR, segment, offset,
 						      msg->buf, msg->len);
 			if (ret)
 				break;
@@ -560,6 +633,11 @@ static void meson_hdmitx21_write_infoframe(struct meson_hdmitx21 *tx, u8 sel,
 
 	mutex_lock(&tx->packet_lock);
 	cor_write(tx, TPI_INFO_FSEL, sel);
+	if (!buf) {
+		cor_write(tx, TPI_INFO_EN, 0);
+		mutex_unlock(&tx->packet_lock);
+		return;
+	}
 	for (i = 0; i < 31; i++)
 		cor_write(tx, TPI_INFO_B0 + i, i < len ? buf[i] : 0);
 	cor_write(tx, TPI_INFO_EN, 0xe0);
@@ -657,6 +735,69 @@ static void meson_hdmitx21_config(struct meson_hdmitx21 *tx,
 	cor_update(tx, TPI_SC, TPI_SC_HDMI_MODE, hdmi_mode ? TPI_SC_HDMI_MODE : 0);
 }
 
+static int meson_hdmitx21_write_avi_infoframe(struct drm_bridge *bridge,
+					      const u8 *buffer, size_t len)
+{
+	meson_hdmitx21_write_infoframe(bridge_to_hdmitx(bridge), TPI_INFO_FSEL_AVI, buffer, len);
+	return 0;
+}
+
+static int meson_hdmitx21_clear_avi_infoframe(struct drm_bridge *bridge)
+{
+	return meson_hdmitx21_write_avi_infoframe(bridge, NULL, 0);
+}
+
+static int meson_hdmitx21_write_hdmi_infoframe(struct drm_bridge *bridge,
+					       const u8 *buffer, size_t len)
+{
+	meson_hdmitx21_write_infoframe(bridge_to_hdmitx(bridge), TPI_INFO_FSEL_VENDOR, buffer, len);
+	return 0;
+}
+
+static int meson_hdmitx21_clear_hdmi_infoframe(struct drm_bridge *bridge)
+{
+	return meson_hdmitx21_write_hdmi_infoframe(bridge, NULL, 0);
+}
+
+static int meson_hdmitx21_write_hdr_infoframe(struct drm_bridge *bridge,
+					      const u8 *buffer, size_t len)
+{
+	meson_hdmitx21_write_infoframe(bridge_to_hdmitx(bridge), TPI_INFO_FSEL_DRM, buffer, len);
+	return 0;
+}
+
+static int meson_hdmitx21_clear_hdr_infoframe(struct drm_bridge *bridge)
+{
+	return meson_hdmitx21_write_hdr_infoframe(bridge, NULL, 0);
+}
+
+static int meson_hdmitx21_write_audio_infoframe(struct drm_bridge *bridge,
+						const u8 *buffer, size_t len)
+{
+	meson_hdmitx21_write_infoframe(bridge_to_hdmitx(bridge), TPI_INFO_FSEL_AUDIO, buffer, len);
+	return 0;
+}
+
+static int meson_hdmitx21_clear_audio_infoframe(struct drm_bridge *bridge)
+{
+	return meson_hdmitx21_write_audio_infoframe(bridge, NULL, 0);
+}
+
+static void meson_hdmitx21_config_color(struct meson_hdmitx21 *tx,
+					const struct drm_connector_state *conn)
+{
+	bool deep = conn->hdmi.output_bpc == 10;
+	bool rgb = conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_RGB444;
+
+	cor_update(tx, GCP_CNTL, BIT(0), deep ? BIT(0) : 0);
+	cor_write(tx, P2T_CTRL, deep ? BIT(7) | 1 : 0);
+	cor_write(tx, VP_INPUT_MASK, deep ? 0x15 : 0x2a);
+	/* Vendor config_hdmi21_tx(): preset 0x65 converts limited 709 to RGB
+	 * full. BT.2020 therefore uses YUV transport, bypassing this preset.
+	 */
+	cor_write(tx, CSC0_CTRL, rgb ? 0x65 : 0);
+}
+
 static void meson_hdmitx21_write_vendor(struct meson_hdmitx21 *tx,
 					struct drm_connector *connector,
 					const struct drm_display_mode *mode)
@@ -690,7 +831,7 @@ static void meson_hdmitx21_audio_config(struct meson_hdmitx21 *tx)
 	ssize_t len;
 	int i;
 
-	if (!tx->pixel_khz || !tx->sink_hdmi)
+	if (!tx->tmds_hz || !tx->sink_hdmi)
 		return;
 
 	cor_update(tx, AIP_RST, BIT(0), BIT(0));
@@ -706,7 +847,7 @@ static void meson_hdmitx21_audio_config(struct meson_hdmitx21 *tx)
 	cor_write(tx, AUDP_TXCTRL, AUDP_TXCTRL_MUTE);
 
 	/* ACR: N from the table, CTS measured by the hardware */
-	drm_hdmi_acr_get_n_cts((unsigned long long)tx->pixel_khz * 1000,
+	drm_hdmi_acr_get_n_cts(tx->tmds_hz,
 			       p->sample_rate, &n, &cts);
 	cor_update(tx, ACR_CTS_CLK_DIV, BIT(4), 0);
 	cor_write(tx, N_SVAL1, n & 0xff);
@@ -734,8 +875,8 @@ static void meson_hdmitx21_audio_config(struct meson_hdmitx21 *tx)
 	cor_update(tx, AIP_RST, BIT(0), 0);
 	meson_hdmitx21_audio_mute(tx, tx->audio_muted);
 
-	dev_dbg(tx->dev, "audio %d Hz, %d bit, N %u, pixel %d kHz\n",
-		p->sample_rate, p->sample_width, n, tx->pixel_khz);
+	dev_dbg(tx->dev, "audio %d Hz, %d bit, N %u, TMDS %llu Hz\n",
+		p->sample_rate, p->sample_width, n, tx->tmds_hz);
 }
 
 static void meson_hdmitx21_audio_off(struct meson_hdmitx21 *tx)
@@ -753,19 +894,19 @@ static void meson_hdmitx21_audio_disconnect(struct meson_hdmitx21 *tx)
 	if (!(tx->bridge.ops & DRM_BRIDGE_OP_HDMI_AUDIO))
 		return;
 	mutex_lock(&tx->audio_lock);
-	tx->pixel_khz = 0;
+	tx->tmds_hz = 0;
 	tx->sink_hdmi = false;
 	meson_hdmitx21_audio_off(tx);
 	mutex_unlock(&tx->audio_lock);
 }
 
-static void meson_hdmitx21_audio_mode(struct meson_hdmitx21 *tx, int pixel_khz,
-				    bool hdmi)
+static void meson_hdmitx21_audio_mode(struct meson_hdmitx21 *tx, unsigned long long tmds_hz,
+				      bool hdmi)
 {
 	if (!(tx->bridge.ops & DRM_BRIDGE_OP_HDMI_AUDIO))
 		return;
 	mutex_lock(&tx->audio_lock);
-	tx->pixel_khz = pixel_khz;
+	tx->tmds_hz = tmds_hz;
 	tx->sink_hdmi = hdmi;
 	if (tx->audio_enabled && hdmi)
 		meson_hdmitx21_audio_config(tx);
@@ -800,7 +941,7 @@ static int meson_hdmitx21_audio_prepare(struct drm_bridge *bridge,
 	}
 
 	mutex_lock(&tx->audio_lock);
-	if (!tx->pixel_khz || !tx->sink_hdmi) {
+	if (!tx->tmds_hz || !tx->sink_hdmi) {
 		mutex_unlock(&tx->audio_lock);
 		return -ENODEV;
 	}
@@ -831,7 +972,7 @@ static int meson_hdmitx21_audio_mute_stream(struct drm_bridge *bridge,
 
 	mutex_lock(&tx->audio_lock);
 	tx->audio_muted = enable;
-	if (tx->audio_enabled && tx->pixel_khz)
+	if (tx->audio_enabled && tx->tmds_hz)
 		meson_hdmitx21_audio_mute(tx, enable);
 	mutex_unlock(&tx->audio_lock);
 
@@ -876,7 +1017,7 @@ meson_hdmitx21_bridge_mode_valid(struct drm_bridge *bridge,
 	enum drm_mode_status status = MODE_OK;
 	const char *reason;
 
-	if (tx->enc2_modeset && !meson_hdmitx21_yuv_sink(info)) {
+	if (tx->enc2_modeset && !tx->atomic_color && !meson_hdmitx21_yuv_sink(info)) {
 		drm_dbg_kms(bridge->dev,
 			    "Reject sink without HDMI YUV444: inherited VPP is BT.709 limited\n");
 		return MODE_BAD;
@@ -896,6 +1037,19 @@ meson_hdmitx21_bridge_mode_valid(struct drm_bridge *bridge,
 		drm_dbg_kms(bridge->dev, "ENC2 rejects " DRM_MODE_FMT ": %s (status=%d)\n",
 			    DRM_MODE_ARG(mode), reason, status);
 		return status;
+	}
+	/* The HDMI state helper checks EDID format/depth and actual TMDS rate.
+	 * A 594MHz pixel clock can be transported as 297MHz YUV420.
+	 */
+	if (tx->atomic_color) {
+		unsigned int rate = mode->clock;
+
+		if (drm_mode_is_420(info, mode))
+			rate /= 2;
+		if (rate > 340000 && (!info->hdmi.scdc.supported ||
+				      !info->hdmi.scdc.scrambling.supported))
+			return MODE_CLOCK_HIGH;
+		return MODE_OK;
 	}
 	/* Up to 600 MHz; above 340 MHz the sink must support scrambling */
 	if (mode->clock > 600000)
@@ -968,10 +1122,97 @@ meson_hdmitx21_bridge_get_input_bus_fmts(struct drm_bridge *bridge,
 		return NULL;
 
 	/* Framebuffers are RGB; the retained OSD matrix precedes this bus. */
-	fmts[0] = MEDIA_BUS_FMT_YUV8_1X24;
+	fmts[0] = bridge_to_hdmitx(bridge)->atomic_color && conn_state->hdmi.output_bpc == 10 ?
+		MEDIA_BUS_FMT_YUV10_1X30 : MEDIA_BUS_FMT_YUV8_1X24;
 	*num_input_fmts = 1;
 
 	return fmts;
+}
+
+static enum drm_mode_status
+meson_hdmitx21_tmds_valid(const struct drm_bridge *bridge,
+			  const struct drm_display_mode *mode, unsigned long long rate)
+{
+	return rate > 600000000 ? MODE_CLOCK_HIGH : MODE_OK;
+}
+
+static int meson_hdmitx21_bridge_atomic_check(struct drm_bridge *bridge,
+					      struct drm_bridge_state *bridge_state,
+					      struct drm_crtc_state *crtc_state,
+					      struct drm_connector_state *conn)
+{
+	struct meson_hdmitx21 *tx = bridge_to_hdmitx(bridge);
+	const struct drm_display_info *info = &conn->connector->display_info;
+	struct drm_connector_state *old;
+	struct drm_plane_state *plane_state;
+	struct drm_plane *plane;
+	struct meson_t7_link_clock link;
+	struct hdmi_avi_infoframe *avi = &conn->hdmi.infoframes.avi.data.avi;
+	bool bt2020 = conn->colorspace == DRM_MODE_COLORIMETRY_BT2020_YCC;
+	bool rgb = conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_RGB444;
+	int i, ret;
+	bool yuv420 = conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_YCBCR420;
+
+	if (!IS_ENABLED(CONFIG_DRM_MESON_T7_HANDOFF) || !tx->atomic_color)
+		return 0;
+	if (conn->colorspace != DRM_MODE_COLORIMETRY_DEFAULT &&
+	    conn->colorspace != DRM_MODE_COLORIMETRY_BT709_YCC && !bt2020)
+		return -EINVAL;
+	if (conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_YCBCR420 &&
+	    ((crtc_state->adjusted_mode.hdisplay | crtc_state->adjusted_mode.htotal) & 1))
+		return -EINVAL;
+	ret = meson_t7_link_clock_calculate(crtc_state->adjusted_mode.clock,
+					    conn->hdmi.output_bpc, yuv420, &link);
+	if (ret)
+		return ret;
+	if (conn->hdmi.tmds_char_rate > 340000000 &&
+	    (!info->hdmi.scdc.supported || !info->hdmi.scdc.scrambling.supported))
+		return -EINVAL;
+	if (rgb && (bt2020 || conn->hdmi.broadcast_rgb == DRM_HDMI_BROADCAST_RGB_LIMITED))
+		return -EINVAL;
+	/* Linear NV12/NV21 video currently has only a BT.709 input contract.
+	 * Reject mixed gamuts rather than tagging those pixels as BT.2020.
+	 */
+	ret = drm_atomic_add_affected_planes(crtc_state->state, crtc_state->crtc);
+	if (ret)
+		return ret;
+	for_each_new_plane_in_state(crtc_state->state, plane, plane_state, i) {
+		if (bt2020 && plane_state->crtc == crtc_state->crtc && plane_state->fb &&
+		    plane_state->fb->format->is_yuv)
+			return -EINVAL;
+	}
+	if (conn->hdr_output_metadata) {
+		const struct hdr_output_metadata *hdr = conn->hdr_output_metadata->data;
+		unsigned int eotf;
+
+		if (conn->hdr_output_metadata->length != sizeof(*hdr) || !hdr)
+			return -EINVAL;
+		eotf = hdr->hdmi_metadata_type1.eotf;
+		if (!info->is_hdmi || !bt2020 || conn->hdmi.output_bpc != 10 ||
+		    hdr->metadata_type || hdr->hdmi_metadata_type1.metadata_type ||
+		    eotf > HDMI_EOTF_BT_2100_HLG ||
+		    !(info->hdr_sink_metadata.hdmi_type1.eotf & BIT(eotf)))
+			return -EINVAL;
+	}
+	/* T7 uses per-OSD HDR2 in the vendor path, not the optional 0x3910
+	 * matrix used by other SoCs. Its inherited routing and LUT ownership
+	 * are not yet acquired here. Never tag unconverted pixels as BT.2020.
+	 */
+	if (bt2020) {
+		drm_dbg_kms(bridge->dev, "BT.2020 needs exclusive T7 OSD HDR2 ownership\n");
+		return -EOPNOTSUPP;
+	}
+	conn->hdmi.is_limited_range = false;
+	avi->quantization_range = rgb ? HDMI_QUANTIZATION_RANGE_FULL :
+					HDMI_QUANTIZATION_RANGE_DEFAULT;
+	avi->ycc_quantization_range = HDMI_YCC_QUANTIZATION_RANGE_LIMITED;
+	if (!bt2020)
+		avi->colorimetry = HDMI_COLORIMETRY_ITU_709;
+	old = drm_atomic_get_old_connector_state(crtc_state->state, conn->connector);
+	if (old->colorspace != conn->colorspace ||
+	    !drm_connector_atomic_hdr_metadata_equal(old, conn))
+		crtc_state->mode_changed = true;
+	return 0;
 }
 
 static void meson_hdmitx21_bridge_atomic_enable(struct drm_bridge *bridge,
@@ -981,13 +1222,15 @@ static void meson_hdmitx21_bridge_atomic_enable(struct drm_bridge *bridge,
 	const struct drm_crtc_state *crtc_state;
 	struct drm_connector *connector;
 	const struct drm_display_mode *mode;
+	struct drm_connector_state *conn;
+	unsigned long long tmds_rate;
 	bool hdmi_mode, scrambling;
 
 	connector = drm_atomic_get_new_connector_for_encoder(state, bridge->encoder);
 	if (WARN_ON(!connector))
 		return;
-	crtc_state = drm_atomic_get_new_crtc_state(state,
-		drm_atomic_get_new_connector_state(state, connector)->crtc);
+	conn = drm_atomic_get_new_connector_state(state, connector);
+	crtc_state = drm_atomic_get_new_crtc_state(state, conn->crtc);
 	if (WARN_ON(!crtc_state))
 		return;
 
@@ -997,7 +1240,8 @@ static void meson_hdmitx21_bridge_atomic_enable(struct drm_bridge *bridge,
 	    !meson_t7_display_ready(crtc_state->crtc))
 		return;
 
-	scrambling = mode->clock > 340000;
+	tmds_rate = tx->atomic_color ? conn->hdmi.tmds_char_rate : mode->clock * 1000ULL;
+	scrambling = tmds_rate > 340000000;
 	if (connector->display_info.hdmi.scdc.supported &&
 	    meson_hdmitx21_ddc_write(tx, DDC_SCDC_ADDR, SCDC_TMDS_CONFIG,
 				     scrambling ? 0x03 : 0x00)) {
@@ -1012,16 +1256,22 @@ static void meson_hdmitx21_bridge_atomic_enable(struct drm_bridge *bridge,
 	if (tx->enc2_modeset)
 		meson_hdmitx21_hw_init(tx);
 	meson_hdmitx21_config(tx, mode, hdmi_mode, scrambling);
-	if (hdmi_mode) {
+	if (tx->atomic_color) {
+		meson_hdmitx21_config_color(tx, conn);
+		if (drm_atomic_helper_connector_hdmi_update_infoframes(connector, state)) {
+			dev_err(tx->dev, "InfoFrame update failed; TX remains muted\n");
+			return;
+		}
+	} else if (hdmi_mode) {
 		meson_hdmitx21_write_avi(tx, connector, mode);
 		meson_hdmitx21_write_vendor(tx, connector, mode);
 	}
-	meson_hdmitx21_phy_on(tx, mode->clock);
+	meson_hdmitx21_phy_on(tx, DIV_ROUND_CLOSEST_ULL(tmds_rate, 1000));
 	cor_update(tx, TMDS_CTRL, BIT(3), BIT(3));
 	meson_hdmitx21_set_avmute(tx, false);
 
-	meson_hdmitx21_audio_mode(tx, mode->clock,
-				 hdmi_mode && connector->display_info.has_audio);
+	meson_hdmitx21_audio_mode(tx, tmds_rate,
+				  hdmi_mode && connector->display_info.has_audio);
 
 	dev_dbg(tx->dev, "enabled %dx%d@%d %s\n", mode->hdisplay,
 		mode->vdisplay, drm_mode_vrefresh(mode), hdmi_mode ? "HDMI" : "DVI");
@@ -1035,12 +1285,22 @@ static void meson_hdmitx21_bridge_atomic_disable(struct drm_bridge *bridge,
 	meson_hdmitx21_audio_disconnect(tx);
 	meson_hdmitx21_set_avmute(tx, true);
 	meson_hdmitx21_phy_off(tx);
+	if (tx->atomic_color)
+		meson_hdmitx21_clear_hdr_infoframe(bridge);
 	mutex_lock(&tx->packet_lock);
 	cor_write(tx, TPI_INFO_FSEL, 0);
 	cor_write(tx, TPI_INFO_EN, 0);
 	cor_write(tx, TPI_INFO_FSEL, TPI_INFO_FSEL_VENDOR);
 	cor_write(tx, TPI_INFO_EN, 0);
 	mutex_unlock(&tx->packet_lock);
+}
+
+static void meson_hdmitx21_cec_hpd_notify(struct drm_bridge *bridge,
+					  struct drm_connector *connector,
+					  enum drm_connector_status status)
+{
+	if (status == connector_status_disconnected)
+		drm_connector_cec_phys_addr_invalidate(connector);
 }
 
 /* GPIOW15 is the T7 HPD level. TOP_STAT0 bit 0 is not a cable indication.
@@ -1096,6 +1356,16 @@ static const struct drm_bridge_funcs meson_hdmitx21_bridge_funcs = {
 	.detect = meson_hdmitx21_bridge_detect,
 	.edid_read = meson_hdmitx21_bridge_edid_read,
 	.atomic_get_input_bus_fmts = meson_hdmitx21_bridge_get_input_bus_fmts,
+	.atomic_check = meson_hdmitx21_bridge_atomic_check,
+	.hdmi_tmds_char_rate_valid = meson_hdmitx21_tmds_valid,
+	.hdmi_write_avi_infoframe = meson_hdmitx21_write_avi_infoframe,
+	.hdmi_clear_avi_infoframe = meson_hdmitx21_clear_avi_infoframe,
+	.hdmi_write_hdmi_infoframe = meson_hdmitx21_write_hdmi_infoframe,
+	.hdmi_clear_hdmi_infoframe = meson_hdmitx21_clear_hdmi_infoframe,
+	.hdmi_write_hdr_drm_infoframe = meson_hdmitx21_write_hdr_infoframe,
+	.hdmi_clear_hdr_drm_infoframe = meson_hdmitx21_clear_hdr_infoframe,
+	.hdmi_write_audio_infoframe = meson_hdmitx21_write_audio_infoframe,
+	.hdmi_clear_audio_infoframe = meson_hdmitx21_clear_audio_infoframe,
 	.atomic_enable = meson_hdmitx21_bridge_atomic_enable,
 	.atomic_disable = meson_hdmitx21_bridge_atomic_disable,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
@@ -1103,6 +1373,7 @@ static const struct drm_bridge_funcs meson_hdmitx21_bridge_funcs = {
 	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.hpd_enable = meson_hdmitx21_monitor_hpd_enable,
 	.hpd_disable = meson_hdmitx21_monitor_hpd_disable,
+	.hpd_notify = meson_hdmitx21_cec_hpd_notify,
 	.hdmi_audio_prepare = meson_hdmitx21_audio_prepare,
 	.hdmi_audio_shutdown = meson_hdmitx21_audio_shutdown,
 	.hdmi_audio_mute_stream = meson_hdmitx21_audio_mute_stream,
@@ -1183,11 +1454,11 @@ static void meson_hdmitx21_monitor_atomic_enable(struct drm_bridge *bridge,
 	if (WARN_ON(!crtc_state))
 		return;
 	/* CRTC validated the firmware timing. Never reconfigure video in this path. */
-	meson_hdmitx21_audio_mode(tx, crtc_state->adjusted_mode.clock,
-				 connector->display_info.is_hdmi &&
-				 connector->display_info.has_audio &&
-				 meson_hdmitx21_bridge_detect(bridge, connector) ==
-				 connector_status_connected);
+	meson_hdmitx21_audio_mode(tx, crtc_state->adjusted_mode.clock * 1000ULL,
+				  connector->display_info.is_hdmi &&
+				  connector->display_info.has_audio &&
+				  meson_hdmitx21_bridge_detect(bridge, connector) ==
+				  connector_status_connected);
 }
 
 static void meson_hdmitx21_monitor_atomic_disable(struct drm_bridge *bridge,
@@ -1244,6 +1515,10 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 		return PTR_ERR(tx);
 	tx->dev = dev;
 	tx->enc2_modeset = enc2;
+	platform_set_drvdata(pdev, tx);
+	tx->atomic_color = of_property_read_bool(dev->of_node, "amlogic,atomic-color");
+	if (tx->atomic_color && !enc2)
+		return -EINVAL;
 	monitor |= enc2;
 	if (enc2) {
 		struct resource *phy = platform_get_resource_byname(pdev, IORESOURCE_MEM, "phy");
@@ -1283,6 +1558,20 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 			return ret;
 		tx->bridge.ddc = &tx->ddc;
 		tx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID | DRM_BRIDGE_OP_HPD;
+		if (enc2 && IS_ENABLED(CONFIG_CEC_NOTIFIER)) {
+			tx->bridge.ops |= DRM_BRIDGE_OP_HDMI_CEC_NOTIFIER;
+			tx->bridge.hdmi_cec_dev = dev;
+		}
+		if (tx->atomic_color) {
+			tx->bridge.ops |= DRM_BRIDGE_OP_HDMI | DRM_BRIDGE_OP_HDMI_HDR_DRM_INFOFRAME;
+			tx->bridge.supported_formats = BIT(DRM_OUTPUT_COLOR_FORMAT_RGB444) |
+				BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR444) |
+				BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR420);
+			tx->bridge.max_bpc = 10;
+			tx->bridge.ycbcr_420_allowed = true;
+			tx->bridge.vendor = "Amlogic";
+			tx->bridge.product = "T7 HDMI";
+		}
 		if (of_property_present(dev->of_node, "#sound-dai-cells")) {
 			tx->bridge.ops |= DRM_BRIDGE_OP_HDMI_AUDIO;
 			tx->bridge.hdmi_audio_dev = dev;
@@ -1295,6 +1584,11 @@ static int meson_hdmitx21_boot_probe(struct platform_device *pdev)
 	ret = devm_drm_bridge_add(dev, &tx->bridge);
 	if (ret || !monitor)
 		return ret;
+	if (enc2) {
+		ret = devm_device_add_group(dev, &meson_hdmitx21_link_group);
+		if (ret)
+			return ret;
+	}
 	/* Stop work before the managed bridge is removed. */
 	return devm_add_action_or_reset(dev, meson_hdmitx21_monitor_cleanup, tx);
 }

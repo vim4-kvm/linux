@@ -16,6 +16,7 @@ import time
 
 TEST_DIRS = (
     'drivers/gpu/drm/meson',
+    'drivers/media/cec/platform/meson',
     'drivers/media/platform/amlogic/t7-hdmirx',
     'drivers/media/platform/amlogic/t7-jpeg',
     'drivers/media/platform/amlogic/vdec',
@@ -30,6 +31,7 @@ TEST_DIRS = (
 )
 
 VENDOR_TESTS = {
+    'test_ao_cec_t7.py',
     'test_t7_layers.py', 'test_t7_link_clock.py', 'test_t7_modeset.py',
     'test_t7_osd.py', 'test_t7_sram.py', 'test_t7_video.py',
     'test_t7_video_phase.py', 'test_t7_video_pps.py',

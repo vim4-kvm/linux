@@ -9,6 +9,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+#include <drm/drm_connector.h>
 
 #include "meson_registers.h"
 #include "meson_t7_modeset.h"
@@ -48,6 +49,50 @@ int meson_t7_clock_calculate(unsigned int pixel_khz, struct meson_t7_clock *cloc
 		     (remainder % 16 * (1 << 13) / 1500);
 	if (clock->fractional)
 		clock->frac = 0x8168;
+	return 0;
+}
+
+/* T7 hw_clk.c: deep colour changes the serializer PLL and VID_PLL divider.
+ * 420 runs ENC at the full pixel rate, with half-rate PNX/pixel clocks.
+ */
+int meson_t7_link_clock_calculate(unsigned int pixel_khz, unsigned int bpc,
+				  bool yuv420, struct meson_t7_link_clock *link)
+{
+	struct meson_t7_clock *clock = &link->pll;
+	u32 vco, div = 1, remainder;
+
+	if (pixel_khz < 25175 || pixel_khz > 594000 || (bpc != 8 && bpc != 10))
+		return -ERANGE;
+	link->tmds_khz = DIV_ROUND_CLOSEST(pixel_khz * bpc, yuv420 ? 16 : 8);
+	if (link->tmds_khz > 600000)
+		return -ERANGE;
+	vco = pixel_khz * (bpc == 10 ? 25 : 20) / 2;
+	if (yuv420 && bpc == 10)
+		vco /= 2;
+	while (vco < 3000000 && div < 16) {
+		vco *= 2;
+		div *= 2;
+	}
+	if (vco < 3000000 || vco >= 6000000)
+		return -ERANGE;
+	if (yuv420 && bpc == 8)
+		div *= 2;
+	clock->od1 = min(div, 4U);
+	clock->od2 = div / clock->od1;
+	if (clock->od2 > 4)
+		return -ERANGE;
+	clock->fractional = abs((int)vco - 5934066) <= div * 5;
+	clock->vco = clock->fractional ? 5940000 : vco;
+	clock->m = clock->vco / 24000;
+	remainder = clock->vco % 24000;
+	clock->frac = (remainder / 16 * (1 << 17) / 1500) +
+		     (remainder % 16 * (1 << 13) / 1500);
+	if (clock->fractional)
+		clock->frac = 0x8168;
+	link->od3 = yuv420 ? 1 : 2;
+	link->pixel_div = yuv420 ? 2 : 1;
+	link->shift = bpc == 10 ? 0 : 0x739c;
+	link->shift_sel = bpc == 10 ? 3 : 2;
 	return 0;
 }
 
@@ -160,19 +205,23 @@ static int meson_t7_pll_set(struct meson_t7_modeset *hw,
 	return 0;
 }
 
-static void meson_t7_video_clock(struct meson_t7_modeset *hw)
+static void meson_t7_video_clock(struct meson_t7_modeset *hw,
+				 const struct meson_t7_link_clock *link)
 {
 	u32 value;
 
 	/* Shared clock-controller regmap serializes masked updates with CCF. */
-	regmap_update_bits(hw->clkctrl, 0xd8, GENMASK(27, 16), 0);
+	regmap_update_bits(hw->clkctrl, 0xd8, GENMASK(27, 16),
+			   link->pixel_div == 2 ? BIT(24) | BIT(16) : 0);
 	regmap_update_bits(hw->clkctrl, 0xdc, GENMASK(22, 0),
 			   (2 << 21) | BIT(20) | (2 << 13) | BIT(12) | (2 << 5) | BIT(4));
 	value = readl(hw->vid_div) & ~(GENMASK(19, 0));
 	writel(value | BIT(25), hw->vid_div);
-	/* VID_PLL_DIV_5: load shift preset, then enable output. */
-	writel(value | BIT(25) | (2 << 16) | BIT(15) | 0x739c, hw->vid_div);
-	writel(value | BIT(25) | (2 << 16) | BIT(19) | 0x739c, hw->vid_div);
+	/* VID_PLL_DIV_5 / 6p25: load shift preset, then enable output. */
+	writel(value | BIT(25) | (link->shift_sel << 16) | BIT(15) | link->shift,
+	       hw->vid_div);
+	writel(value | BIT(25) | (link->shift_sel << 16) | BIT(19) | link->shift,
+	       hw->vid_div);
 	writel(readl(hw->vid2) & ~BIT(19), hw->vid2);
 	udelay(2);
 	writel(readl(hw->vid2 + 8) & ~GENMASK(7, 0), hw->vid2 + 8);
@@ -223,18 +272,25 @@ void meson_t7_modeset_disable(struct meson_t7_modeset *hw)
 	meson_t7_write(hw, ENCP_VIDEO_EN, 0);
 }
 
-static void meson_t7_osd_matrix(struct meson_t7_modeset *hw)
+static void meson_t7_osd_matrix(struct meson_t7_modeset *hw, bool bt2020)
 {
-	/* T7 osd_hw.c: RGB709_to_YUV709l_coeff, after the OSD blend. */
-	static const int coeff[9] = { 186, 627, 63, -103, -345, 448, 448, -407, -41 };
+	/* Optional VPP matrix recipe from amcsc.c / osd_hw.c, COEFF_NORM().
+	 * T7's per-OSD HDR2 routing needs separate ownership; the bridge rejects
+	 * BT.2020 until that is acquired. This recipe does not program an OETF.
+	 */
+	static const int coeff[2][9] = {
+		{ 186, 627, 63, -103, -345, 448, 448, -407, -41 },
+		{ 230, 594, 52, -124, -322, 448, 448, -411, -35 },
+	};
+	const int *m = coeff[bt2020];
 	unsigned int i;
 
 	meson_t7_write(hw, 0x391b, 0);
 	meson_t7_write(hw, 0x391c, 0);
 	for (i = 0; i < 4; i++)
 		meson_t7_write(hw, 0x3910 + i,
-			       ((coeff[2 * i] & 0x1fff) << 16) | (coeff[2 * i + 1] & 0x1fff));
-	meson_t7_write(hw, 0x3914, coeff[8] & 0x1fff);
+			       ((m[2 * i] & 0x1fff) << 16) | (m[2 * i + 1] & 0x1fff));
+	meson_t7_write(hw, 0x3914, m[8] & 0x1fff);
 	meson_t7_write(hw, 0x3918, 0);
 	meson_t7_write(hw, 0x3919, (64 << 16) | 512);
 	meson_t7_write(hw, 0x391a, 512);
@@ -242,31 +298,37 @@ static void meson_t7_osd_matrix(struct meson_t7_modeset *hw)
 }
 
 int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
-			   const struct drm_display_mode *mode)
+			   const struct drm_display_mode *mode,
+			   const struct drm_connector_state *conn)
 {
-	struct meson_t7_clock clock;
+	struct meson_t7_link_clock link;
 	struct arm_smccc_res res;
+	bool yuv420 = conn && conn->hdmi.output_format == DRM_OUTPUT_COLOR_FORMAT_YCBCR420;
+	unsigned int bpc = conn ? conn->hdmi.output_bpc : 8;
 	u32 size = mode->vdisplay << 16 | mode->hdisplay;
 	int ret;
 
-	ret = meson_t7_clock_calculate(mode->clock, &clock);
+	ret = meson_t7_link_clock_calculate(mode->clock, bpc, yuv420, &link);
 	if (ret)
 		return ret;
 	meson_t7_modeset_disable(hw);
-	ret = meson_t7_pll_set(hw, &clock, mode->clock > 340000);
+	ret = meson_t7_pll_set(hw, &link.pll, link.tmds_khz > 340000);
 	if (ret)
 		return ret;
-	meson_t7_video_clock(hw);
+	writel((readl(hw->pll) & ~GENMASK(21, 20)) | (__ffs(link.od3) << 20), hw->pll);
+	meson_t7_video_clock(hw, &link);
 	/* T7 VIM4 routes HDMI through ENC2, not the generic driver's ENC0. */
 	arm_smccc_smc(0x820000ab, 9, 1, 1, 0, 0, 0, 0, &res);
 	meson_t7_venc_set(hw, mode);
 	meson_t7_write(hw, 0x1cef, 1);
 	meson_t7_write(hw, VPU_HDMI_SETTING, BIT(1) |
 			((mode->flags & DRM_MODE_FLAG_PHSYNC) ? BIT(2) : 0) |
-			((mode->flags & DRM_MODE_FLAG_PVSYNC) ? BIT(3) : 0) | (3 << 16));
-	/* VENC YCbCr -> formatter CrYCb; TX expects limited YUV444, 8-bit. */
-	meson_t7_write(hw, 0x2743, (2 << 22) | BIT(10) | (2 << 2));
-	meson_t7_osd_matrix(hw);
+			((mode->flags & DRM_MODE_FLAG_PVSYNC) ? BIT(3) : 0) |
+			(3 << 16) |
+			(yuv420 ? (4 << 5) | BIT(20) : 0));
+	meson_t7_write(hw, 0x2743, (2 << 22) | (bpc == 8 ? BIT(10) : 0) |
+			(2 << 2) | (yuv420 ? 2 : 0));
+	meson_t7_osd_matrix(hw, conn && conn->colorspace == DRM_MODE_COLORIMETRY_BT2020_YCC);
 	/* Single unscaled OSD1, all size encodings match the vendor VPP path. */
 	meson_t7_write(hw, 0x5a08, 0);
 	meson_t7_write(hw, VIU_OSD_BLEND_DIN0_SCOPE_H, (mode->hdisplay - 1) << 16);
@@ -353,12 +415,19 @@ struct meson_t7_modeset *meson_t7_modeset_init(struct platform_device *pdev)
 		struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 								   windows[i].name);
 		u32 offset = i ? 0 : 0x800;
+		u32 first = windows[i].first, last = windows[i].last;
 
-		if (!res || res->start != 0xff000000 + (windows[i].first + offset) * 4 ||
-		    resource_size(res) != (windows[i].last - windows[i].first + 1) * 4)
+		if (i == 3 &&
+		    of_property_read_bool(pdev->dev.of_node, "amlogic,managed-osd-sram")) {
+			first = 0x5a00;
+			last = 0x5a0d;
+		}
+
+		if (!res || res->start != 0xff000000 + (first + offset) * 4 ||
+		    resource_size(res) != (last - first + 1) * 4)
 			return ERR_PTR(-EINVAL);
-		hw->vcbus[i].first = windows[i].first;
-		hw->vcbus[i].last = windows[i].last;
+		hw->vcbus[i].first = first;
+		hw->vcbus[i].last = last;
 		/* VENC is already claimed by the display's IRQ/readback path. */
 		if (!i) {
 			hw->vcbus[i].base = devm_ioremap(&pdev->dev, res->start,

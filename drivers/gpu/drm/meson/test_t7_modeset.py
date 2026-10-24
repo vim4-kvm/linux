@@ -34,6 +34,8 @@ defines = '\n'.join(re.findall(r'^#define\s+(?:ENCP_\w+|VENC_INTCTRL)\s+0x[0-9a-
                                registers, re.M))
 types = (here / 'meson_t7_modeset.h').read_text()
 clock_type = types[types.index('struct meson_t7_clock {'):types.index('\n};') + 3]
+link_type = types[types.index('struct meson_t7_link_clock {'):
+                  types.index('int meson_t7_link_clock_calculate')]
 timing_source = (args.vendor / 'drivers/media/vout/hdmitx_common/hdmitx_mode.c').read_text()
 modes = []
 for label, vic, name in [('720p60', 4, '1280x720p60hz'),
@@ -59,9 +61,14 @@ preamble = r'''
 #include <errno.h>
 typedef uint32_t u32;
 typedef uint8_t u8;
+typedef uint16_t u16;
 #define BIT(n) (1U << (n))
 #define GENMASK(h,l) ((~0U << (l)) & (~0U >> (31-(h))))
 #define min(a,b) ((a)<(b)?(a):(b))
+#define DIV_ROUND_CLOSEST(a,b) (((a)+(b)/2)/(b))
+#define DIV_ROUND_CLOSEST_ULL(a,b) DIV_ROUND_CLOSEST(a,b)
+#define DRM_OUTPUT_COLOR_FORMAT_YCBCR420 3
+#define DRM_MODE_COLORIMETRY_BT2020_YCC 10
 #define __ffs(x) __builtin_ctz(x)
 #define HDMITX_INFO(...) do {} while (0)
 #define HDMITX_ERROR(...) do {} while (0)
@@ -74,14 +81,16 @@ struct drm_display_mode {
     int clock,hdisplay,hsync_start,hsync_end,htotal;
     int vdisplay,vsync_start,vsync_end,vtotal,flags;
 };
+struct drm_connector_state { int colorspace;
+    struct {unsigned int output_format,output_bpc;unsigned long long tmds_char_rate;} hdmi;
+    void *crtc;};
 struct hdmi_timing {
     int vic,h_total,h_blank,h_front,h_sync,h_back,h_active;
     int v_total,v_front,v_sync,v_back,v_active,h_pol,v_pol;
 };
 struct hdmi_format_para { struct hdmi_timing timing; int cs; };
 struct chip_data {int chip_type;};
-struct hdmitx_dev { struct {struct hdmi_format_para fmt_para; int enc_idx;} tx_comm;
-    int frl_rate,dsc_en;
+struct hdmitx_dev { struct {struct hdmi_format_para fmt_para; int enc_idx;} tx_comm; int frl_rate,dsc_en;
     struct {struct chip_data *chip_data;} tx_hw;};
 static struct hdmitx_dev device;
 static struct hdmitx_dev *get_hdmitx21_device(void) {return &device;}
@@ -97,6 +106,8 @@ static void hd21_write_reg(u32 reg,u32 value) {vendor_regs[reg]=value;}
 static u32 hd21_read_reg(u32 reg) {return vendor_regs[reg] | (fail_lock ? 0 : 0xc0000000);}
 static void hd21_set_reg_bits(u32 reg,u32 value,u32 start,u32 width)
 {u32 mask=((1U<<width)-1)<<start;vendor_regs[reg]=(vendor_regs[reg]&~mask)|(value<<start);}
+#define osd_reg_write hd21_write_reg
+#define osd_reg_set_bits hd21_set_reg_bits
 static void writel(u32 value,void *reg) {*(u32 *)reg=value;}
 static u32 readl(void *reg) {return *(u32 *)reg | ((uintptr_t)reg>=(uintptr_t)pll &&
     (uintptr_t)reg<(uintptr_t)(pll+7) && !fail_lock ? 0xc0000000 : 0);}
@@ -123,7 +134,8 @@ clk_source = (vendor / 'hw_clk.c').read_text()
 pll_defines = '\n'.join(f'#define ANACTRL_HDMIPLL_CTRL{i} {i}' for i in range(7))
 vics = set(re.findall(r'HDMI_\d+_\w+', function(hw_t7, 'set_hpll_hclk_v1')))
 vic_defines = '\n'.join(f'#define {vic} {vic.split("_")[1]}' for vic in sorted(vics))
-driver_names = ('meson_t7_clock_calculate', 'meson_t7_mode_valid', 'meson_t7_pll_lock',
+driver_names = ('meson_t7_clock_calculate', 'meson_t7_link_clock_calculate',
+                'meson_t7_mode_valid', 'meson_t7_pll_lock',
                 'meson_t7_pll_recipe', 'meson_t7_pll_set', 'meson_t7_video_clock',
                 'meson_t7_venc_set', 'meson_t7_modeset_disable', 'meson_t7_osd_matrix',
                 'meson_t7_modeset_enable')
@@ -133,7 +145,7 @@ other_registers = '\n'.join(re.findall(r'^#define\s+(?:VPU_HDMI_SETTING|VIU_OSD_
                                      r'VPP_OSD1_\w+|VPP_POSTBLEND_H_SIZE)\s+0x[0-9a-f]+.*$',
                                      registers, re.M))
 body = preamble + defines + '\n' + other_registers + '\n' + pll_defines + '\n' + vic_defines
-body += '\n' + clock_type
+body += '\n' + clock_type + '\n' + link_type
 body += '\n' + '\n'.join(function(source, name) for name in driver_names)
 body += '\n' + '\n'.join(function(hw_t7, name) for name in vendor_names)
 body += '\n' + function(clk_source, 't7_calc_pixel_clk_hpll_vco_od')
@@ -145,32 +157,33 @@ for name, word in re.findall(r'^#define (CLKCTRL_\w+)\s+CLKCTRL_REG_ADDR\((0x[0-
     body += f'\n#define {name} {int(word, 16) * 4}\n'
 body += '\n#define MESON_CPU_ID_S5 8\n' + function(video_source, 'enable_crt_video_hdmi')
 osd_vendor = (args.vendor / 'drivers/media/osd/osd_hw.c').read_text()
-osd_registers = (args.vendor / 'drivers/media/osd/osd_reg.h').read_text()
-body += '\n' + '\n'.join(re.findall(r'^#define VPP_OSD1_MATRIX_\w+\s+0x[0-9a-f]+',
-                                    osd_registers, re.M))
+hdr_vendor = (args.vendor / 'drivers/media/enhancement/amvecm/amcsc.c').read_text()
 body += '\n#define MATRIX_5x3_COEF_SIZE 24\n'
 body += '#define COEFF_NORM(a) ((int)((((a)*2048.0)+1)/2))\n'
 body += '#define COEFF_NORM_NE(a) ((int)((((a)*2048.0)-1)/2))\n'
-body += re.search(r'static int RGB709_to_YUV709l_coeff\[[^]]+\] = \{.*?\n};',
-                  osd_vendor, re.S)[0]
-body += '\n#define osd_reg_write hd21_write_reg\n#define osd_reg_set_bits hd21_set_reg_bits\n'
+for text, name in [(osd_vendor, 'RGB709_to_YUV709l_coeff'),
+                   (hdr_vendor, 'RGB2020_to_YUV2020l_coeff')]:
+    body += '\n' + re.search(r'static int ' + name + r'\[[^]]+\] = \{.*?\n};', text, re.S)[0]
+osd_registers = (args.vendor / 'drivers/media/osd/osd_reg.h').read_text()
+body += '\n' + '\n'.join(re.findall(r'^#define VPP_OSD1_MATRIX_\w+\s+0x[0-9a-f]+',
+                                    osd_registers, re.M))
 body += function(osd_vendor, 'set_vpp_osd1_rgb2yuv')
 fmt = video_source.split('case MESON_CPU_ID_T7:\n\tcase MESON_CPU_ID_S5:\n\tdefault:', 1)[1]
 fmt = fmt.split('\n\t\tif (hdev->frl_rate', 1)[0]
+body += r'''
+#define HDMI_COLORSPACE_YUV422 1
+#define COLORDEPTH_24B 4
+static u32 vendor_format(unsigned int bpc,bool y420) {
+    struct {int cs,cd;} data={y420?3:2,bpc==10?5:4},*para=&data;
+    u32 data32;
+'''
+body += fmt + '\nreturn data32;}\n'
 mapping = re.search(r'case MESON_CPU_ID_T7:\n\t\tif \(hdev->tx_comm.enc_idx == 0\).*?'
                     r'\n\t\tbreak;', video_source, re.S)[0].split(':\n', 1)[1]
 mapping = mapping.rsplit('break;', 1)[0]
 body += r'''
 #define HDMI_COLORSPACE_RGB 0
-#define HDMI_COLORSPACE_YUV422 1
 #define TX_INPUT_COLOR_FORMAT 2
-#define COLORDEPTH_24B 4
-static u32 vendor_format(void) {
-    struct {int cs,cd;} data={2,4},*para=&data;
-    u32 data32;
-'''
-body += fmt + '\nreturn data32;}\n'
-body += r'''
 static u32 vendor_mapping(void) {
     struct hdmitx_dev *hdev=&device;
     struct hdmi_format_para *para=&device.tx_comm.fmt_para;
@@ -180,7 +193,9 @@ static u32 vendor_mapping(void) {
 body += mapping + '\nreturn data32;}\n'
 body += '\nint main(void) { struct meson_t7_modeset hw={.pll=pll,.vid2=video,.vid_div=&divider};\n'
 body += '''struct chip_data chip={.chip_type=7};device.tx_hw.chip_data=&chip;
-enable_crt_video_hdmi(1,0,2);meson_t7_video_clock(&hw);
+struct meson_t7_link_clock link;
+assert(!meson_t7_link_clock_calculate(148500,8,false,&link));
+enable_crt_video_hdmi(1,0,2);meson_t7_video_clock(&hw,&link);
 assert(shared[0xdc/4]==vendor_regs[CLKCTRL_ENC_HDMI_CLK_CTRL]);
 assert((video[1] & (BIT(10)|BIT(9)|BIT(5)))==vendor_regs[CLKCTRL_VID_CLK2_CTRL2]);
 puts("ENC2 pixel/FE/PNX mux matches executable vendor enable_crt_video_hdmi(1,0,2)");
@@ -208,10 +223,10 @@ for name, vic, pixel, h, hs, he, ht, v, vs, ve, vt in modes:
         assert((pll[i]&mask)==(vendor_regs[i]&mask));}}
     printf("{name} %u %u %u %u %u %u\\n",clock.vco,clock.od1,clock.od2,clock.frac,
            actual_regs[ENCP_VIDEO_MAX_PXCNT],actual_regs[ENCP_VIDEO_MAX_LNCNT]);
-    assert(!meson_t7_modeset_enable(&hw,&mode));
+    assert(!meson_t7_modeset_enable(&hw,&mode,NULL));
     assert(actual_regs[ENCP_VIDEO_EN]==1);
     assert(actual_regs[VPU_HDMI_SETTING]==vendor_mapping());
-    assert(actual_regs[0x2743]==vendor_format());
+    assert(actual_regs[0x2743]==vendor_format(8,false));
     memset(vendor_regs,0,sizeof(vendor_regs));set_vpp_osd1_rgb2yuv(true);
     assert(!memcmp(actual_regs+0x3910,vendor_regs+0x3910,14*sizeof(u32)));
     assert(actual_regs[VPP_OSD1_IN_SIZE]==({v}U<<16|{h}));
@@ -224,7 +239,35 @@ for name, vic, pixel, h, hs, he, ht, v, vs, ve, vt in modes:
     assert(meson_t7_mode_valid(&mode)==MODE_V_ILLEGAL);
     }}
 '''
-body += '''{struct meson_t7_clock clock;
+body += r'''
+for(int gamut=0;gamut<2;gamut++) {
+    const int *m=gamut?RGB2020_to_YUV2020l_coeff:RGB709_to_YUV709l_coeff;
+    meson_t7_osd_matrix(&hw,gamut);
+    for(int i=0;i<4;i++)
+        assert(actual_regs[0x3910+i]==(((m[3+i*2]&0x1fff)<<16)|(m[4+i*2]&0x1fff)));
+    assert(actual_regs[0x3914]==(m[11]&0x1fff));
+    assert(actual_regs[0x3919]==((m[18]<<16)|m[19]) && actual_regs[0x391a]==m[20]);
+}
+for(int bpc=8;bpc<=10;bpc+=2)
+    for(int y420=0;y420<2;y420++) {
+        struct drm_display_mode mode={594000,3840,4016,4104,4400,2160,2168,2178,2250,0};
+        struct drm_connector_state conn={.colorspace=DRM_MODE_COLORIMETRY_BT2020_YCC,
+            .hdmi={.output_bpc=bpc,.output_format=y420?3:1}};
+        if(bpc==10 && !y420) {
+            assert(meson_t7_modeset_enable(&hw,&mode,&conn)==-ERANGE);
+            continue;
+        }
+        assert(!meson_t7_modeset_enable(&hw,&mode,&conn));
+        assert(actual_regs[0x2743]==vendor_format(bpc,y420));
+        assert(actual_regs[VPU_HDMI_SETTING]==(BIT(1)|(3<<16)|
+            (y420?((4<<5)|BIT(20)):0)));
+        assert(((pll[0]>>20)&3)==(y420?0:1));
+        assert(shared[0xd8/4]==(y420?(BIT(24)|BIT(16)):0));
+        assert(((divider>>16)&3)==(bpc==10?3:2));
+        assert(actual_regs[ENCP_VIDEO_MAX_PXCNT]==4399);
+    }
+puts("VPP matrix coefficients and 4K 8/10-bit/420 formatter match vendor expressions");
+{struct meson_t7_clock clock;
 assert(meson_t7_clock_calculate(0,&clock)==-ERANGE);
 assert(meson_t7_clock_calculate(594001,&clock)==-ERANGE);}
 {struct drm_display_mode mode={25175,640,656,752,800,480,490,492,2000,0};
@@ -268,9 +311,9 @@ struct drm_display_info {bool is_hdmi,has_audio,only420; int max_tmds_clock,colo
 struct drm_connector {struct drm_display_info display_info;};
 struct drm_bridge {void *dev,*encoder;};
 struct drm_crtc_state {struct drm_display_mode adjusted_mode;void *crtc;};
-struct drm_connector_state {void *crtc;};
 struct drm_atomic_commit {int unused;};
-struct meson_hdmitx21 {struct drm_bridge bridge;bool enc2_modeset;void *dev;int packet_lock;};
+struct meson_hdmitx21 {struct drm_bridge bridge;bool enc2_modeset,atomic_color;
+    void *dev;int packet_lock;};
 static struct drm_connector connector;
 static struct drm_connector_state conn_state;
 static struct drm_crtc_state crtc_state;
@@ -286,6 +329,8 @@ static struct drm_crtc_state *drm_atomic_get_new_crtc_state(void *s,void *c)
 {return &crtc_state;}
 static bool meson_t7_display_ready(void *c) {return ready;}
 static bool drm_mode_is_420_only(const struct drm_display_info *i,const void *m)
+{return i->only420;}
+static bool drm_mode_is_420(const struct drm_display_info *i,const void *m)
 {return i->only420;}
 static void top_write(void *tx,u32 reg,u32 val) {top[reg/4]=val;}
 static void cor_write(void *tx,u32 reg,u32 val) {cor[reg]=val;}
@@ -307,6 +352,8 @@ static void meson_hdmitx21_hw_init(void *tx) {assert(avmute);}
 static void meson_hdmitx21_write_avi(void *tx,void *c,const void *m) {}
 static void meson_hdmitx21_write_vendor(void *tx,void *c,const void *m) {}
 static void meson_hdmitx21_audio_mode(void *tx,int clock,bool on) {audio_on=on;}
+static void meson_hdmitx21_config_color(void *tx,const void *c) {}
+static int drm_atomic_helper_connector_hdmi_update_infoframes(void *c,void *s) {return 0;}
 '''
 bridge_program += '\n' + function(source, 'meson_t7_clock_calculate')
 bridge_program += '\n' + function(source, 'meson_t7_mode_valid')

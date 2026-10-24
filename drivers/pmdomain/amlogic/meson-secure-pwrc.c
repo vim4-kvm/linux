@@ -50,6 +50,7 @@ struct meson_secure_pwrc_domain_desc {
 	char *name;
 	bool (*is_off)(struct meson_secure_pwrc_domain *pwrc_domain);
 	bool verify_state;
+	bool mempd;
 };
 
 struct meson_secure_pwrc_domain_data {
@@ -115,6 +116,51 @@ static int meson_secure_pwrc_on(struct generic_pm_domain *domain)
 	}
 
 	return ret ?: meson_secure_pwrc_wait(pwrc_domain, false);
+}
+
+static int meson_secure_mempd_set(struct generic_pm_domain *domain, bool on)
+{
+	struct meson_secure_pwrc_domain *pd =
+		container_of(domain, struct meson_secure_pwrc_domain, base);
+	s32 result;
+	int ret;
+
+	ret = meson_sm_call(pd->pwrc->fw, SM_A1_PWRC_SET, &result,
+			    pd->index, on ? PWRC_ON : PWRC_OFF, 0, 0, 0);
+	if (ret)
+		return ret;
+	/* The transport can succeed while firmware rejects an unsupported module. */
+	return result < 0 ? result : result ? -EIO : 0;
+}
+
+static int meson_secure_mempd_on(struct generic_pm_domain *domain)
+{
+	return meson_secure_mempd_set(domain, true);
+}
+
+static int meson_secure_mempd_off(struct generic_pm_domain *domain)
+{
+	return meson_secure_mempd_set(domain, false);
+}
+
+static bool meson_secure_mempd_initially_off(struct meson_secure_pwrc_domain *domain)
+{
+	/*
+	 * Vendor MEMPD has SET but reads status through SoC-specific register tables,
+	 * not PWRC_GET. Model an unclaimed domain as off: the first consumer must
+	 * successfully issue SET(ON), even if firmware left this SRAM powered.
+	 * An unclaimed boot SRAM is never turned off by unused-domain cleanup.
+	 */
+	return true;
+}
+
+#define T7_MEM_PD(__name)					\
+[PWRC_T7_##__name##_MEM_ID] = {				\
+	.name = "T7_" #__name "_MEM",			\
+	.index = PWRC_T7_##__name##_MEM_ID,		\
+	.parent = PWRC_T7_VPU_HDMI_ID,			\
+	.is_off = meson_secure_mempd_initially_off,	\
+	.mempd = true,					\
 }
 
 #define SEC_PD(__name, __flag)			\
@@ -352,6 +398,19 @@ static const struct meson_secure_pwrc_domain_desc s7d_pwrc_domains[] = {
 };
 
 static const struct meson_secure_pwrc_domain_desc t7_pwrc_domains[] = {
+	T7_MEM_PD(OSD1),
+	T7_MEM_PD(OSD2),
+	T7_MEM_PD(VD1),
+	T7_MEM_PD(VD2),
+	T7_MEM_PD(OSD_SCALE),
+	T7_MEM_PD(VD2_SCALE),
+	T7_MEM_PD(OSD2_SCALE),
+	T7_MEM_PD(OSD3),
+	T7_MEM_PD(MALI_AFBC),
+	T7_MEM_PD(VD1_SCALE),
+	T7_MEM_PD(OSD_BLD34),
+	T7_MEM_PD(VD2_OFIFO),
+	T7_MEM_PD(RDMA),
 	SEC_PD(T7_DSPA,		0),
 	SEC_PD(T7_DSPB,		0),
 	TOP_PD(T7_DOS_HCODEC,	0, PWRC_T7_NIC3_ID),
@@ -480,6 +539,10 @@ static int meson_secure_pwrc_probe(struct platform_device *pdev)
 		dom->base.flags = match->domains[i].flags;
 		dom->base.power_on = meson_secure_pwrc_on;
 		dom->base.power_off = meson_secure_pwrc_off;
+		if (match->domains[i].mempd) {
+			dom->base.power_on = meson_secure_mempd_on;
+			dom->base.power_off = meson_secure_mempd_off;
+		}
 
 		if (match->domains[i].is_off(dom) && (dom->base.flags & GENPD_FLAG_ALWAYS_ON))
 			meson_secure_pwrc_on(&dom->base);

@@ -39,6 +39,10 @@
 #define CEC_GEN_CNTL_CLK_ENABLE		1
 #define CEC_GEN_CNTL_CLK_ENABLE_DBG	2
 #define CEC_GEN_CNTL_CLK_CTRL_MASK	GENMASK(2, 1)
+#define CEC_GEN_CNTL_SYS_CLK_EN		BIT(3)
+#define CEC_GEN_CNTL_SHARE_IO		BIT(4)
+#define CEC_GEN_CNTL_FILTER_TICK		GENMASK(9, 8)
+#define CEC_GEN_CNTL_FILTER_DELAY		GENMASK(14, 12)
 
 /*
  * [7:0] cec_reg_addr
@@ -217,7 +221,10 @@
 
 struct meson_ao_cec_device {
 	struct platform_device		*pdev;
+	int				irq;
 	void __iomem			*base;
+	void __iomem			*cecb_route;
+	u32				cecb_route_saved;
 	struct clk			*core;
 	spinlock_t			cec_reg_lock;
 	struct cec_notifier		*notify;
@@ -227,6 +234,26 @@ struct meson_ao_cec_device {
 
 #define writel_bits_relaxed(mask, val, addr) \
 	writel_relaxed((readl_relaxed(addr) & ~(mask)) | (val), addr)
+
+static void meson_ao_cec_t7_restore_route(void *data)
+{
+	struct meson_ao_cec_device *ao_cec = data;
+
+	writel_bits_relaxed(CEC_GEN_CNTL_SHARE_IO, ao_cec->cecb_route_saved,
+			    ao_cec->cecb_route);
+}
+
+static void meson_ao_cec_t7_setup(struct meson_ao_cec_device *ao_cec)
+{
+	/* Use CECA on GPIOW12. CECB must not redirect its output to this pad. */
+	writel_bits_relaxed(CEC_GEN_CNTL_SHARE_IO, 0, ao_cec->cecb_route);
+	writel_bits_relaxed(CEC_GEN_CNTL_SHARE_IO | CEC_GEN_CNTL_SYS_CLK_EN |
+			    CEC_GEN_CNTL_FILTER_TICK | CEC_GEN_CNTL_FILTER_DELAY,
+			    CEC_GEN_CNTL_SYS_CLK_EN |
+			    FIELD_PREP(CEC_GEN_CNTL_FILTER_TICK, 1) |
+			    FIELD_PREP(CEC_GEN_CNTL_FILTER_DELAY, 7),
+			    ao_cec->base + CEC_GEN_CNTL_REG);
+}
 
 static inline int meson_ao_cec_wait_busy(struct meson_ao_cec_device *ao_cec)
 {
@@ -486,6 +513,20 @@ static int meson_ao_cec_set_log_addr(struct cec_adapter *adap, u8 logical_addr)
 	struct meson_ao_cec_device *ao_cec = adap->priv;
 	int ret = 0;
 
+	if (ao_cec->cecb_route) {
+		unsigned int mask = 0;
+
+		/* A1 and later use two address bitmaps, not GX's valid-bit slots. */
+		if (logical_addr != CEC_LOG_ADDR_INVALID) {
+			if (logical_addr > 15)
+				return -EINVAL;
+			mask = BIT(logical_addr);
+		}
+		meson_ao_cec_write(ao_cec, CEC_LOGICAL_ADDR0, mask & 0xff, &ret);
+		meson_ao_cec_write(ao_cec, CEC_LOGICAL_ADDR1, mask >> 8, &ret);
+		return ret;
+	}
+
 	meson_ao_cec_write(ao_cec, CEC_LOGICAL_ADDR0,
 			   LOGICAL_ADDR_DISABLE, &ret);
 	if (ret)
@@ -552,6 +593,9 @@ static int meson_ao_cec_adap_enable(struct cec_adapter *adap, bool enable)
 
 	if (!enable)
 		return 0;
+
+	if (ao_cec->cecb_route)
+		meson_ao_cec_t7_setup(ao_cec);
 
 	/* Enable gated clock (Normal mode). */
 	writel_bits_relaxed(CEC_GEN_CNTL_CLK_CTRL_MASK,
@@ -630,14 +674,33 @@ static int meson_ao_cec_probe(struct platform_device *pdev)
 		ret = PTR_ERR(ao_cec->base);
 		goto out_probe_adapter;
 	}
+	if (of_device_is_compatible(pdev->dev.of_node, "amlogic,t7-ao-cec")) {
+		struct clk *pclk;
+
+		pclk = devm_clk_get_enabled(&pdev->dev, "pclk");
+		if (IS_ERR(pclk)) {
+			ret = PTR_ERR(pclk);
+			goto out_probe_adapter;
+		}
+		/* Claim the routing word so another CECB driver cannot race CECA. */
+		ao_cec->cecb_route = devm_platform_ioremap_resource(pdev, 1);
+		if (IS_ERR(ao_cec->cecb_route)) {
+			ret = PTR_ERR(ao_cec->cecb_route);
+			goto out_probe_adapter;
+		}
+		ao_cec->cecb_route_saved = readl_relaxed(ao_cec->cecb_route) &
+					 CEC_GEN_CNTL_SHARE_IO;
+		ret = devm_add_action_or_reset(&pdev->dev, meson_ao_cec_t7_restore_route, ao_cec);
+		if (ret)
+			goto out_probe_adapter;
+	}
 
 	irq = platform_get_irq(pdev, 0);
-	ret = devm_request_threaded_irq(&pdev->dev, irq,
-					meson_ao_cec_irq,
-					meson_ao_cec_irq_thread,
-					0, NULL, ao_cec);
-	if (ret)
+	if (irq < 0) {
+		ret = irq;
 		goto out_probe_adapter;
+	}
+	ao_cec->irq = irq;
 
 	ao_cec->core = devm_clk_get(&pdev->dev, "core");
 	if (IS_ERR(ao_cec->core)) {
@@ -663,25 +726,36 @@ static int meson_ao_cec_probe(struct platform_device *pdev)
 	ao_cec->pdev = pdev;
 	platform_set_drvdata(pdev, ao_cec);
 
+	/* Initialize before publishing the adapter: userspace may open it at once. */
+	meson_ao_cec_irq_setup(ao_cec, false);
+	writel_relaxed(CEC_GEN_CNTL_RESET,
+		       ao_cec->base + CEC_GEN_CNTL_REG);
+	ret = devm_request_threaded_irq(&pdev->dev, irq,
+					meson_ao_cec_irq,
+					meson_ao_cec_irq_thread,
+					0, NULL, ao_cec);
+	if (ret)
+		goto out_probe_clk;
+
 	ao_cec->notify = cec_notifier_cec_adap_register(hdmi_dev, NULL,
 							ao_cec->adap);
 	if (!ao_cec->notify) {
 		ret = -ENOMEM;
-		goto out_probe_clk;
+		goto out_probe_irq;
 	}
 
 	ret = cec_register_adapter(ao_cec->adap, &pdev->dev);
 	if (ret < 0)
 		goto out_probe_notify;
 
-	/* Setup Hardware */
-	writel_relaxed(CEC_GEN_CNTL_RESET,
-		       ao_cec->base + CEC_GEN_CNTL_REG);
-
 	return 0;
 
 out_probe_notify:
 	cec_notifier_cec_adap_unregister(ao_cec->notify, ao_cec->adap);
+
+out_probe_irq:
+	meson_ao_cec_adap_enable(ao_cec->adap, false);
+	devm_free_irq(&pdev->dev, ao_cec->irq, ao_cec);
 
 out_probe_clk:
 	clk_disable_unprepare(ao_cec->core);
@@ -698,14 +772,17 @@ static void meson_ao_cec_remove(struct platform_device *pdev)
 {
 	struct meson_ao_cec_device *ao_cec = platform_get_drvdata(pdev);
 
-	clk_disable_unprepare(ao_cec->core);
-
 	cec_notifier_cec_adap_unregister(ao_cec->notify, ao_cec->adap);
+	/* Join the threaded handler before the adapter it references can be freed. */
+	devm_free_irq(&pdev->dev, ao_cec->irq, ao_cec);
 	cec_unregister_adapter(ao_cec->adap);
+	/* Adapter teardown disables the controller and can still access registers. */
+	clk_disable_unprepare(ao_cec->core);
 }
 
 static const struct of_device_id meson_ao_cec_of_match[] = {
 	{ .compatible = "amlogic,meson-gx-ao-cec", },
+	{ .compatible = "amlogic,t7-ao-cec", },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, meson_ao_cec_of_match);
