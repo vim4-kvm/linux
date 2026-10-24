@@ -8822,7 +8822,9 @@ S:	Supported
 W:	http://linux-meson.com/
 T:	git https://gitlab.freedesktop.org/drm/misc/kernel.git
 F:	Documentation/devicetree/bindings/display/amlogic,meson-dw-hdmi.yaml
+F:	Documentation/devicetree/bindings/display/amlogic,meson-t7-hdmi-tx.yaml
 F:	Documentation/devicetree/bindings/display/amlogic,meson-vpu.yaml
+F:	Documentation/devicetree/bindings/display/amlogic,t7-display*.yaml
 F:	Documentation/gpu/meson.rst
 F:	drivers/gpu/drm/ci/xfails/meson*
 F:	drivers/gpu/drm/meson/
