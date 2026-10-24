@@ -27,9 +27,6 @@ properties:
     const: amlogic,t7-display
   reg:
     minItems: 12
-    oneOf:
-      - maxItems: 12
-      - minItems: 14
     items:
       - description: OSD1, ff006840/80
       - description: ENC2 timing, ff008db8/608
@@ -43,7 +40,7 @@ properties:
       - description: VPP postblend size, ff007484/4
       - description: VPP output size, ff007694/4
       - description: HDMI mapping and sync polarity, ff009c6c/4
-      - description: HDMI chroma formatter, ff009d0c/4
+      - description: HDMI chroma downsampler and bit depth, ff009d0c/4
       - description: VPP0 OSD blend RGB to YUV matrix, ff00e440/38
       - description: OSD2 control and MIF, ff0068c0/80
       - description: OSD3 control and MIF, ff00f600/80
@@ -77,54 +74,98 @@ properties:
       - description: vd3-afbc, ff012500/4
   reg-names:
     minItems: 12
+    maxItems: 44
     oneOf:
-      - maxItems: 12
+      - minItems: 12
+        items:
+          - const: osd1
+          - const: venc
+          - const: rdma
+          - const: pll
+          - const: vid2
+          - const: vid-div
+          - const: vpp
+          - const: blend
+          - const: scaler
+          - const: post-size
+          - const: out-size
+          - const: hdmi-setting
+          - const: osd2
+          - const: osd3
+          - const: scaler2
+          - const: scaler3
+          - const: osd-paths
+          - const: osd2-address
+          - const: osd2-unpack
+          - const: dimm1
+          - const: dimm2
+          - const: dimm3
+          - const: vd1-mif
+          - const: vd2-mif
+          - const: vd1-pps
+          - const: vd1-pps-control
+          - const: vd2-pps
+          - const: video-misc
+          - const: video-alpha
+          - const: video-sources
+          - const: vd3-source
+          - const: video-hdr-size
+          - const: vd1-hdr
+          - const: vd2-hdr
+          - const: video-path
+          - const: video-start
+          - const: video-size
+          - const: video-matrix
+          - const: video-dsc
+          - const: video-sr
+          - const: vd3-fetch
+          - const: vd3-afbc
       - minItems: 14
-    items:
-      - const: osd1
-      - const: venc
-      - const: rdma
-      - const: pll
-      - const: vid2
-      - const: vid-div
-      - const: vpp
-      - const: blend
-      - const: scaler
-      - const: post-size
-      - const: out-size
-      - const: hdmi-setting
-      - const: hdmi-format
-      - const: osd-matrix
-      - const: osd2
-      - const: osd3
-      - const: scaler2
-      - const: scaler3
-      - const: osd-paths
-      - const: osd2-address
-      - const: osd2-unpack
-      - const: dimm1
-      - const: dimm2
-      - const: dimm3
-      - const: vd1-mif
-      - const: vd2-mif
-      - const: vd1-pps
-      - const: vd1-pps-control
-      - const: vd2-pps
-      - const: video-misc
-      - const: video-alpha
-      - const: video-sources
-      - const: vd3-source
-      - const: video-hdr-size
-      - const: vd1-hdr
-      - const: vd2-hdr
-      - const: video-path
-      - const: video-start
-      - const: video-size
-      - const: video-matrix
-      - const: video-dsc
-      - const: video-sr
-      - const: vd3-fetch
-      - const: vd3-afbc
+        items:
+          - const: osd1
+          - const: venc
+          - const: rdma
+          - const: pll
+          - const: vid2
+          - const: vid-div
+          - const: vpp
+          - const: blend
+          - const: scaler
+          - const: post-size
+          - const: out-size
+          - const: hdmi-setting
+          - const: hdmi-format
+          - const: osd-matrix
+          - const: osd2
+          - const: osd3
+          - const: scaler2
+          - const: scaler3
+          - const: osd-paths
+          - const: osd2-address
+          - const: osd2-unpack
+          - const: dimm1
+          - const: dimm2
+          - const: dimm3
+          - const: vd1-mif
+          - const: vd2-mif
+          - const: vd1-pps
+          - const: vd1-pps-control
+          - const: vd2-pps
+          - const: video-misc
+          - const: video-alpha
+          - const: video-sources
+          - const: vd3-source
+          - const: video-hdr-size
+          - const: vd1-hdr
+          - const: vd2-hdr
+          - const: video-path
+          - const: video-start
+          - const: video-size
+          - const: video-matrix
+          - const: video-dsc
+          - const: video-sr
+          - const: vd3-fetch
+          - const: vd3-afbc
   amlogic,video-planes:
     type: boolean
     description: |
@@ -206,9 +247,9 @@ allOf:
     else:
       properties:
         reg:
-          maxItems: 22
+          maxItems: 24
         reg-names:
-          maxItems: 22
+          maxItems: 24
         power-domains:
           maxItems: 10
   - if:
@@ -225,8 +266,8 @@ allOf:
     else:
       properties:
         reg:
-          maxItems: 12
+          maxItems: 14
         reg-names:
-          maxItems: 12
+          maxItems: 14
         power-domains:
           maxItems: 3
