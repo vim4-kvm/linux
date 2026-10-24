@@ -10,6 +10,8 @@ types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
                source.index('static int t7_hdmirx_validate_edid')]
 start = source.index('static u32 t7_hdmirx_sample_cable(')
 functions = source[start:source.index('\n}', start) + 2] + '\n'
+start = source.index('static bool t7_hdmirx_same_measurement(')
+functions += source[start:source.index('\n}', start) + 2] + '\n'
 functions += source[source.index('int t7_hdmirx_stream_get('):
                    source.index('static int t7_hdmirx_status(')]
 prefix = r'''
@@ -51,20 +53,21 @@ static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx) { (void)rx; return false; 
 static bool t7_hdmirx_sdr420_input(struct t7_hdmirx *rx) { (void)rx; return false; }
 static bool t7_hdmirx_sdr444_input(struct t7_hdmirx *rx) { (void)rx; return false; }
 static void t7_hdmirx_update_drm(struct t7_hdmirx *rx) { (void)rx; }
-static bool signal_valid, source_present, hdmi2 = true, pll_fail, late_alignment, lose_during_wait;
+static bool signal_valid, source_present, hdmi2 = true, pll_fail, late_alignment;
 static bool unsupported_signal, unsupported_color, unstable_timings;
+static u32 mode_delta, color_full = 1;
 static unsigned int pll_calls, pcs_calls, queued, canceled, last_delay, meter_resets;
 static unsigned int profile_changes;
 static u32 meter_reset;
 static u32 cable_hz;
 static struct t7_hdmirx receiver;
 static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *c) {
-    (void)rx; *c=(struct t7_hdmirx_color){.depth=8,.full=1}; return unsupported_color?-ERANGE:0;
+    (void)rx; *c=(struct t7_hdmirx_color){.depth=8,.full=color_full}; return unsupported_color?-ERANGE:0;
 }
 static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
                              struct t7_hdmirx_measurement *m) {
     (void)rx; (void)yuv420;
-    *m = (struct t7_hdmirx_measurement) { .width=hdmi2?3840:1920,
+    *m = (struct t7_hdmirx_measurement) { .width=(hdmi2?3840:1920)+mode_delta,
         .height=hdmi2?2160:1080, .ticks=2777778 };
     return 0;
 }
@@ -135,11 +138,6 @@ static void t7_hdmirx_phy_equalize(struct t7_hdmirx *rx)
     assert(!rx->link->users); signal_valid = !late_alignment;
 }
 static void t7_hdmirx_reset_pcs(struct t7_hdmirx *rx) { (void)rx; pcs_calls++; }
-static void usleep_range(unsigned int low, unsigned int high)
-{
-    assert(low == 20000 && high == 21000);
-    if (lose_during_wait) signal_valid = false;
-}
 static void schedule_delayed_work(struct delayed_work *work, unsigned int delay)
 {
     (void)work; queued++; last_delay = delay;
@@ -165,33 +163,44 @@ int main(void)
     assert(t7_hdmirx_stream_get(&dev,3840,2160) == -ENOLINK && !link.users);
     source_present = true; cable_hz = 148500000;
     tick(&link, 3); assert(!pll_calls);
-    tick(&link, 1); assert(pll_calls == 1 && pcs_calls == 1 && link.ready);
+    tick(&link, 1); assert(pll_calls == 1 && pcs_calls == 1 && !link.ready);
+    tick(&link, 1); assert(!link.ready);
+    /* A valid acquisition followed by a lost signal cannot admit DMA.
+     * A later stable signal qualifies without another PLL/PCS reset.
+     */
+    signal_valid=false; tick(&link,1); assert(!link.ready && !link.video_samples);
+    signal_valid=true; tick(&link,2); assert(!link.ready);
+    assert(t7_hdmirx_stream_get(&dev,3840,2160)==-ENOLINK && !link.users);
+    tick(&link,1); assert(link.ready && pll_calls==1 && pcs_calls==1);
     tick(&link, 100); assert(pll_calls == 1);
     assert(!t7_hdmirx_stream_get(&dev,3840,2160) && !t7_hdmirx_stream_get(&dev,3840,2160) && link.users == 2);
     unsigned int resets_before = meter_resets;
     signal_valid = false; tick(&link, 10);
     assert(!link.ready && pll_calls == 1 && meter_resets == resets_before);
     t7_hdmirx_stream_put(&dev); tick(&link, 10); assert(pll_calls == 1);
-    t7_hdmirx_stream_put(&dev); tick(&link, 4); assert(link.ready && pll_calls == 2);
+    t7_hdmirx_stream_put(&dev); tick(&link, 6); assert(link.ready && pll_calls == 2);
     signal_valid = false; source_present = false; tick(&link, 10);
     assert(!link.ready && !link.configured && !link.stable_samples && pll_calls == 2);
     source_present = true; hdmi2 = false; tick(&link, 10); assert(pll_calls == 2);
     hdmi2 = true; pll_fail = true; tick(&link, 4); assert(!link.ready && pll_calls == 3);
     pll_fail = false; late_alignment = true; tick(&link, 3);
     assert(pll_calls == 4 && !link.ready && link.configured);
-    signal_valid = true; tick(&link, 1); assert(link.ready && pll_calls == 4);
-    link.ready = false; lose_during_wait = true; tick(&link, 1);
-    assert(!link.ready && !signal_valid);
-    lose_during_wait=false; late_alignment=false; receiver.dynamic_modes=true;
+    signal_valid = true; tick(&link, 3); assert(link.ready && pll_calls == 4);
+    link.ready=false; link.video_samples=0;
+    tick(&link,1); mode_delta=2; tick(&link,2); assert(!link.ready);
+    mode_delta=0; tick(&link,2); assert(!link.ready);
+    color_full=0; tick(&link,2); assert(!link.ready);
+    tick(&link,1); assert(link.ready && pll_calls==4);
+    signal_valid=false; late_alignment=false; receiver.dynamic_modes=true;
     receiver.phy=phy; receiver.audio_active=true;
-    hdmi2=false; tick(&link,4);
+    hdmi2=false; tick(&link,6);
     assert(link.ready && !receiver.uhd60 && profile_changes==1);
     u32 audio_div; memcpy(&audio_div,phy+T7_RX_AUD_PLL3,4); assert(audio_div==2);
     assert(t7_hdmirx_stream_get(&dev,3840,2160)==-EPIPE && !link.users);
     assert(!t7_hdmirx_stream_get(&dev,1920,1080));
     hdmi2=true; tick(&link,20);
     assert(!link.ready && !receiver.uhd60 && profile_changes==1);
-    t7_hdmirx_stream_put(&dev); tick(&link,4);
+    t7_hdmirx_stream_put(&dev); tick(&link,6);
     assert(link.ready && receiver.uhd60 && profile_changes==2);
     memcpy(&audio_div,phy+T7_RX_AUD_PLL3,4); assert(audio_div==0);
     assert(t7_hdmirx_stream_get(&dev,1920,1080)==-EPIPE && !link.users);
@@ -216,14 +225,14 @@ int main(void)
     assert(t7_hdmirx_stream_get(&dev,3840,2160)==-ENOLINK && !link.users);
     unsupported_signal=unsupported_color=false;cable_hz=148500000;
     tick(&link,3);assert(!link.ready && pll_calls==before_probe+1);
-    tick(&link,1);assert(link.ready && pll_calls==before_probe+2);
+    tick(&link,3);assert(link.ready && pll_calls==before_probe+2);
     /* An aligned but malformed FDET after HPD is not an unsupported HDR probe.
      * It must retry PCS without waiting for a different cable clock.
      */
     unsigned int before_malformed=pll_calls;
     unsupported_signal=true; tick(&link,4);
     assert(!link.ready && pll_calls>before_malformed);
-    unsupported_signal=false; tick(&link,1); assert(link.ready);
+    unsupported_signal=false; tick(&link,3); assert(link.ready);
     unsigned int before_unstable=pll_calls;
     unstable_timings=true; tick(&link,1);
     assert(link.ready && pll_calls==before_unstable);
@@ -233,7 +242,7 @@ int main(void)
     assert(!link.ready && pll_calls==before_unstable);
     link.users=0; tick(&link,8);
     assert(pll_calls>before_unstable && !link.ready);
-    unstable_timings=false; tick(&link,1); assert(link.ready);
+    unstable_timings=false; tick(&link,3); assert(link.ready);
     t7_hdmirx_link_stop(&link);
     assert(canceled == 1 && !link.ready);
     puts("Receiver recovery: absent/delayed source, DMA leases, PLL failure and late alignment passed");

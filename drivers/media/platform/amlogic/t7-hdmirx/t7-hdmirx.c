@@ -243,6 +243,9 @@ struct t7_hdmirx_link {
 	u32 previous_cable;
 	unsigned int stable_samples;
 	unsigned int timing_retries;
+	unsigned int video_samples;
+	struct t7_hdmirx_measurement pending_mode;
+	struct t7_hdmirx_color pending_color;
 	bool previous_uhd;
 	bool ready;
 	bool configured;
@@ -2001,6 +2004,33 @@ static void t7_hdmirx_select_phy(struct t7_hdmirx *rx, u32 cable, bool hdmi2)
 		clock < 155000000 ? 2 : clock < 340000000 ? 3 : 4;
 }
 
+static bool t7_hdmirx_qualify_video(struct t7_hdmirx *rx)
+{
+	struct t7_hdmirx_link *link = rx->link;
+	struct t7_hdmirx_measurement mode;
+	struct t7_hdmirx_color color;
+
+	if (t7_hdmirx_read_color(rx, &color) ||
+	    t7_hdmirx_measure(rx, color.space == 3, &mode)) {
+		link->video_samples = 0;
+		return false;
+	}
+	/* After PCS recovery, FDET and AVI can briefly describe a valid mode
+	 * before the source settles. As in the vendor signal-stable state,
+	 * require matching video observations across polling intervals before
+	 * admitting DMA. Two reads within one frame do not establish stability.
+	 */
+	if (!link->video_samples ||
+	    !t7_hdmirx_same_measurement(&mode, &link->pending_mode) ||
+	    memcmp(&color, &link->pending_color, sizeof(color)))
+		link->video_samples = 1;
+	else
+		link->video_samples++;
+	link->pending_mode = mode;
+	link->pending_color = color;
+	return link->video_samples >= 3;
+}
+
 static void t7_hdmirx_link_work(struct work_struct *work)
 {
 	struct t7_hdmirx_link *link = container_of(to_delayed_work(work),
@@ -2020,6 +2050,8 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 		writeb(readb(rx->cor + T7_RX_COR_AUDIO_PACKET) & BIT(0) ? 6 : 0,
 		       rx->cor + T7_RX_COR_PREAMBLE);
 	ret = t7_hdmirx_video_status_reason(rx, &reason);
+	if (ret && !READ_ONCE(link->ready))
+		link->video_samples = 0;
 	if (ret == -EAGAIN) {
 		/* One torn snapshot is harmless. A stuck FDET can change on every
 		 * read indefinitely; after a second, qualify clocks and recover PCS.
@@ -2044,11 +2076,8 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	    (rx->dynamic_modes || !rx->hdr_probe ||
 	     (t7_hdmirx_sdr_cable(link->previous_cable) && !yuv) ||
 	     (link->previous_cable && !t7_hdmirx_sdr_cable(link->previous_cable) && yuv))) {
-		if (!READ_ONCE(link->ready)) {
-			usleep_range(20000, 21000);
-			ret = t7_hdmirx_video_status(rx);
-		}
-		WRITE_ONCE(link->ready, !ret);
+		if (!READ_ONCE(link->ready))
+			WRITE_ONCE(link->ready, t7_hdmirx_qualify_video(rx));
 		goto out;
 	}
 	if (READ_ONCE(link->ready))
@@ -2056,6 +2085,7 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 				    reason, ret, link->timing_retries,
 				    link->users, link->configured);
 	WRITE_ONCE(link->ready, false);
+	link->video_samples = 0;
 	/* A live or quarantined MIF owns its receiver until DMA is safe. */
 	if (link->users) {
 		link->configured = false;
@@ -2129,11 +2159,8 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	t7_hdmirx_reset_pcs(rx);
 	link->configured = true;
 	ret = t7_hdmirx_video_status(rx);
-	if (!ret) {
-		usleep_range(20000, 21000);
-		ret = t7_hdmirx_video_status(rx);
-	}
-	WRITE_ONCE(link->ready, !ret);
+	if (!ret)
+		WRITE_ONCE(link->ready, t7_hdmirx_qualify_video(rx));
 out:
 	mutex_unlock(&link->lock);
 	schedule_delayed_work(&link->work, msecs_to_jiffies(250));
@@ -2182,6 +2209,7 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 	seq_printf(s, "core_active: %u\n", rx->core_active);
 	if (rx->link) {
 		seq_printf(s, "link_ready: %u\n", READ_ONCE(rx->link->ready));
+		seq_printf(s, "video_stable_samples: %u\n", READ_ONCE(rx->link->video_samples));
 		seq_printf(s, "capture_users: %u\n", READ_ONCE(rx->link->users));
 	}
 	if (rx->core_active) {
