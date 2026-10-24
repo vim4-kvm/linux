@@ -1652,7 +1652,8 @@ static void release_canvas_index(struct aml_vdec_hw *hw,
 
 static void h264_release_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
 {
-	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->curr_ctx;
+	/* STREAMOFF also runs after m2m has relinquished the hardware context. */
+	struct aml_h264_ctx *h264_ctx = ctx->codec_priv;
 	int i;
 	struct h264_decode_buf_spec *buf;
 
