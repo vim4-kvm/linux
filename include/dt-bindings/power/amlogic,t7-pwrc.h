@@ -60,4 +60,19 @@
 #define PWRC_T7_MIPI_DSI1_ID		50
 #define PWRC_T7_AUDIO_ID		51
 
+/* VPU SRAM firmware IDs: vendor top-level domain count (52) plus vpu_mod_e. */
+#define PWRC_T7_OSD1_MEM_ID	52
+#define PWRC_T7_OSD2_MEM_ID	53
+#define PWRC_T7_VD1_MEM_ID		54
+#define PWRC_T7_VD2_MEM_ID		55
+#define PWRC_T7_OSD_SCALE_MEM_ID	59
+#define PWRC_T7_VD2_SCALE_MEM_ID	86
+#define PWRC_T7_OSD2_SCALE_MEM_ID	94
+#define PWRC_T7_OSD3_MEM_ID	97
+#define PWRC_T7_MALI_AFBC_MEM_ID	99
+#define PWRC_T7_VD1_SCALE_MEM_ID	100
+#define PWRC_T7_OSD_BLD34_MEM_ID	101
+#define PWRC_T7_VD2_OFIFO_MEM_ID	103
+#define PWRC_T7_RDMA_MEM_ID	109
+
 #endif

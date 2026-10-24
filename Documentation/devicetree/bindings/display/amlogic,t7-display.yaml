@@ -18,15 +18,15 @@ description: |
   Register DMA channel 1 and both interrupt sources are exclusive to display.
   The clock-controller regmap serializes masked display clock updates with CCF;
   RX clocks, VPU frequency, resets and power islands must not be changed.
+  The optional managed SRAM profile drains all boot OSD fetches before taking
+  VPU SRAM domains through the secure power controller. It holds them until
+  reboot, including after a DMA fault. These SRAM IDs are disjoint from VDIN.
 
 properties:
   compatible:
     const: amlogic,t7-display
   reg:
     minItems: 12
-    oneOf:
-      - maxItems: 12
-      - minItems: 14
     items:
       - description: OSD1, ff006840/80
       - description: ENC2 timing, ff008db8/608
@@ -36,32 +36,149 @@ properties:
       - description: HDMI video divider, fe000204/4
       - description: VPP OSD input and scopes, ff0077c4/18
       - description: OSD blend scopes and sizes, ff00e6c0/44
-      - description: OSD1 scaler bypass, ff016820/4
+      - description: OSD1 scaler bypass ff016820/4, or full M3 scaler ff016800/38
       - description: VPP postblend size, ff007484/4
       - description: VPP output size, ff007694/4
       - description: HDMI mapping and sync polarity, ff009c6c/4
-      - description: HDMI chroma formatter, ff009d0c/4
+      - description: HDMI chroma downsampler and bit depth, ff009d0c/4
       - description: VPP0 OSD blend RGB to YUV matrix, ff00e440/38
+      - description: OSD2 control and MIF, ff0068c0/80
+      - description: OSD3 control and MIF, ff00f600/80
+      - description: OSD2 scaler, ff016900/38
+      - description: OSD3 scaler, ff016a00/38
+      - description: OSD routing fields, ff006834/8
+      - description: OSD2 linear MIF address and stride, ff006990/c
+      - description: OSD2 Mali unpack control, ff006af4/4
+      - description: OSD1 constant color control, ff006b7c/4
+      - description: OSD2 constant color control, ff006b3c/4
+      - description: OSD3 constant color control, ff00f680/4
+      - description: vd1-mif, ff012000/104
+      - description: vd2-mif, ff012200/104
+      - description: vd1-pps, ff007404/80
+      - description: vd1-pps-control, ff0074d0/1c
+      - description: vd2-pps, ff00e4cc/78
+      - description: video-misc, ff007498/4
+      - description: video-alpha, ff0075d8/4
+      - description: video-sources, ff0077ec/10
+      - description: vd3-source, ff0077bc/4
+      - description: video-hdr-size, ff00695c/8
+      - description: vd1-hdr, ff00e000/4
+      - description: vd2-hdr, ff00e140/4
+      - description: video-path, ff0069e8/4
+      - description: video-start, ff006a28/4
+      - description: video-size, ff007698/4
+      - description: video-matrix, ff00757c/4
+      - description: video-dsc, ff006a0c/8
+      - description: video-sr, ff007644/8
+      - description: vd3-fetch, ff012400/4
+      - description: vd3-afbc, ff012500/4
   reg-names:
     minItems: 12
+    maxItems: 44
     oneOf:
-      - maxItems: 12
+      - minItems: 12
+        items:
+          - const: osd1
+          - const: venc
+          - const: rdma
+          - const: pll
+          - const: vid2
+          - const: vid-div
+          - const: vpp
+          - const: blend
+          - const: scaler
+          - const: post-size
+          - const: out-size
+          - const: hdmi-setting
+          - const: osd2
+          - const: osd3
+          - const: scaler2
+          - const: scaler3
+          - const: osd-paths
+          - const: osd2-address
+          - const: osd2-unpack
+          - const: dimm1
+          - const: dimm2
+          - const: dimm3
+          - const: vd1-mif
+          - const: vd2-mif
+          - const: vd1-pps
+          - const: vd1-pps-control
+          - const: vd2-pps
+          - const: video-misc
+          - const: video-alpha
+          - const: video-sources
+          - const: vd3-source
+          - const: video-hdr-size
+          - const: vd1-hdr
+          - const: vd2-hdr
+          - const: video-path
+          - const: video-start
+          - const: video-size
+          - const: video-matrix
+          - const: video-dsc
+          - const: video-sr
+          - const: vd3-fetch
+          - const: vd3-afbc
       - minItems: 14
-    items:
-      - const: osd1
-      - const: venc
-      - const: rdma
-      - const: pll
-      - const: vid2
-      - const: vid-div
-      - const: vpp
-      - const: blend
-      - const: scaler
-      - const: post-size
-      - const: out-size
-      - const: hdmi-setting
-      - const: hdmi-format
-      - const: osd-matrix
+        items:
+          - const: osd1
+          - const: venc
+          - const: rdma
+          - const: pll
+          - const: vid2
+          - const: vid-div
+          - const: vpp
+          - const: blend
+          - const: scaler
+          - const: post-size
+          - const: out-size
+          - const: hdmi-setting
+          - const: hdmi-format
+          - const: osd-matrix
+          - const: osd2
+          - const: osd3
+          - const: scaler2
+          - const: scaler3
+          - const: osd-paths
+          - const: osd2-address
+          - const: osd2-unpack
+          - const: dimm1
+          - const: dimm2
+          - const: dimm3
+          - const: vd1-mif
+          - const: vd2-mif
+          - const: vd1-pps
+          - const: vd1-pps-control
+          - const: vd2-pps
+          - const: video-misc
+          - const: video-alpha
+          - const: video-sources
+          - const: vd3-source
+          - const: video-hdr-size
+          - const: vd1-hdr
+          - const: vd2-hdr
+          - const: video-path
+          - const: video-start
+          - const: video-size
+          - const: video-matrix
+          - const: video-dsc
+          - const: video-sr
+          - const: vd3-fetch
+          - const: vd3-afbc
+  amlogic,video-planes:
+    type: boolean
+    description: |
+      Experimental progressive linear VD1/VD2 ownership with two-phase RDMA.
+      Requires managed OSD SRAM and five additional exclusive video SRAM domains.
+      All firmware VD fetches and AFBC decoders must be disabled. SR must be off;
+      firmware must route VD1/VD2 to VPP0 using VD_PATH_MISC_CTRL low byte 0x21
+      and PATH_START_SEL low byte zero. No global VPU arbitration is changed.
+  amlogic,managed-osd-sram:
+    type: boolean
+    description: |
+      Enable exclusive OSD SRAM ownership after draining the boot scanout.
+      Firmware OSD2 and OSD3 must be disabled. Default M1/M2 profiles omit it.
   amlogic,clock-controller:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: T7 peripheral clock controller providing the shared MMIO regmap
@@ -77,10 +194,23 @@ properties:
       - description: TX APB gate
       - description: HDMI PLL oscillator, 24MHz
   power-domains:
+    minItems: 3
     items:
       - description: VPU HDMI
       - description: VI CLK1
       - description: VI CLK2
+      - description: OSD1 SRAM
+      - description: OSD2 SRAM
+      - description: OSD3 SRAM
+      - description: OSD1 scaler SRAM
+      - description: OSD2 scaler SRAM
+      - description: OSD blend34 SRAM
+      - description: RDMA SRAM
+      - description: VD1 SRAM
+      - description: VD2 SRAM
+      - description: VD1 scaler SRAM
+      - description: VD2 scaler SRAM
+      - description: VD2 output FIFO SRAM
   memory-region:
     maxItems: 1
     description: Reserved firmware logo frames
@@ -99,3 +229,45 @@ required:
   - port
 
 additionalProperties: false
+
+allOf:
+  - if:
+      required:
+        - amlogic,video-planes
+    then:
+      required:
+        - amlogic,managed-osd-sram
+      properties:
+        reg:
+          minItems: 42
+        reg-names:
+          minItems: 42
+        power-domains:
+          minItems: 15
+    else:
+      properties:
+        reg:
+          maxItems: 24
+        reg-names:
+          maxItems: 24
+        power-domains:
+          maxItems: 10
+  - if:
+      required:
+        - amlogic,managed-osd-sram
+    then:
+      properties:
+        reg:
+          minItems: 22
+        reg-names:
+          minItems: 22
+        power-domains:
+          minItems: 10
+    else:
+      properties:
+        reg:
+          maxItems: 14
+        reg-names:
+          maxItems: 14
+        power-domains:
+          maxItems: 3
