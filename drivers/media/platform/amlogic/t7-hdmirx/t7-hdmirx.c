@@ -984,8 +984,18 @@ static int t7_hdmirx_measure(struct t7_hdmirx *rx, bool yuv420,
 
 	t7_hdmirx_read_measurement(rx, m);
 	t7_hdmirx_read_measurement(rx, &again);
-	if (memcmp(m, &again, sizeof(*m)))
+	if (memcmp(m, &again, sizeof(*m))) {
+		if (rx->link && READ_ONCE(rx->link->ready))
+			pr_info_ratelimited("t7-hdmirx unstable FDET: first=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x second=%ux%u/%u h=%u,%u,%u,%u v=%u,%u,%u,%u p=%#x\n",
+					    m->width, m->height, m->ticks,
+					    m->hlow, m->hhigh, m->hfront, m->hback,
+					    m->vlow, m->vhigh, m->vfront, m->vback, m->polarity,
+					    again.width, again.height, again.ticks,
+					    again.hlow, again.hhigh, again.hfront, again.hback,
+					    again.vlow, again.vhigh, again.vfront, again.vback,
+					    again.polarity);
 		return -EAGAIN;
+	}
 	/* FDET polarity bits select the pulse, not the much longer idle level. */
 	hsync = m->polarity & BIT(0) ? m->hhigh : m->hlow;
 	vsync = m->polarity & BIT(1) ? m->vhigh : m->vlow;
