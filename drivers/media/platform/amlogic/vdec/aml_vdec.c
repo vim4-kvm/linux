@@ -175,6 +175,8 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 		if (ret)
 			goto complete_request;
 	}
+	/* m2m owns the hardware until stop has drained IRQ and DMA activity. */
+	WRITE_ONCE(dev->dec_hw->curr_ctx, ctx->codec_priv);
 	dos_enable(dev->dec_hw);
 	/* incase of bus hang in stop_streaming */
 	ctx->dos_clk_en = 1;
@@ -205,12 +207,15 @@ complete_request:
 	if (ret < 0 || dev->dec_hw->faulted)
 		goto err_cancel_job;
 
+	WRITE_ONCE(dev->dec_hw->curr_ctx, NULL);
 	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx,
 					 VB2_BUF_STATE_DONE);
 	return;
 
 err_cancel_job:
 	aml_vdec_stop_job(ctx);
+	if (!dev->dec_hw->faulted)
+		WRITE_ONCE(dev->dec_hw->curr_ctx, NULL);
 	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx,
 					 VB2_BUF_STATE_ERROR);
 }
