@@ -80,6 +80,7 @@ struct meson_t7_handoff {
 	struct meson_t7_modeset *modeset;
 	bool native_modeset;
 	bool managed_sram;
+	struct clk *vpu_clock;
 	struct meson_t7_video_kms *video;
 	bool layers_valid;
 	struct meson_t7_osd_layer layers[MESON_T7_OSD_LAYERS];
@@ -100,6 +101,12 @@ bool meson_t7_display_ready(struct drm_crtc *crtc)
 	return !READ_ONCE(to_handoff(crtc->dev)->faulted);
 }
 EXPORT_SYMBOL_GPL(meson_t7_display_ready);
+
+unsigned long meson_t7_display_clock_rate(struct drm_crtc *crtc)
+{
+	return clk_get_rate(to_handoff(crtc->dev)->vpu_clock);
+}
+EXPORT_SYMBOL_GPL(meson_t7_display_clock_rate);
 
 static u32 meson_t7_osd_alpha(u32 ctrl, u16 alpha)
 {
@@ -996,6 +1003,8 @@ static int meson_t7_handoff_probe(struct platform_device *pdev)
 		return ret;
 	if (display->native_modeset && (ret != 5 || clk_get_rate(clocks[4].clk) != 24000000))
 		return dev_err_probe(dev, -EINVAL, "Native PLL requires a 24MHz reference\n");
+	if (display->native_modeset)
+		display->vpu_clock = clocks[1].clk;
 	ret = meson_t7_handoff_domains_get(dev, 0, 3);
 	if (ret)
 		return ret;

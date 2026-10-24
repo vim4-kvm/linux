@@ -21,5 +21,6 @@ int meson_t7_modeset_enable(struct meson_t7_modeset *hw,
 			   const struct drm_display_mode *mode);
 void meson_t7_modeset_disable(struct meson_t7_modeset *hw);
 bool meson_t7_display_ready(struct drm_crtc *crtc);
+unsigned long meson_t7_display_clock_rate(struct drm_crtc *crtc);
 
 #endif

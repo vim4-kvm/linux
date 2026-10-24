@@ -51,7 +51,9 @@ prefix += r'''
 #define max(a,b) ((a)>(b)?(a):(b))
 #define WARN_ON_ONCE(x) assert(!(x))
 static bool ready=true;
+static unsigned long vpu_rate=666000000;
 static bool meson_t7_display_ready(struct drm_crtc *crtc) {return ready;}
+static unsigned long meson_t7_display_clock_rate(struct drm_crtc *crtc) {return vpu_rate;}
 static bool drm_rect_equals(const struct drm_rect *a,const struct drm_rect *b)
 {return !memcmp(a,b,sizeof(*a));}
 static struct drm_plane_state *previous[2];
@@ -122,7 +124,8 @@ int main(void)
 {
     struct meson_t7_video_kms video={};
     struct drm_crtc crtc={};
-    struct drm_crtc_state running={.active=true};
+    struct drm_crtc_state running={.active=true,
+        .adjusted_mode={1920,1080,74250,2200,1125}};
     const struct drm_format_info nv12={DRM_FORMAT_NV12,{1,2},2};
     const struct drm_format_info rgb={DRM_FORMAT_XRGB8888,{4},1};
     struct drm_gem_dma_object y={.dma_addr=0x20000000,.base.size=4096ULL*2160};
@@ -152,6 +155,17 @@ int main(void)
     }
     assert(!video_plane_check(&video.planes[0],&commit));
     assert(!video_plane_check(&video.planes[1],&commit));
+    running.adjusted_mode.clock=148500;
+    assert(video_plane_check(&video.planes[0],&commit)==-EINVAL); /* 4K->1080p60 vskip. */
+    running.adjusted_mode=(struct drm_display_mode){3840,2160,594000,4400,2250};
+    states[0].crtc_w=3840; states[0].crtc_h=2160;
+    assert(!video_plane_check(&video.planes[0],&commit)); /* Native 4K60. */
+    vpu_rate=250000000;
+    assert(video_plane_check(&video.planes[0],&commit)==-EINVAL); /* PPS too slow. */
+    vpu_rate=666000000;
+    states[0].crtc_w=1920; states[0].crtc_h=1080;
+    running.adjusted_mode=(struct drm_display_mode){1920,1080,74250,2200,1125};
+    assert(!video_plane_check(&video.planes[0],&commit));
     struct drm_framebuffer *frames[2]={};
     assert(!meson_t7_video_collect(&video,&commit,false,frames));
     assert(frames[0]==&fb && frames[1]==&fb && meson_t7_video_in_use(&video,&commit));

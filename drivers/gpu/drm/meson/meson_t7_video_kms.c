@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Experimental T7 progressive linear video planes. No canvas or AFBC DMA. */
 #include <linux/io.h>
+#include <linux/math64.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <drm/drm_atomic.h>
@@ -137,6 +138,9 @@ static int video_plane_check(struct drm_plane *plane, struct drm_atomic_commit *
 	struct meson_t7_video_phase phase;
 	struct meson_t7_video_frame frame;
 	struct meson_t7_video_mif mif;
+	const struct drm_display_mode *mode;
+	u64 required;
+	u32 height;
 	int ret;
 
 	if (state->crtc && !meson_t7_display_ready(state->crtc))
@@ -152,9 +156,25 @@ static int video_plane_check(struct drm_plane *plane, struct drm_atomic_commit *
 	ret = meson_t7_video_mif_prepare(&frame, 0, &mif);
 	if (ret)
 		return ret;
-	return meson_t7_video_phase_prepare(frame.crop_width, frame.crop_height,
+	ret = meson_t7_video_phase_prepare(frame.crop_width, frame.crop_height,
 					   drm_rect_width(&state->dst),
 					   drm_rect_height(&state->dst), &phase);
+	if (ret)
+		return ret;
+	mode = &crtc->adjusted_mode;
+	height = drm_rect_height(&state->dst);
+	if (!mode->htotal || !mode->vtotal || !mode->clock)
+		return -EINVAL;
+	/* Vendor vpp_process_speed_check(): these uncompressed frames require vskip. */
+	if (frame.crop_height > 2048 && height < 2048 &&
+	    (u64)mode->clock * 1000 > 30ULL * mode->htotal * mode->vtotal)
+		return -EINVAL;
+	/* VPP_SPEED_FACTOR=0x110; cancel vtotal and reduce 0x110/256 to 17/16. */
+	required = div_u64(17ULL * frame.crop_width * max(frame.crop_height, height) *
+			   mode->clock * 1000, 16 * height * mode->htotal);
+	if (required > meson_t7_display_clock_rate(state->crtc))
+		return -EINVAL;
+	return 0;
 }
 
 static void video_plane_update(struct drm_plane *plane, struct drm_atomic_commit *commit)

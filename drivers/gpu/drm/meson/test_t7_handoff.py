@@ -111,7 +111,7 @@ struct drm_pending_event {
 };
 struct drm_pending_vblank_event { struct drm_pending_event base; };
 struct drm_plane_state;
-struct drm_display_mode {int hdisplay, vdisplay;};
+struct drm_display_mode {int hdisplay, vdisplay, clock, htotal, vtotal;};
 struct drm_rect {int x1,y1,x2,y2;};
 static int drm_rect_width(const struct drm_rect *r) {return r->x2-r->x1;}
 static int drm_rect_height(const struct drm_rect *r) {return r->y2-r->y1;}
