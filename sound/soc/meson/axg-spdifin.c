@@ -33,6 +33,7 @@
 #define  SPDIFIN_TIMER_WIDTH		8
 #define SPDIFIN_CTRL5			0x14
 #define SPDIFIN_CTRL6			0x18
+#define  T7_SPDIFIN_SAMPLE_MODE_FILTER	BIT(12)
 #define SPDIFIN_STAT0			0x1c
 #define  SPDIFIN_STAT0_MODE		GENMASK(30, 28)
 #define  SPDIFIN_STAT0_MAXW		GENMASK(17, 8)
@@ -47,6 +48,7 @@
 struct axg_spdifin_cfg {
 	const unsigned int *mode_rates;
 	unsigned int ref_rate;
+	bool sample_mode_filter;
 };
 
 struct axg_spdifin {
@@ -226,6 +228,14 @@ static int axg_spdifin_dai_probe(struct snd_soc_dai *dai)
 		goto pclk_err;
 	}
 
+	if (priv->conf->sample_mode_filter) {
+		ret = regmap_update_bits(priv->map, SPDIFIN_CTRL6,
+					 T7_SPDIFIN_SAMPLE_MODE_FILTER,
+					 T7_SPDIFIN_SAMPLE_MODE_FILTER);
+		if (ret)
+			goto pclk_err;
+	}
+
 	ret = clk_prepare_enable(priv->refclk);
 	if (ret) {
 		dev_err(dai->dev,
@@ -396,10 +406,19 @@ static const struct axg_spdifin_cfg axg_cfg = {
 	.ref_rate = 333333333,
 };
 
+static const struct axg_spdifin_cfg t7_cfg = {
+	.mode_rates = axg_spdifin_mode_rates,
+	.ref_rate = 500000000,
+	.sample_mode_filter = true,
+};
+
 static const struct of_device_id axg_spdifin_of_match[] = {
 	{
 		.compatible = "amlogic,axg-spdifin",
 		.data = &axg_cfg,
+	}, {
+		.compatible = "amlogic,t7-spdifin",
+		.data = &t7_cfg,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, axg_spdifin_of_match);

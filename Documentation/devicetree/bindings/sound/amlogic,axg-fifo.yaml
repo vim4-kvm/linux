@@ -16,6 +16,7 @@ properties:
           - amlogic,axg-toddr
           - amlogic,axg-frddr
           - amlogic,t7-toddr
+          - amlogic,t7-frddr
       - items:
           - enum:
               - amlogic,g12a-toddr
@@ -78,6 +79,7 @@ allOf:
               - amlogic,sm1-toddr
               - amlogic,g12a-frddr
               - amlogic,t7-toddr
+              - amlogic,t7-frddr
               - amlogic,sm1-frddr
 
     then:

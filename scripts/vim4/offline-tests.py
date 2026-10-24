@@ -6,6 +6,7 @@ No modules are loaded and no device nodes are opened. A nonzero exit from any
 fixture is retained even if later fixtures pass. Run from any working directory.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -38,7 +39,7 @@ VENDOR_TESTS = {
 }
 
 
-def run_tests(source, output, timeout, vendor):
+def run_tests(source, output, timeout, vendor, audio_baseline):
     tracked = subprocess.check_output(
         ['git', '-C', str(source), 'ls-files', '--',
          *(directory + '/test_*.py' for directory in TEST_DIRS)], text=True)
@@ -46,12 +47,21 @@ def run_tests(source, output, timeout, vendor):
     if not tests:
         raise RuntimeError('No VIM4 regression fixtures found')
     results = []
-    for name in tests:
+    route_test = 'sound/soc/meson/test_t7_audio_routes.py'
+    variants = [(name, False) for name in tests]
+    if route_test in tests:
+        variants.append((route_test, True))
+    for name, processing in variants:
         started = time.monotonic()
-        log = output / (name.replace('/', '__') + '.log')
+        label = name + (' --processing' if processing else '')
+        log = output / (label.replace('/', '__') + '.log')
         command = [sys.executable, str(source / name)]
         if Path(name).name in VENDOR_TESTS:
             command.extend(['--vendor', str(vendor)])
+        if name == route_test:
+            command.extend(['--baseline', str(audio_baseline)])
+            if processing:
+                command.append('--processing')
         with log.open('w') as stream:
             try:
                 result = subprocess.run(command,
@@ -61,10 +71,10 @@ def run_tests(source, output, timeout, vendor):
             except subprocess.TimeoutExpired:
                 status = 124
                 stream.write('\nFixture exceeded timeout\n')
-        results.append({'test': name, 'exit': status,
+        results.append({'test': label, 'exit': status,
                         'seconds': round(time.monotonic() - started, 3),
                         'log': log.name})
-        print(f'{"PASS" if status == 0 else "FAIL"} {name}', flush=True)
+        print(f'{"PASS" if status == 0 else "FAIL"} {label}', flush=True)
     return results
 
 
@@ -74,6 +84,8 @@ def main():
     parser.add_argument('--timeout', type=float, default=120, help='Seconds per host fixture')
     parser.add_argument('--vendor', type=Path, default=os.environ.get('VIM4_VENDOR'),
                         help='Local common_drivers checkout (or VIM4_VENDOR)')
+    parser.add_argument('--audio-baseline', type=Path, default=os.environ.get('VIM4_AUDIO_BASELINE'),
+                        help='Pre-audio-series audio-test DTB (or VIM4_AUDIO_BASELINE)')
     parser.add_argument('--kunit-config', type=Path, help='Optional KUnit config; requires QEMU for arm64')
     parser.add_argument('--kunit-arch', default='arm64')
     args = parser.parse_args()
@@ -81,11 +93,16 @@ def main():
         parser.error('Supply an existing common_drivers checkout with --vendor or VIM4_VENDOR')
     vendor = args.vendor.resolve()
     source = Path(__file__).resolve().parents[2]
+    baseline = args.audio_baseline
+    if (source / 'sound/soc/meson/test_t7_audio_routes.py').is_file():
+        if baseline is None or not baseline.is_file():
+            parser.error('Supply a pre-audio-series DTB with --audio-baseline or VIM4_AUDIO_BASELINE')
+        baseline = baseline.resolve()
     output = args.output.resolve()
     if output.is_relative_to(source):
         parser.error('Output must be outside the kernel source tree')
     output.mkdir(parents=True, exist_ok=False)
-    results = run_tests(source, output, args.timeout, vendor)
+    results = run_tests(source, output, args.timeout, vendor, baseline)
     kunit = None
     if args.kunit_config:
         with (output / 'kunit.log').open('w') as stream:
@@ -103,6 +120,9 @@ def main():
         'vendor': str(vendor),
         'vendor_revision': subprocess.check_output(
             ['git', '-C', str(vendor), 'rev-parse', 'HEAD'], text=True).strip(),
+        'audio_baseline': str(baseline) if baseline else None,
+        'audio_baseline_sha256': hashlib.sha256(baseline.read_bytes()).hexdigest()
+        if baseline else None,
     }
     (output / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
     return int(any(result['exit'] for result in results) or kunit not in (None, 0))

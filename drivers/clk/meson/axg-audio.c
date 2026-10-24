@@ -12,6 +12,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+#include <linux/io.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
 
@@ -1467,23 +1468,211 @@ static struct clk_hw *sm1_audio_hw_clks[] = {
 	[AUD_CLKID_EARCRX_DMAC]		= &sm1_earcrx_dmac_clk.hw,
 };
 
-static struct regmap_config axg_audio_regmap_cfg = {
-	.reg_bits	= 32,
-	.val_bits	= 32,
-	.reg_stride	= 4,
+static struct clk_regmap tdmout_d =
+	AUD_PCLK_GATE(tdmout_d, AUDIO_CLK_GATE_EN1, 10);
+static struct clk_regmap tdmin_d_sclk_sel = AUD_TDM_SCLK_MUX(in_d, 0xe8);
+static struct clk_regmap tdmin_d_sclk_pre_en = AUD_TDM_SCLK_PRE_EN(in_d, 0xe8);
+static struct clk_regmap tdmin_d_sclk_post_en = AUD_TDM_SCLK_POST_EN(in_d, 0xe8);
+static struct clk_regmap tdmin_d_sclk = AUD_TDM_SCLK(in_d, 0xe8);
+static struct clk_regmap tdmin_d_lrclk = AUD_TDM_LRLCK(in_d, 0xe8);
+static struct clk_regmap tdmout_d_sclk_sel = AUD_TDM_SCLK_MUX(out_d, 0xec);
+static struct clk_regmap tdmout_d_sclk_pre_en = AUD_TDM_SCLK_PRE_EN(out_d, 0xec);
+static struct clk_regmap tdmout_d_sclk_post_en = AUD_TDM_SCLK_POST_EN(out_d, 0xec);
+static struct clk_regmap tdmout_d_sclk = AUD_TDM_SCLK_WS(out_d, 0xec);
+static struct clk_regmap tdmout_d_lrclk = AUD_TDM_LRLCK(out_d, 0xec);
+
+static const struct clk_parent_data t7_resample_parent_data[] = {
+	{ .hw = &sm1_mst_a_mclk.hw },
+	{ .hw = &sm1_mst_b_mclk.hw },
+	{ .hw = &sm1_mst_c_mclk.hw },
+	{ .hw = &sm1_mst_d_mclk.hw },
+	{ .hw = &sm1_mst_e_mclk.hw },
+	{ .hw = &sm1_mst_f_mclk.hw },
+	{ .fw_name = "slv_sclk0" },
+	{ .fw_name = "slv_sclk1" },
+	{ .fw_name = "slv_sclk2" },
+	{ .fw_name = "slv_sclk3" },
+	{ .fw_name = "slv_sclk4" },
+	{ .fw_name = "slv_sclk5" },
+	{ .fw_name = "slv_sclk6" },
+	{ .fw_name = "slv_sclk7" },
+	{ .fw_name = "slv_sclk8" },
+	{ .fw_name = "slv_sclk9" },
+};
+
+static struct clk_regmap resample_a_clk_sel =
+	AUD_MUX(resample_a_clk_sel, 0xa4, 0xf, 24, 0, t7_resample_parent_data, 0);
+static struct clk_regmap resample_a_clk_div =
+	AUD_DIV(resample_a_clk_div, 0xa4, 0, 8, 0, aud_resample_a_clk_sel, 0);
+static struct clk_regmap resample_a_clk =
+	AUD_GATE(resample_a_clk, 0xa4, 31, aud_resample_a_clk_div, CLK_SET_RATE_PARENT);
+static struct clk_regmap resample_b_clk_sel =
+	AUD_MUX(resample_b_clk_sel, 0xb8, 0xf, 24, 0, t7_resample_parent_data, 0);
+static struct clk_regmap resample_b_clk_div =
+	AUD_DIV(resample_b_clk_div, 0xb8, 0, 8, 0, aud_resample_b_clk_sel, 0);
+static struct clk_regmap resample_b_clk =
+	AUD_GATE(resample_b_clk, 0xb8, 31, aud_resample_b_clk_div, CLK_SET_RATE_PARENT);
+static struct clk_regmap vad_clk_sel = AUD_MST_SYS_MUX(vad_clk, 0xc4);
+static struct clk_regmap vad_clk_div = AUD_MST_SYS_DIV(vad_clk, 0xc4);
+static struct clk_regmap vad_clk = AUD_MST_MCLK_GATE(vad_clk, 0xc4);
+static struct clk_regmap eqdrc_clk_sel = AUD_MST_SYS_MUX(eqdrc_clk, 0xc0);
+static struct clk_regmap eqdrc_clk_div = AUD_MST_SYS_DIV(eqdrc_clk, 0xc0);
+static struct clk_regmap eqdrc_clk = AUD_MST_MCLK_GATE(eqdrc_clk, 0xc0);
+
+/* Virtual offsets above 0x100 address T7's separate pad clock window. */
+static struct clk_regmap t7_pad0_sel =
+	AUD_MUX(t7_pad0_sel, 0x100, 7, 8, 0, mclk_pad_ctrl_parent_data, 0);
+static struct clk_regmap t7_pad0_div =
+	AUD_DIV(t7_pad0_div, 0x100, 0, 8, 0, aud_t7_pad0_sel, 0);
+static struct clk_regmap t7_pad0 =
+	AUD_GATE(t7_pad0, 0x100, 15, aud_t7_pad0_div, CLK_SET_RATE_PARENT);
+static struct clk_regmap t7_pad1_sel =
+	AUD_MUX(t7_pad1_sel, 0x100, 7, 24, 0, mclk_pad_ctrl_parent_data, 0);
+static struct clk_regmap t7_pad1_div =
+	AUD_DIV(t7_pad1_div, 0x100, 16, 8, 0, aud_t7_pad1_sel, 0);
+static struct clk_regmap t7_pad1 =
+	AUD_GATE(t7_pad1, 0x100, 31, aud_t7_pad1_div, CLK_SET_RATE_PARENT);
+static struct clk_regmap t7_pad2_sel =
+	AUD_MUX(t7_pad2_sel, 0x104, 7, 8, 0, mclk_pad_ctrl_parent_data, 0);
+static struct clk_regmap t7_pad2_div =
+	AUD_DIV(t7_pad2_div, 0x104, 0, 8, 0, aud_t7_pad2_sel, 0);
+static struct clk_regmap t7_pad2 =
+	AUD_GATE(t7_pad2, 0x104, 15, aud_t7_pad2_div, CLK_SET_RATE_PARENT);
+static struct clk_regmap t7_pad3_sel =
+	AUD_MUX(t7_pad3_sel, 0x104, 7, 24, 0, mclk_pad_ctrl_parent_data, 0);
+static struct clk_regmap t7_pad3_div =
+	AUD_DIV(t7_pad3_div, 0x104, 16, 8, 0, aud_t7_pad3_sel, 0);
+static struct clk_regmap t7_pad3 =
+	AUD_GATE(t7_pad3, 0x104, 31, aud_t7_pad3_div, CLK_SET_RATE_PARENT);
+
+struct audioclk_override {
+	unsigned int id;
+	struct clk_hw *hw;
+};
+
+static const struct audioclk_override t7_audio_overrides[] = {
+	{ AUD_CLKID_TDMOUT_D, &tdmout_d.hw },
+	{ AUD_CLKID_TDMIN_D_SCLK_SEL, &tdmin_d_sclk_sel.hw },
+	{ AUD_CLKID_TDMIN_D_SCLK_PRE_EN, &tdmin_d_sclk_pre_en.hw },
+	{ AUD_CLKID_TDMIN_D_SCLK_POST_EN, &tdmin_d_sclk_post_en.hw },
+	{ AUD_CLKID_TDMIN_D_SCLK, &tdmin_d_sclk.hw },
+	{ AUD_CLKID_TDMIN_D_LRCLK, &tdmin_d_lrclk.hw },
+	{ AUD_CLKID_TDMOUT_D_SCLK_SEL, &tdmout_d_sclk_sel.hw },
+	{ AUD_CLKID_TDMOUT_D_SCLK_PRE_EN, &tdmout_d_sclk_pre_en.hw },
+	{ AUD_CLKID_TDMOUT_D_SCLK_POST_EN, &tdmout_d_sclk_post_en.hw },
+	{ AUD_CLKID_TDMOUT_D_SCLK, &tdmout_d_sclk.hw },
+	{ AUD_CLKID_TDMOUT_D_LRCLK, &tdmout_d_lrclk.hw },
+	{ AUD_CLKID_RESAMPLE_A_SEL, &resample_a_clk_sel.hw },
+	{ AUD_CLKID_RESAMPLE_A_DIV, &resample_a_clk_div.hw },
+	{ AUD_CLKID_RESAMPLE_A_CLK, &resample_a_clk.hw },
+	{ AUD_CLKID_RESAMPLE_B_SEL, &resample_b_clk_sel.hw },
+	{ AUD_CLKID_RESAMPLE_B_DIV, &resample_b_clk_div.hw },
+	{ AUD_CLKID_RESAMPLE_B_CLK, &resample_b_clk.hw },
+	{ AUD_CLKID_VAD_SEL, &vad_clk_sel.hw },
+	{ AUD_CLKID_VAD_DIV, &vad_clk_div.hw },
+	{ AUD_CLKID_VAD_CLK, &vad_clk.hw },
+	{ AUD_CLKID_EQDRC_SEL, &eqdrc_clk_sel.hw },
+	{ AUD_CLKID_EQDRC_DIV, &eqdrc_clk_div.hw },
+	{ AUD_CLKID_EQDRC_CLK, &eqdrc_clk.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD0, &t7_pad0.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD0_SEL, &t7_pad0_sel.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD0_DIV, &t7_pad0_div.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD1, &t7_pad1.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD1_SEL, &t7_pad1_sel.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD1_DIV, &t7_pad1_div.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD2, &t7_pad2.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD2_SEL, &t7_pad2_sel.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD2_DIV, &t7_pad2_div.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD3, &t7_pad3.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD3_SEL, &t7_pad3_sel.hw },
+	{ AUD_CLKID_TDM_MCLK_PAD3_DIV, &t7_pad3_div.hw },
+	/* These SM1 pad muxes do not exist at the same offsets on T7. */
+	{ AUD_CLKID_TDM_LRCLK_PAD0, NULL },
+	{ AUD_CLKID_TDM_LRCLK_PAD1, NULL },
+	{ AUD_CLKID_TDM_LRCLK_PAD2, NULL },
+	{ AUD_CLKID_TDM_SCLK_PAD0, NULL },
+	{ AUD_CLKID_TDM_SCLK_PAD1, NULL },
+	{ AUD_CLKID_TDM_SCLK_PAD2, NULL },
+};
+
+struct t7_audio_registers {
+	void __iomem *core;
+	void __iomem *pads;
+};
+
+static void __iomem *t7_audio_register(struct t7_audio_registers *regs, unsigned int reg)
+{
+	return reg < 0x100 ? regs->core + reg : regs->pads + reg - 0x100;
+}
+
+static int t7_audio_read(void *context, unsigned int reg, unsigned int *val)
+{
+	*val = readl(t7_audio_register(context, reg));
+	return 0;
+}
+
+static int t7_audio_write(void *context, unsigned int reg, unsigned int val)
+{
+	writel(val, t7_audio_register(context, reg));
+	return 0;
+}
+
+static const struct regmap_bus t7_audio_regmap_bus = {
+	.reg_read = t7_audio_read,
+	.reg_write = t7_audio_write,
+	.fast_io = true,
+};
+
+static const struct regmap_range t7_audio_ranges[] = {
+	regmap_reg_range(0, 0xec),
+	regmap_reg_range(0x100, 0x104),
+};
+
+static const struct regmap_access_table t7_audio_access = {
+	.yes_ranges = t7_audio_ranges,
+	.n_yes_ranges = ARRAY_SIZE(t7_audio_ranges),
 };
 
 struct audioclk_data {
 	struct meson_clk_hw_data hw_clks;
+	const struct audioclk_override *overrides;
+	unsigned int num_overrides;
+	unsigned int num_clks;
 	const char *rst_drvname;
 	unsigned int max_register;
 };
+
+static struct regmap *axg_audio_map(struct device *dev, const struct audioclk_data *data,
+				    void __iomem *regs)
+{
+	const struct regmap_config config = {
+		.reg_bits = 32,
+		.val_bits = 32,
+		.reg_stride = 4,
+		.max_register = data->max_register,
+		.rd_table = data->overrides ? &t7_audio_access : NULL,
+		.wr_table = data->overrides ? &t7_audio_access : NULL,
+	};
+	struct t7_audio_registers *banks;
+
+	if (!data->overrides)
+		return devm_regmap_init_mmio(dev, regs, &config);
+	banks = devm_kzalloc(dev, sizeof(*banks), GFP_KERNEL);
+	if (!banks)
+		return ERR_PTR(-ENOMEM);
+	banks->core = regs;
+	banks->pads = devm_platform_ioremap_resource(to_platform_device(dev), 1);
+	if (IS_ERR(banks->pads))
+		return ERR_CAST(banks->pads);
+	return devm_regmap_init(dev, &t7_audio_regmap_bus, banks, &config);
+}
 
 static int axg_audio_clkc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	const struct audioclk_data *data;
 	struct auxiliary_device *auxdev;
+	struct meson_clk_hw_data *clocks;
 	struct regmap *map;
 	void __iomem *regs;
 	struct clk_hw *hw;
@@ -1498,8 +1687,7 @@ static int axg_audio_clkc_probe(struct platform_device *pdev)
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 
-	axg_audio_regmap_cfg.max_register = data->max_register;
-	map = devm_regmap_init_mmio(dev, regs, &axg_audio_regmap_cfg);
+	map = axg_audio_map(dev, data, regs);
 	if (IS_ERR(map)) {
 		dev_err(dev, "failed to init regmap: %ld\n", PTR_ERR(map));
 		return PTR_ERR(map);
@@ -1516,11 +1704,23 @@ static int axg_audio_clkc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	clocks = devm_kzalloc(dev, sizeof(*clocks), GFP_KERNEL);
+	if (!clocks)
+		return -ENOMEM;
+	clocks->num = data->num_clks ?: data->hw_clks.num;
+	clocks->hws = devm_kcalloc(dev, clocks->num, sizeof(*clocks->hws), GFP_KERNEL);
+	if (!clocks->hws)
+		return -ENOMEM;
+	memcpy(clocks->hws, data->hw_clks.hws,
+	       data->hw_clks.num * sizeof(*clocks->hws));
+	for (i = 0; i < data->num_overrides; i++)
+		clocks->hws[data->overrides[i].id] = data->overrides[i].hw;
+
 	/* Take care to skip the registered input clocks */
-	for (i = AUD_CLKID_DDR_ARB; i < data->hw_clks.num; i++) {
+	for (i = AUD_CLKID_DDR_ARB; i < clocks->num; i++) {
 		const char *name;
 
-		hw = data->hw_clks.hws[i];
+		hw = clocks->hws[i];
 		/* array might be sparse */
 		if (!hw)
 			continue;
@@ -1534,7 +1734,7 @@ static int axg_audio_clkc_probe(struct platform_device *pdev)
 		}
 	}
 
-	ret = devm_of_clk_add_hw_provider(dev, meson_clk_hw_get, (void *)&data->hw_clks);
+	ret = devm_of_clk_add_hw_provider(dev, meson_clk_hw_get, clocks);
 	if (ret)
 		return ret;
 
@@ -1584,6 +1784,18 @@ static const struct audioclk_data sm1_audioclk_data = {
 	.max_register = AUDIO_EARCRX_DMAC_CLK_CTRL,
 };
 
+static const struct audioclk_data t7_audioclk_data = {
+	.hw_clks = {
+		.hws = s4_audio_hw_clks,
+		.num = ARRAY_SIZE(s4_audio_hw_clks),
+	},
+	.overrides = t7_audio_overrides,
+	.num_overrides = ARRAY_SIZE(t7_audio_overrides),
+	.num_clks = AUD_CLKID_EQDRC_CLK + 1,
+	.rst_drvname = "rst-t7",
+	.max_register = 0x104,
+};
+
 static const struct of_device_id clkc_match_table[] = {
 	{
 		.compatible = "amlogic,axg-audio-clkc",
@@ -1597,6 +1809,9 @@ static const struct of_device_id clkc_match_table[] = {
 	}, {
 		.compatible = "amlogic,sm1-audio-clkc",
 		.data = &sm1_audioclk_data
+	}, {
+		.compatible = "amlogic,t7-audio-clkc",
+		.data = &t7_audioclk_data
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, clkc_match_table);

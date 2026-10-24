@@ -50,4 +50,7 @@
 #define AUD_RESET_FRDDR_E	37
 #define AUD_RESET_TODDR_E	38
 
+/* T7 adds TDMOUT_D in the second reset register. */
+#define AUD_RESET_TDMOUT_D	42
+
 #endif

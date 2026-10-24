@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/*
+ * Compile-only fixture for external digital audio endpoints. This is not a
+ * board description: pinmux, connectors and electrical interfaces are absent.
+ * Preserve TODDR_A for HDMI RX and FRDDR_A/TDM_A for the HDMI TX card.
+ */
+#include "amlogic-t7-a311d2-khadas-vim4-audio-test.dts"
+
+/ {
+	spdif_sink_a: spdif-sink-a {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
+	};
+
+	spdif_sink_b: spdif-sink-b {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
+	};
+
+	spdif_source: spdif-source {
+		compatible = "linux,spdif-dir";
+		#sound-dai-cells = <0>;
+	};
+
+	pdm_mics: digital-microphones {
+		compatible = "dmic-codec";
+		#sound-dai-cells = <0>;
+		num-channels = <8>;
+	};
+
+	sound-digital {
+		compatible = "amlogic,axg-sound-card";
+		model = "VIM4AUDIOFIXTURE";
+		audio-routing = "SPDIFOUT_A IN 1", "FRDDR_B OUT 3",
+				"SPDIFOUT_A IN 2", "FRDDR_C OUT 3",
+				"SPDIFOUT_B IN 1", "FRDDR_B OUT 4",
+				"SPDIFOUT_B IN 2", "FRDDR_C OUT 4",
+				"TODDR_B IN 4", "PDM Capture",
+				"TODDR_C IN 3", "SPDIFIN Capture";
+
+		dai-link-0 {
+			sound-dai = <&frddr_b>;
+		};
+
+		dai-link-1 {
+			sound-dai = <&frddr_c>;
+		};
+
+		dai-link-2 {
+			sound-dai = <&toddr_b>;
+		};
+
+		dai-link-3 {
+			sound-dai = <&toddr_c>;
+		};
+
+		dai-link-4 {
+			sound-dai = <&spdifout_a>;
+			codec {
+				sound-dai = <&spdif_sink_a>;
+			};
+		};
+
+		dai-link-5 {
+			sound-dai = <&spdifout_b>;
+			codec {
+				sound-dai = <&spdif_sink_b>;
+			};
+		};
+
+		dai-link-6 {
+			sound-dai = <&pdm>;
+			codec {
+				sound-dai = <&pdm_mics>;
+			};
+		};
+
+		dai-link-7 {
+			sound-dai = <&spdifin>;
+			codec {
+				sound-dai = <&spdif_source>;
+			};
+		};
+	};
+};
