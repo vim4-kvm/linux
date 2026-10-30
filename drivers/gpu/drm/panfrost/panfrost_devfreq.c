@@ -87,7 +87,8 @@ static int panfrost_devfreq_get_dev_status(struct device *dev,
 
 static struct devfreq_dev_profile panfrost_devfreq_profile = {
 	.timer = DEVFREQ_TIMER_DELAYED,
-	.polling_ms = 50, /* ~3 frames */
+	/* React within a short burst instead of averaging over three frames. */
+	.polling_ms = 10,
 	.target = panfrost_devfreq_target,
 	.get_dev_status = panfrost_devfreq_get_dev_status,
 };
