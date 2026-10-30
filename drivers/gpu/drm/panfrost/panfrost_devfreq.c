@@ -292,7 +292,7 @@ void panfrost_devfreq_resume(struct panfrost_device *pfdev)
 	 */
 	dev_pm_qos_update_request(&pfdevfreq->resume_boost,
 				  DIV_ROUND_UP(pfdevfreq->fast_rate, 1000));
-	mod_delayed_work(system_wq, &pfdevfreq->resume_boost_work,
+	mod_delayed_work(system_percpu_wq, &pfdevfreq->resume_boost_work,
 			 msecs_to_jiffies(50));
 }
 

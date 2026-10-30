@@ -29,7 +29,7 @@ struct panfrost_device { struct panfrost_devfreq pfdevfreq; };
 #define container_of(p,t,m) ((t *)((char *)(p) - offsetof(t,m)))
 #define to_delayed_work(p) container_of(p,struct delayed_work,work)
 #define DIV_ROUND_UP(a,b) (((a)+(b)-1)/(b))
-#define system_wq NULL
+#define system_percpu_wq NULL
 #define msecs_to_jiffies(x) (x)
 static struct panfrost_devfreq *active;
 static void panfrost_devfreq_reset(struct panfrost_devfreq *p) { (void)p; }
