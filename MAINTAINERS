@@ -2402,6 +2402,7 @@ T:	git https://gitlab.freedesktop.org/drm/misc/kernel.git
 F:	Documentation/gpu/panfrost.rst
 F:	drivers/gpu/drm/ci/xfails/panfrost*
 F:	drivers/gpu/drm/panfrost/
+F:	tools/testing/panfrost/
 F:	include/uapi/drm/panfrost_drm.h
 F:	tools/testing/panfrost/
 

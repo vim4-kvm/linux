@@ -7,6 +7,8 @@
 #include <linux/devfreq.h>
 #include <linux/spinlock.h>
 #include <linux/ktime.h>
+#include <linux/pm_qos.h>
+#include <linux/workqueue.h>
 
 struct devfreq;
 struct thermal_cooling_device;
@@ -15,6 +17,8 @@ struct panfrost_device;
 
 struct panfrost_devfreq {
 	struct devfreq *devfreq;
+	struct dev_pm_qos_request resume_boost;
+	struct delayed_work resume_boost_work;
 	struct thermal_cooling_device *cooling;
 	struct devfreq_simple_ondemand_data gov_data;
 	bool opp_of_table_added;

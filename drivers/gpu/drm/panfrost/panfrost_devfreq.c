@@ -135,6 +135,14 @@ static bool panfrost_opp_has_voltage(struct device *dev)
 	return false;
 }
 
+static void panfrost_devfreq_end_boost(struct work_struct *work)
+{
+	struct panfrost_devfreq *pfdevfreq = container_of(to_delayed_work(work),
+			struct panfrost_devfreq, resume_boost_work);
+
+	dev_pm_qos_update_request(&pfdevfreq->resume_boost, 0);
+}
+
 int panfrost_devfreq_init(struct panfrost_device *pfdev)
 {
 	int ret;
@@ -236,6 +244,11 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 		DRM_DEV_ERROR(dev, "Couldn't initialize GPU devfreq\n");
 		return PTR_ERR(devfreq);
 	}
+	INIT_DELAYED_WORK(&pfdevfreq->resume_boost_work, panfrost_devfreq_end_boost);
+	ret = dev_pm_qos_add_request(dev, &pfdevfreq->resume_boost,
+				     DEV_PM_QOS_MIN_FREQUENCY, 0);
+	if (ret)
+		return ret;
 	pfdevfreq->devfreq = devfreq;
 
 	cooling = devfreq_cooling_em_register(devfreq, NULL);
@@ -250,6 +263,11 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
 void panfrost_devfreq_fini(struct panfrost_device *pfdev)
 {
 	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
+
+	if (pfdevfreq->devfreq) {
+		cancel_delayed_work_sync(&pfdevfreq->resume_boost_work);
+		dev_pm_qos_remove_request(&pfdevfreq->resume_boost);
+	}
 
 	if (pfdevfreq->cooling) {
 		devfreq_cooling_unregister(pfdevfreq->cooling);
@@ -267,6 +285,15 @@ void panfrost_devfreq_resume(struct panfrost_device *pfdev)
 	panfrost_devfreq_reset(pfdevfreq);
 
 	devfreq_resume_device(pfdevfreq->devfreq);
+
+	/* A cold job can finish before the first utilization sample. Request a
+	 * short floor through devfreq so thermal and userspace caps still apply.
+	 * Device PM serializes resume against suspend and teardown.
+	 */
+	dev_pm_qos_update_request(&pfdevfreq->resume_boost,
+				  DIV_ROUND_UP(pfdevfreq->fast_rate, 1000));
+	mod_delayed_work(system_wq, &pfdevfreq->resume_boost_work,
+			 msecs_to_jiffies(50));
 }
 
 void panfrost_devfreq_suspend(struct panfrost_device *pfdev)
@@ -276,6 +303,8 @@ void panfrost_devfreq_suspend(struct panfrost_device *pfdev)
 	if (!pfdevfreq->devfreq)
 		return;
 
+	cancel_delayed_work_sync(&pfdevfreq->resume_boost_work);
+	dev_pm_qos_update_request(&pfdevfreq->resume_boost, 0);
 	devfreq_suspend_device(pfdevfreq->devfreq);
 }
 
