@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/amlogic,t7c-adla.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amlogic T7C ADLA neural processing accelerator
+
+maintainers:
+  - localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+
+description: |
+  T7C ADLA has an internal address translation unit and AXI SRAM.
+  It is distinct from the four Amazon NNA instances on earlier T7 silicon.
+
+properties:
+  compatible:
+    const: amlogic,t7c-adla
+  reg:
+    maxItems: 2
+  reg-names:
+    items:
+      - const: adla_reg
+      - const: adla_sram
+  interrupts:
+    maxItems: 1
+  interrupt-names:
+    const: adla
+  clocks:
+    maxItems: 4
+  clock-names:
+    items:
+      - const: adla_core_clk
+      - const: adla_clk
+      - const: adla_clk_parent0
+      - const: adla_clk_parent1
+  power-domains:
+    maxItems: 1
+  vddnpu-supply: true
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - interrupt-names
+  - clocks
+  - clock-names
+  - power-domains
+
+additionalProperties: false

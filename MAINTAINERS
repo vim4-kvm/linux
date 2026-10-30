@@ -30326,3 +30326,8 @@ S:	Buried alive in reporters
 T:	git git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
 F:	*
 F:	*/
+
+AMLOGIC T7C ADLA DOWNSTREAM COMPATIBILITY
+M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
+S:	Odd Fixes
+F:	Documentation/devicetree/bindings/misc/amlogic,t7c-adla.yaml
