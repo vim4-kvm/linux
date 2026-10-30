@@ -449,33 +449,48 @@ static u64 panfrost_get_core_mask(struct panfrost_device *pfdev)
 	return core_mask;
 }
 
+static int panfrost_gpu_wait_ready(struct panfrost_device *pfdev, u32 reg,
+				   u32 mask, unsigned int timeout_us)
+{
+	u32 val;
+	int ret;
+
+	/* Avoid a scheduler round trip when readiness arrives within the normal
+	 * polling interval. Bound busy waiting even when the hardware stalls.
+	 */
+	ret = readl_relaxed_poll_timeout_atomic(pfdev->iomem + reg, val,
+						val == mask, 1, 10);
+	if (!ret)
+		return 0;
+
+	return readl_relaxed_poll_timeout(pfdev->iomem + reg, val,
+					  val == mask, 10, timeout_us - 10);
+}
+
 void panfrost_gpu_power_on(struct panfrost_device *pfdev)
 {
 	int ret;
-	u32 val;
 	u64 core_mask;
 
 	panfrost_gpu_init_quirks(pfdev);
 	core_mask = panfrost_get_core_mask(pfdev);
 
 	gpu_write(pfdev, L2_PWRON_LO, pfdev->features.l2_present & core_mask);
-	ret = readl_relaxed_poll_timeout(pfdev->iomem + L2_READY_LO,
-		val, val == (pfdev->features.l2_present & core_mask),
-		10, 20000);
+	ret = panfrost_gpu_wait_ready(pfdev, L2_READY_LO,
+				      pfdev->features.l2_present & core_mask, 20000);
 	if (ret)
 		dev_err(pfdev->base.dev, "error powering up gpu L2");
 
 	gpu_write(pfdev, SHADER_PWRON_LO,
 		  pfdev->features.shader_present & core_mask);
-	ret = readl_relaxed_poll_timeout(pfdev->iomem + SHADER_READY_LO,
-		val, val == (pfdev->features.shader_present & core_mask),
-		10, 20000);
+	ret = panfrost_gpu_wait_ready(pfdev, SHADER_READY_LO,
+				      pfdev->features.shader_present & core_mask, 20000);
 	if (ret)
 		dev_err(pfdev->base.dev, "error powering up gpu shader");
 
 	gpu_write(pfdev, TILER_PWRON_LO, pfdev->features.tiler_present);
-	ret = readl_relaxed_poll_timeout(pfdev->iomem + TILER_READY_LO,
-		val, val == pfdev->features.tiler_present, 10, 1000);
+	ret = panfrost_gpu_wait_ready(pfdev, TILER_READY_LO,
+				      pfdev->features.tiler_present, 1000);
 	if (ret)
 		dev_err(pfdev->base.dev, "error powering up gpu tiler");
 }
