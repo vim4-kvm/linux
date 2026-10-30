@@ -710,15 +710,50 @@ static struct adlak_model_attr *adlak_model_create(struct adlak_context *     co
 
 	for (int i = 0; i < psubmit_desc->tasks_num; i++) {
 		struct adlak_submit_task *task = &pmodel_attr->submit_tasks[i];
+		int offset = task->config_offset;
+		int size = task->config_size;
+		int total = psubmit_desc->config_total_size;
 
-		if (!adlak_range_valid(task->config_offset, task->config_size,
-				       psubmit_desc->config_total_size) ||
+		if (pmodel_attr->cmd_buf_attr.support) {
+			offset = task->config_v2.common_offset;
+			size = task->config_v2.common_size;
+			total = min_t(u64, pmodel_attr->cmd_buf_attr.mm_info->req.bytes, INT_MAX);
+			if (task->config_v2.modify_size &&
+			    !adlak_range_valid(task->config_v2.modify_offset,
+					       task->config_v2.modify_size, total)) {
+				ret = -EINVAL;
+				goto err_copy_from_user;
+			}
+		}
+		if (!adlak_range_valid(offset, size, total) ||
 		    !adlak_range_valid(task->dep_info_offset, task->dep_info_count,
 				       psubmit_desc->dep_fixups_num) ||
 		    !adlak_range_valid(task->reg_fixup_offset, task->reg_fixup_count,
 				       psubmit_desc->reg_fixups_num)) {
 			ret = ERR(EINVAL);
 			goto err_copy_from_user;
+		}
+		for (int j = 0; j < task->reg_fixup_count; j++) {
+			struct adlak_submit_reg_fixup *fixup =
+				&pmodel_attr->submit_reg_fixups[task->reg_fixup_offset + j];
+
+			if (!adlak_fixup_valid(fixup->loc, fixup->shift, 1,
+					       size)) {
+				ret = -EINVAL;
+				goto err_copy_from_user;
+			}
+		}
+		for (int j = 0; j < task->dep_info_count; j++) {
+			struct adlak_submit_dep_fixup *fixup =
+				&pmodel_attr->submit_dep_fixups[task->dep_info_offset + j];
+
+			if (!adlak_fixup_valid(fixup->id_loc, fixup->id_shift, 1,
+					       size) ||
+			    !adlak_fixup_valid(fixup->mode_loc, fixup->mode_shift, 1,
+					       size)) {
+				ret = -EINVAL;
+				goto err_copy_from_user;
+			}
 		}
 	}
     AML_LOG_DEBUG("submit_dep_fixups dump...");
@@ -809,7 +844,7 @@ void adlak_model_destroy(struct adlak_model_attr *pmodel_attr) {
 }
 
 static void adlak_mark_the_last_hw_layer(struct adlak_model_attr *pmodel_attr) {
-    uint32_t                  task_idx;
+	s32 task_idx;
     struct adlak_submit_task *psubmitask_base = NULL, *psubmitask = NULL;
 
     AML_LOG_DEBUG("%s", __func__);
@@ -891,6 +926,8 @@ static struct adlak_task *adlak_invoke_create(struct adlak_context *            
         return ADLAK_ERR_PTR(ERR(ENXIO));
     }
     ASSERT(context->net_id == pinvoke_desc->net_register_idx);
+	if (context->invoke_cnt)
+		return ADLAK_ERR_PTR(-EBUSY);
 	if (pinvoke_desc->addr_fixups_num < 0)
 		return ADLAK_ERR_PTR(ERR(EINVAL));
     if (pinvoke_desc->start_idx < 0 || pinvoke_desc->end_idx >= pmodel_attr->submit_tasks_num ||
@@ -922,10 +959,11 @@ static struct adlak_task *adlak_invoke_create(struct adlak_context *            
             pmodel_attr->submit_addr_fixups = adlak_os_malloc(
                 sizeof(struct adlak_submit_addr_fixup) * pmodel_attr->addr_fixups_num,
                 ADLAK_GFP_KERNEL);
-            if (!pmodel_attr->submit_addr_fixups) {
-                AML_LOG_ERR("alloc buffer for save submit_addr_fixups failed!");
-                return ADLAK_ERR_PTR(ERR(EINVAL));
-            }
+			if (!pmodel_attr->submit_addr_fixups) {
+				AML_LOG_ERR("alloc buffer for save submit_addr_fixups failed!");
+				pmodel_attr->addr_fixups_num = 0;
+				return ADLAK_ERR_PTR(-ENOMEM);
+			}
         }
         /*****copy data from user*****/
         ret = copy_from_user((void *)pmodel_attr->submit_addr_fixups,
@@ -933,7 +971,7 @@ static struct adlak_task *adlak_invoke_create(struct adlak_context *            
                              sizeof(struct adlak_submit_addr_fixup) * pmodel_attr->addr_fixups_num);
         if (ret) {
             AML_LOG_ERR("copy from user failed!");
-            pmodel_attr = ADLAK_ERR_PTR(ERR(EFAULT));
+			ret = -EFAULT;
             goto err_copy_from_user;
         }
 
@@ -947,11 +985,41 @@ static struct adlak_task *adlak_invoke_create(struct adlak_context *            
 
     pinvoke_attr->context = context;
 
-    ++pmodel_attr->invoke_count;
-    if (pmodel_attr->invoke_count < 0) {
-        pmodel_attr->invoke_count = 0;
-    }
-    pinvoke_attr->invoke_idx          = pmodel_attr->invoke_count;
+	ret = -EINVAL;
+	for (int i = pinvoke_desc->start_idx; i <= pinvoke_desc->end_idx; i++) {
+		struct adlak_submit_task *task = &pmodel_attr->submit_tasks[i];
+		int size = pmodel_attr->cmd_buf_attr.support ?
+			task->config_v2.common_size : task->config_size;
+
+		/* Zero-count INVOKE retains the model's previous fixup array. */
+		if (task->addr_fixup_count &&
+		    !adlak_range_valid(task->addr_fixup_offset, task->addr_fixup_count,
+				       pmodel_attr->addr_fixups_num)) {
+			dev_err_ratelimited(context->padlak->dev,
+					    "invoke task %d: fixup range %d+%d exceeds %d\n",
+					    i, task->addr_fixup_offset, task->addr_fixup_count,
+					    pmodel_attr->addr_fixups_num);
+			goto err_copy_from_user;
+		}
+		for (int j = 0; j < task->addr_fixup_count; j++) {
+			struct adlak_submit_addr_fixup *fixup =
+				&pmodel_attr->submit_addr_fixups[task->addr_fixup_offset + j];
+
+			if (!adlak_fixup_valid(fixup->loc, fixup->shift, fixup->unit,
+					       size)) {
+				dev_err_ratelimited(context->padlak->dev,
+						    "invoke task %d fixup %d: loc=%d shift=%u unit=%u size=%d\n",
+						    i, j, fixup->loc, fixup->shift,
+						    fixup->unit, size);
+				goto err_copy_from_user;
+			}
+		}
+	}
+	if (++pmodel_attr->invoke_count < 0)
+		pmodel_attr->invoke_count = 0;
+	context->terminal_error = 0;
+	pinvoke_attr->flag = 0;
+	pinvoke_attr->invoke_idx = pmodel_attr->invoke_count;
     pinvoke_desc->invoke_register_idx = pinvoke_attr->invoke_idx;  // return invoke index
     pinvoke_attr->invoke_start_idx    = pinvoke_desc->start_idx;
     pinvoke_attr->invoke_end_idx      = pinvoke_desc->end_idx;
@@ -967,7 +1035,8 @@ err_copy_from_user:
     }
 #endif
     pmodel_attr->submit_addr_fixups = NULL;
-    return NULL;
+	pmodel_attr->addr_fixups_num = 0;
+	return ADLAK_ERR_PTR(ret);
 }
 
 void adlak_invoke_destroy(struct adlak_task *ptask) {
@@ -1037,13 +1106,13 @@ static int adlak_invoke_del_with_invokeid(struct adlak_device *padlak, int32_t n
 
     int                     ret         = 0;
     struct adlak_workqueue *pwq         = &padlak->queue;
-    bool                    net_is_used = false;
     adlak_os_mutex_lock(&pwq->wq_mutex);
     AML_LOG_DEBUG("%s", __func__);
     AML_LOG_INFO("invoke del: net_id=%d,invoke_id=%d.", net_id, invoke_id);
 
     ret = adlak_invoke_del_from_nosch_list(&pwq->finished_list, net_id, invoke_id);
-    if (ret > 0) {
+	if (ret > 0) {
+		pwq->finished_num -= ret;
         ret = 0;
         if (invoke_id >= 0) {
             goto end;
@@ -1052,8 +1121,8 @@ static int adlak_invoke_del_with_invokeid(struct adlak_device *padlak, int32_t n
 
     ret = adlak_invoke_del_from_nosch_list(&pwq->pending_list, net_id, invoke_id);
     if (0 < ret) {
-        ret              = 0;
         pwq->pending_num = pwq->pending_num - ret;
+		ret = 0;
         if (invoke_id >= 0) {
             goto end;
         }
@@ -1062,7 +1131,6 @@ static int adlak_invoke_del_with_invokeid(struct adlak_device *padlak, int32_t n
     ret = adlak_invoke_del_from_sch_list(&pwq->scheduled_list, net_id, invoke_id);
     if (0 < ret) {
         ret         = -1;
-        net_is_used = true;
     }
 end:
     adlak_os_mutex_unlock(&pwq->wq_mutex);
@@ -1087,11 +1155,11 @@ static int adlak_net_attach(struct adlak_context *     context,
 
     /*create task*/
     pmodel_attr = adlak_model_create(context, psubmit_desc);
-    if (!pmodel_attr) {
-        AML_LOG_ERR("adlak task create fail!");
-        ret = -1;
-        goto err;
-    }
+	if (ADLAK_IS_ERR_OR_NULL(pmodel_attr)) {
+		AML_LOG_ERR("adlak task create fail!");
+		ret = -EINVAL;
+		goto err;
+	}
     context->pmodel_attr = pmodel_attr;
     ret                  = adlak_invoke_pre_check(pmodel_attr);
     if (ret) {
@@ -1165,7 +1233,7 @@ static int adlak_invoke_add_queue(struct adlak_context *            context,
     ptask = adlak_invoke_create(context, pinvoke_desc);
     if (ADLAK_IS_ERR_OR_NULL(ptask)) {
         AML_LOG_ERR("adlak task create fail!");
-        ret = -1;
+		ret = ptask ? PTR_ERR(ptask) : -ENOMEM;
         goto err;
     }
 
@@ -1480,20 +1548,55 @@ err:
 }
 int adlak_uninvoke_request(struct adlak_context *                context,
                            struct adlak_network_invoke_del_desc *pinvoke_del) {
-    int                  ret    = 0;
     struct adlak_device *padlak = context->padlak;
+	int ret;
+	long drained;
 #ifdef CONFIG_ADLAK_DEBUG_INNNER
     adlak_dbg_inner_update(context, "uninvoke_request");
 #endif
 
-    ret = adlak_invoke_del_with_invokeid(padlak, pinvoke_del->net_register_idx,
-                                         pinvoke_del->invoke_register_idx);
+	if (pinvoke_del->net_register_idx != context->net_id ||
+	    !context->pmodel_attr || pinvoke_del->invoke_register_idx < 0 ||
+	    pinvoke_del->invoke_register_idx != context->pmodel_attr->invoke_count)
+		return -EINVAL;
+	adlak_os_mutex_lock(&padlak->dev_mutex);
+	ret = adlak_invoke_del_with_invokeid(padlak, pinvoke_del->net_register_idx,
+					     pinvoke_del->invoke_register_idx);
+	adlak_os_mutex_unlock(&padlak->dev_mutex);
+	if (ret < 0) {
+		/* The worker polls cancellation and resets before deleting the task. */
+		drained = wait_event_timeout(*(wait_queue_head_t *)context->wait,
+					     !READ_ONCE(context->invoke_cnt) ||
+					     READ_ONCE(padlak->recovery_error),
+					     msecs_to_jiffies(5000));
+		if (READ_ONCE(padlak->recovery_error))
+			return -EIO;
+		if (!drained)
+			return -ETIMEDOUT;
+	}
+	adlak_os_mutex_lock(&padlak->queue.wq_mutex);
+	context->terminal_invoke = pinvoke_del->invoke_register_idx;
+	context->terminal_error = -ECANCELED;
+	adlak_os_mutex_unlock(&padlak->queue.wq_mutex);
+	adlak_to_umd_sinal_give(context->wait);
 #ifdef CONFIG_ADLAK_DEBUG_INNNER
     adlak_dbg_inner_update(context, "uninvoke_request done");
 #endif
     return 0;
 }
-int adlak_get_status_request(struct adlak_context *context, struct adlak_get_stat_desc *stat_desc) {
+
+static int adlak_get_status_locked(struct adlak_context *context,
+				   struct adlak_get_stat_desc *stat_desc)
+{
+	if (READ_ONCE(context->padlak->recovery_error)) {
+		stat_desc->ret_state = -3;
+		return -EIO;
+	}
+	if (context->terminal_error &&
+	    stat_desc->invoke_register_idx == context->terminal_invoke) {
+		stat_desc->ret_state = context->terminal_error == -ETIMEDOUT ? -1 : -3;
+		return context->terminal_error;
+	}
     struct adlak_device *   padlak = context->padlak;
     struct adlak_workqueue *pwq    = &padlak->queue;
     struct list_head *      hd;
@@ -1533,13 +1636,27 @@ int adlak_get_status_request(struct adlak_context *context, struct adlak_get_sta
                 if (ADLAK_SUBMIT_STATE_FINISHED == ptask->state) {
                     stat_desc->ret_state = 0;
                 } else {
-                    stat_desc->ret_state = -3;  // TODO
+			stat_desc->ret_state =
+				ptask->hw_stat.irq_status.timeout ? -1 : -3;
+			return ptask->hw_stat.irq_status.timeout ?
+				-ETIMEDOUT : -EIO;
                 }
                 break;
             }
         }
     }
     return 0;
+}
+
+int adlak_get_status_request(struct adlak_context *context,
+			     struct adlak_get_stat_desc *status)
+{
+	int ret;
+
+	adlak_os_mutex_lock(&context->padlak->queue.wq_mutex);
+	ret = adlak_get_status_locked(context, status);
+	adlak_os_mutex_unlock(&context->padlak->queue.wq_mutex);
+	return ret;
 }
 
 int adlak_profile_config(struct adlak_context *         context,
@@ -1569,6 +1686,7 @@ int adlak_profile_config(struct adlak_context *         context,
     profile_cfg->errcode = 0;
     return 0;
 err:
+	adlak_os_mutex_unlock(&context->context_mutex);
     return ret;
 }
 
@@ -1598,6 +1716,9 @@ int adlak_queue_update_task_state(struct adlak_device *padlak, struct adlak_task
         mb();
         pwq->sched_num--;
         context = ptask->context;
+		/* Publish completion only after dropping the worker's shared pointer. */
+		if (pwq->ptask_sch_cur == ptask)
+			pwq->ptask_sch_cur = NULL;
         if (ptask->flag & ADLAK_TASK_CANCELED) {
             AML_LOG_DEBUG("delete the task had canceled which the owner's net_id is %d.",
                           ptask->context->net_id);
@@ -1616,10 +1737,14 @@ int adlak_queue_update_task_state(struct adlak_device *padlak, struct adlak_task
 
             ret = 1;
         }
+		adlak_to_umd_sinal_give(context->wait);
 
-        if (CONTEXT_STATE_CLOSED == context->state) {
-            adlak_os_sema_give(context->ctx_idle);
-        }
+		if (context->state == CONTEXT_STATE_CLOSED) {
+			if (context->close_deferred && !context->invoke_cnt)
+				queue_work(padlak->release_wq, &context->close_work);
+			else
+				adlak_os_sema_give(context->ctx_idle);
+		}
     }
     return ret;
 }
@@ -1717,83 +1842,44 @@ err:
     return ERR(EIO);
 }
 
-int adlak_wait_until_finished(struct adlak_context *      context,
-                              struct adlak_get_stat_desc *stat_desc) {
-    struct adlak_device *   padlak = context->padlak;
-    struct adlak_workqueue *pwq    = &padlak->queue;
-    struct adlak_task *     ptask = NULL, *ptask_tmp = NULL;
-    int32_t                 finished   = 0;
-    int32_t                 find_netid = -1;
-    struct adlak_mem_usage  mem_usage;
-    AML_LOG_DEBUG("%s", __func__);
-    while (1) {
-        if (ERR(NONE) == adlak_os_sema_take_timeout(context->invoke_state, stat_desc->timeout_ms)) {
-            find_netid = 0;
-            adlak_os_mutex_lock(&pwq->wq_mutex);
-            list_for_each_entry_safe(ptask, ptask_tmp, &pwq->finished_list, head) {
-                if (ptask && ptask->context->net_id == stat_desc->net_register_idx) {
-                    find_netid = 1;
-                    if (ptask->invoke_idx == stat_desc->invoke_register_idx) {
-                        {
-                            finished = 1;
-#ifdef CONFIG_ADLAK_DEBUG_INNNER
-                            adlak_dbg_inner_update(context, "poll to umd");
-#endif
-                            break;
-                        }
-                    }
-                }
-            }
-            adlak_os_mutex_unlock(&pwq->wq_mutex);
-        } else {
-            finished = -1;
-            AML_LOG_WARN("wait timeout");
-#ifdef CONFIG_ADLAK_DEBUG_INNNER
-            adlak_dbg_inner_update(context, "poll error to umd");
-#endif
-        }
-        if (find_netid == 0) {
-            AML_LOG_ERR("Not find valid net_id in finished queue!");
-            ASSERT(0);
-        }
+static bool adlak_status_ready(struct adlak_context *context,
+			       struct adlak_get_stat_desc *status, int *result)
+{
+	*result = adlak_get_status_request(context, status);
+	return *result || status->ret_state != 1;
+}
 
-        if (finished) {
-            break;
-        }
-    }
+int adlak_wait_until_finished(struct adlak_context *context,
+			      struct adlak_get_stat_desc *status)
+{
+	long waited;
+	int result;
 
-    if (1 == finished) {
-        ASSERT(ptask);
-        adlak_os_mutex_lock(&padlak->dev_mutex);
-        stat_desc->profile_en      = ptask->context->pmodel_attr->pm_cfg.profile_en;
-        stat_desc->invoke_time_us  = ptask->profilling.time_elapsed_us;
-        stat_desc->start_idx       = ptask->invoke_start_idx;
-        stat_desc->end_idx         = ptask->invoke_end_idx;
-        stat_desc->profile_rpt     = 0;
-        stat_desc->axi_freq_cur    = padlak->clk_axi_freq_real;
-        stat_desc->core_freq_cur   = padlak->clk_core_freq_real;
-        stat_desc->mem_alloced_umd = context->smmu_attr.alloc_byte;
+	if (status->timeout_ms < 0 || status->net_register_idx != context->net_id)
+		return -EINVAL;
+	waited = wait_event_interruptible_timeout(*(wait_queue_head_t *)context->wait,
+						  adlak_status_ready(context, status, &result),
+						  msecs_to_jiffies(status->timeout_ms));
+	if (waited < 0) {
+		status->ret_state = -3;
+		return waited;
+	}
+	if (!waited) {
+		struct adlak_network_invoke_del_desc cancel = {
+			.net_register_idx = status->net_register_idx,
+			.invoke_register_idx = status->invoke_register_idx,
+		};
 
-        adlak_mem_get_usage(&mem_usage);
-        stat_desc->mem_alloced_base = mem_usage.alloced_kmd;
-        stat_desc->mem_pool_size    = mem_usage.pool_size;
-        stat_desc->mem_pool_used =
-            mem_usage.alloced_kmd + mem_usage.alloced_umd + mem_usage.share_buf_size;
-        stat_desc->efficiency = adlak_dmp_get_efficiency(padlak);
-        if (ADLAK_SUBMIT_STATE_FINISHED == ptask->state) {
-            stat_desc->ret_state = 0;
-        } else {
-            stat_desc->ret_state = -3;  // TODO
-        }
-        adlak_os_mutex_unlock(&padlak->dev_mutex);
-
-    } else if (-1 == finished) {
-        stat_desc->ret_state = -1;  // timeout
-    } else {
-        // not go here
-        ASSERT(0);
-    }
-    return ERR(NONE);
+		result = adlak_uninvoke_request(context, &cancel);
+		if (result) {
+			status->ret_state = -3;
+			return result;
+		}
+		WRITE_ONCE(context->terminal_error, -ETIMEDOUT);
+		status->ret_state = -1;
+		return -ETIMEDOUT;
+	}
+	return result;
 }
 
 int adlak_submit_patch_and_exec(struct adlak_task *ptask) {

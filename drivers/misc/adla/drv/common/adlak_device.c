@@ -41,12 +41,24 @@
 #ifdef CONFIG_ADLAK_DEBUG_INNNER
 #include "adlak_dbg.c"
 #endif
-/**
- * @brief init device in kernel mode
- *
- * @param padlak
- * @return int
- */
+void adlak_recovery_failed(struct adlak_device *padlak, int error)
+{
+	struct adlak_context *context;
+
+	if (cmpxchg(&padlak->recovery_error, 0, error))
+		return;
+	/* No proven DMA stop: retain the module and its DMA allocations. */
+	__module_get(THIS_MODULE);
+	adlak_os_mutex_lock(&padlak->dev_mutex);
+	list_for_each_entry(context, &padlak->context_list, head) {
+		adlak_os_sema_give(context->invoke_state);
+		adlak_os_sema_give(context->ctx_idle);
+		adlak_to_umd_sinal_give(context->wait);
+	}
+	adlak_os_mutex_unlock(&padlak->dev_mutex);
+	dev_err(padlak->dev, "recovery failed: %d; reboot required\n", error);
+}
+
 int adlak_device_init(struct adlak_device *padlak) {
     int ret = 0;
     adlak_os_printf("%s kmd version: %s\n", DEVICE_NAME, ADLAK_VERSION);
@@ -87,27 +99,22 @@ int adlak_device_init(struct adlak_device *padlak) {
     if (ret) {
         goto err_hw_init;
     }
-    ret = adlak_dev_inference_init(padlak);
-    if (ret) {
-        AML_LOG_ERR("inference init fail!");
-        goto err_inference_init;
-    }
+	ret = adlak_irq_init(padlak);
+	if (ret)
+		goto err_irq_init;
 
-    ret = adlak_irq_init(padlak);
-    if (ret) {
-        AML_LOG_ERR("irq init fail!");
-        ret = ERR(EINVAL);
-        goto err_irq_init;
-    }
+	ret = adlak_dev_inference_init(padlak);
+	if (ret)
+		goto err_inference_init;
     adlak_platform_suspend(padlak);
 
     adlak_os_mutex_unlock(&padlak->dev_mutex);
 
     return 0;
 
-err_irq_init:
-    adlak_dev_inference_deinit(padlak);
 err_inference_init:
+	adlak_irq_deinit(padlak);
+err_irq_init:
     adlak_hw_deinit(padlak);
 err_hw_init:
     adlak_dpm_deinit(padlak);

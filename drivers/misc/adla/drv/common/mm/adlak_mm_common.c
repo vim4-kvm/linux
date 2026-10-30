@@ -64,7 +64,9 @@ int adlak_bitmap_pool_init(struct adlak_mm_pool_priv *pool, size_t pool_size,
         exclude_bitmap_count       = exclude_area_size_aligned >> ADLAK_MM_POOL_PAGE_SHIFT;
         start                      = (exclude_area_start_aligned >> ADLAK_MM_POOL_PAGE_SHIFT);
 
-        if (start < pool->bits) {
+		if (start < pool->bits) {
+			exclude_bitmap_count = min(exclude_bitmap_count,
+						   pool->bits - start);
             AML_LOG_INFO("set exclude area in bitmap pool: start 0x%08lX, count 0x%08lX ",
                          (uintptr_t)(start), (uintptr_t)exclude_bitmap_count);
             bitmap_set(pool->bitmap, start, exclude_bitmap_count);
@@ -121,9 +123,8 @@ unsigned long adlak_alloc_from_bitmap_pool(struct adlak_mm_pool_priv *pool, size
     size_t        start = 0;
     size_t        bitmap_count;
     unsigned long addr_offset = ADLAK_INVALID_ADDR;
-    if (!pool || size == 0) {
-        return ERR(ENOMEM);
-    }
+	if (!pool || !size || size > SIZE_MAX - ADLAK_MM_POOL_PAGE_SIZE + 1)
+		return ADLAK_INVALID_ADDR;
     size         = ADLAK_ALIGN(size, ADLAK_MM_POOL_PAGE_SIZE);
     bitmap_count = size >> ADLAK_MM_POOL_PAGE_SHIFT;
     AML_LOG_DEBUG("%s 0x%lX byte", __func__, (uintptr_t)size);

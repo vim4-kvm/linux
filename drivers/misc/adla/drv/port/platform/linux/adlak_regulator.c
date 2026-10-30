@@ -6,11 +6,15 @@
 #include "adlak_os_base.h"
 #include "adlak_device.h"
 
-static struct regulator *nn_regulator;
+static void adlak_disable_supply(void *supply)
+{
+	regulator_disable(supply);
+}
 
 int adlak_voltage_init(void *data)
 {
 	struct adlak_device *adla = data;
+	struct regulator *nn_regulator;
 	int ret;
 
 	nn_regulator = devm_regulator_get(adla->dev, "vddnpu");
@@ -20,12 +24,15 @@ int adlak_voltage_init(void *data)
 	ret = regulator_set_voltage(nn_regulator, 890000, 890000);
 	if (ret)
 		return ret;
-	return regulator_enable(nn_regulator);
+	ret = regulator_enable(nn_regulator);
+	if (ret)
+		return ret;
+	return devm_add_action_or_reset(adla->dev, adlak_disable_supply,
+				      nn_regulator);
 }
 
 int adlak_voltage_uninit(void *data)
 {
-	if (IS_ERR_OR_NULL(nn_regulator))
-		return 0;
-	return regulator_disable(nn_regulator);
+	(void)data;
+	return 0;
 }

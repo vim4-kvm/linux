@@ -204,6 +204,11 @@ static void adlak_platform_remove(struct platform_device *pdev)
  * @param pdev: platform device struct pointer
  * @return 0 if successful; others if failed.
  */
+static void adlak_destroy_release_queue(void *queue)
+{
+	destroy_workqueue(queue);
+}
+
 static int adlak_platform_probe(struct platform_device *pdev) {
     int                  ret    = 0;
     struct adlak_device *padlak = NULL;
@@ -218,12 +223,23 @@ static int adlak_platform_probe(struct platform_device *pdev) {
     dev_set_drvdata(&pdev->dev, padlak);
     padlak->dev  = &pdev->dev;
     padlak->pdev = pdev;
+	/* devres drains callbacks before driver unregistration can finish. */
+	padlak->release_wq = alloc_ordered_workqueue("adla-close", WQ_MEM_RECLAIM);
+	if (!padlak->release_wq) {
+		ret = -ENOMEM;
+		goto err_get_res;
+	}
+	ret = devm_add_action_or_reset(&pdev->dev, adlak_destroy_release_queue,
+				       padlak->release_wq);
+	if (ret)
+		goto err_get_res;
 
     /* Set the internal DMA address mask
      * This is the max address of the ADLA's internal address space.
      */
-    if (dma_set_mask_and_coherent(padlak->dev, DMA_BIT_MASK(34))) {
-        AML_LOG_WARN("set device dma mask failed,No suitable DMA available!");
+	if (dma_set_mask_and_coherent(padlak->dev, DMA_BIT_MASK(34))) {
+		ret = -EIO;
+		goto err_get_res;
     }
     padlak->save_time_en = 0;
     ret               = adlak_platform_get_resource(padlak);
@@ -327,6 +343,7 @@ static struct platform_driver adlak_platform_driver = {
     .driver =
         {
             .name  = DEVICE_NAME,
+		.suppress_bind_attrs = true,
             .owner = THIS_MODULE,
 #ifdef CONFIG_OF
             .of_match_table = of_match_ptr(adlak_child_pdev_match),

@@ -9,4 +9,11 @@ static inline int adlak_range_valid(int offset, int count, int total)
 	       offset <= total && count <= total - offset;
 }
 
+static inline int adlak_fixup_valid(int location, unsigned int shift,
+				    unsigned int unit, int config_size)
+{
+	return !(location & 3) && shift < 32 && unit &&
+	       adlak_range_valid(location, 4, config_size);
+}
+
 #endif

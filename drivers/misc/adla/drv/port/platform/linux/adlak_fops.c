@@ -45,6 +45,8 @@ static int drv_open(struct inode *inode, struct file *filp) {
 #endif
     AML_LOG_DEBUG("%s", __func__);
     padlak = container_of(filp->f_op, struct adlak_device, fops);
+	if (READ_ONCE(padlak->recovery_error))
+		return -EIO;
     adlak_os_mutex_lock(&padlak->dev_mutex);
     ret = adlak_create_context(padlak, &context);
     adlak_os_mutex_unlock(&padlak->dev_mutex);
@@ -79,6 +81,10 @@ static long drv_ioctl(struct file *filp, unsigned int ioctl_code, unsigned long 
     AML_LOG_DEBUG("%s", __func__);
 
     size = (ioctl_code & IOCSIZE_MASK) >> IOCSIZE_SHIFT;
+	if (READ_ONCE(padlak->recovery_error) &&
+	    ioctl_code != ADLAK_IOCTL_GET_STAT &&
+	    ioctl_code != ADLAK_IOCTL_WAIT_UNTIL_FINISH)
+		return -EIO;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
     if (!adlak_access_ok(udata, size)) return ERR(EFAULT);
 #else
@@ -291,13 +297,7 @@ static long drv_ioctl(struct file *filp, unsigned int ioctl_code, unsigned long 
                 ret = ERR(EFAULT);
                 break;
             }
-            ret = adlak_os_mutex_lock(&padlak->dev_mutex);
-            if (ret) {
-                break;
-            }
             ret = adlak_uninvoke_request(context, &uninvoke_desc);
-
-            adlak_os_mutex_unlock(&padlak->dev_mutex);
             /* copy buf info/errcode to user for reference */
             cp_ret =
                 copy_to_user(udata, &uninvoke_desc, sizeof(struct adlak_network_invoke_del_desc));

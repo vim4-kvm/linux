@@ -64,13 +64,13 @@ int adlak_platform_request_resource(void *data);
 
 int adlak_platform_free_resource(void *data);
 
-void adlak_platform_set_clock(void *data, bool enable, int core_freq, int axi_freq);
+int adlak_platform_set_clock(void *data, bool enable, int core_freq, int axi_freq);
 int  adlak_platform_pm_init(void *data);
 void adlak_platform_pm_deinit(void *data);
 
 void adlak_platform_set_power(void *data, bool enable);
 
-void adlak_platform_resume(void *data);
+int adlak_platform_resume(void *data);
 
 void adlak_platform_suspend(void *data);
 #ifdef __cplusplus

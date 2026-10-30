@@ -20,6 +20,7 @@
 
 /***************************** Include Files *********************************/
 #include "adlak_context.h"
+#include <linux/module.h>
 
 #include "adlak_api.h"
 #include "adlak_common.h"
@@ -36,6 +37,14 @@
 /************************** Variable Definitions *****************************/
 
 /************************** Function Prototypes ******************************/
+
+static void adlak_release_deferred(struct work_struct *work)
+{
+	struct adlak_context *context = container_of(work, struct adlak_context, close_work);
+
+	adlak_destroy_context(context->padlak, context);
+	module_put(THIS_MODULE);
+}
 
 int adlak_create_context(void *adlak_device, struct adlak_context **p_context) {
     int                   ret     = ERR(NONE);
@@ -54,10 +63,12 @@ int adlak_create_context(void *adlak_device, struct adlak_context **p_context) {
         goto end;
     }
     context = adlak_os_zalloc(sizeof(struct adlak_context), ADLAK_GFP_KERNEL);
-    if (!context) {
+	if (!context) {
+		adlak_simple_bitmap_free(&padlak->net_id_bitmap, net_id);
         return ERR(ENOMEM);
     }
     context->net_id = (int32_t)net_id;
+	INIT_WORK(&context->close_work, adlak_release_deferred);
 
     INIT_LIST_HEAD(&context->sbuf_list);
     adlak_os_mutex_init(&context->context_mutex);
@@ -133,18 +144,33 @@ int adlak_destroy_context(struct adlak_device *padlak, struct adlak_context *con
 #endif
 
     net_id = context->net_id;
+	if (READ_ONCE(padlak->recovery_error))
+		return -EIO;
     adlak_os_mutex_lock(&context->context_mutex);
     context->state = CONTEXT_STATE_CLOSED;
     adlak_os_mutex_unlock(&context->context_mutex);
     ret = adlak_invoke_del_all(padlak, net_id);
-    if (0 != ret) {
-        AML_LOG_WARN("net [%d] is busy,so destroy delay!", net_id);
-        if (ERR(EINTR) == adlak_os_sema_take(context->ctx_idle)) {
-            AML_LOG_ERR("sema[stat_idle] take err!");
-            ASSERT(0);
-        }
-    }
+	if (ret) {
+		AML_LOG_WARN("net [%d] is busy,so destroy delay!", net_id);
+		if (adlak_os_sema_take_timeout(context->ctx_idle, 5000)) {
+			adlak_os_mutex_lock(&padlak->queue.wq_mutex);
+			if (READ_ONCE(padlak->recovery_error)) {
+				adlak_os_mutex_unlock(&padlak->queue.wq_mutex);
+				return -EIO;
+			}
+			if (context->invoke_cnt) {
+				/* The worker owns cleanup after its late DMA-stop event. */
+				__module_get(THIS_MODULE);
+				context->close_deferred = true;
+				adlak_os_mutex_unlock(&padlak->queue.wq_mutex);
+				return -ETIMEDOUT;
+			}
+			adlak_os_mutex_unlock(&padlak->queue.wq_mutex);
+		}
+	}
     {
+		if (READ_ONCE(padlak->recovery_error))
+			return -EIO;
         AML_LOG_INFO("net [%d] is idle!", net_id);
         adlak_os_mutex_lock(&context->context_mutex);
         adlak_mem_free_all_context(context);

@@ -605,11 +605,12 @@ int adlak_to_umd_sinal_wait(uintptr_t hd, unsigned int timeout_ms) { return ERR(
 int adlak_to_umd_sinal_give(uintptr_t hd) {
     wait_queue_head_t *wait_inner = (wait_queue_head_t *)hd;
     PRINT_FUNC_NAME;
-    if (wait_inner != NULL) {
-        wake_up_interruptible(wait_inner);
-        return ERR(NONE);
-    }
-    return ERR(EINVAL);
+	if (wait_inner) {
+		/* Completion also drains cancel's uninterruptible DMA-stop wait. */
+		wake_up_all(wait_inner);
+		return ERR(NONE);
+	}
+	return ERR(EINVAL);
 }
 
 adlak_os_ktime_t adlak_os_ktime_get(void) { return (adlak_os_ktime_t)ktime_get(); }

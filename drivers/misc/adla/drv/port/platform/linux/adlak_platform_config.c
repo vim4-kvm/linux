@@ -206,19 +206,6 @@ int adlak_platform_device_uninit(void) {
 #endif
     return ret;
 }
-static bool adlak_smmu_available(struct device *dev) {
-    bool has_smmu = false;
-#ifdef CONFIG_OF
-    if (of_property_read_bool(dev->of_node, "smmu")) {
-        has_smmu = true;
-    }
-#else
-    if (1 == adlak_has_smmu) {
-        has_smmu = true;
-    }
-#endif
-    return has_smmu;
-}
 
 int adlak_platform_get_resource(void *data) {
     int                  ret    = 0;
@@ -279,13 +266,10 @@ int adlak_platform_get_resource(void *data) {
     }
 
     /* get interrupt number */
-    res = platform_get_resource_byname(padlak->pdev, IORESOURCE_IRQ, "adla");
-    if (!res) {
-        AML_LOG_ERR("get irqnum failed");
-        ret = ERR(EINVAL);
-        goto err;
-    }
-    padlak->hw_res.irqline = res->start;
+	ret = platform_get_irq_byname(padlak->pdev, "adla");
+	if (ret < 0)
+		return ret;
+	padlak->hw_res.irqline = ret;
     AML_LOG_DEBUG("get IRQ number: %d", padlak->hw_res.irqline);
 
     padlak->hw_timeout_ms = (adlak_sch_time_max_ms);
@@ -303,14 +287,11 @@ int adlak_platform_get_resource(void *data) {
     padlak->dependency_mode = adlak_dependency_mode;
     AML_LOG_DEBUG("padlak->dependency_mode =  %d", padlak->dependency_mode);
 
-    padlak->clk_axi = devm_clk_get(padlak->dev, "adla_axi_clk");
-    if (IS_ERR(padlak->clk_axi)) {
-        AML_LOG_DEBUG("Failed to get adla_axi_clk\n");
-    }
+	/* T7C shares the core clock with AXI; no separate AXI clock input. */
+	padlak->clk_axi = NULL;
     padlak->clk_core = devm_clk_get(padlak->dev, "adla_core_clk");
-    if (IS_ERR(padlak->clk_core)) {
-        AML_LOG_ERR("Failed to get adla_core_clk\n");
-    }
+	if (IS_ERR(padlak->clk_core))
+		return PTR_ERR(padlak->clk_core);
 #ifdef CONFIG_OF
     of_property_read_u32(padlak->dev->of_node, "adla_core_clk_rate", &adla_core_clk_rate);
 #endif
@@ -328,17 +309,14 @@ int adlak_platform_get_resource(void *data) {
         adla_core_clk -->adla_clk -->adla_clk_parent0/adla_clk_parent1;
     */
     padlak->clk = devm_clk_get(padlak->dev, "adla_clk");
-    if (IS_ERR(padlak->clk)) {
-        AML_LOG_WARN("Failed to get clk\n");
-    }
+	if (IS_ERR(padlak->clk))
+		return PTR_ERR(padlak->clk);
     padlak->clk_parent0 = devm_clk_get(padlak->dev, "adla_clk_parent0");
-    if (IS_ERR(padlak->clk_parent0)) {
-        AML_LOG_WARN("Failed to get clk_parent0\n");
-    }
+	if (IS_ERR(padlak->clk_parent0))
+		return PTR_ERR(padlak->clk_parent0);
     padlak->clk_parent1 = devm_clk_get(padlak->dev, "adla_clk_parent1");
-    if (IS_ERR(padlak->clk_parent1)) {
-        AML_LOG_WARN("Failed to get clk_parent1\n");
-    }
+	if (IS_ERR(padlak->clk_parent1))
+		return PTR_ERR(padlak->clk_parent1);
 
     padlak->dpm_period_set    = adlak_dpm_period;
 
@@ -430,177 +408,108 @@ int adlak_platform_free_resource(void *data) {
     return ret;
 }
 
-void adlak_platform_set_clock(void *data, bool enable, int core_freq, int axi_freq) {
-    int                  ret    = 0;
-    struct adlak_device *padlak = (struct adlak_device *)data;
-    AML_LOG_DEBUG("%s", __func__);
+int adlak_platform_set_clock(void *data, bool enable, int core_freq, int axi_freq)
+{
+	struct adlak_device *adla = data;
+	struct clk *previous;
+	bool was_enabled = adla->is_clk_core_enabled;
+	int ret;
 
-    if (false == enable) {
-        if (true == padlak->is_clk_axi_enabled) {
-            if (!ADLAK_IS_ERR_OR_NULL(padlak->clk_axi)) {
-                clk_disable_unprepare(padlak->clk_axi);
-            }
-            padlak->is_clk_axi_enabled = false;
-        }
-        if (true == padlak->is_clk_core_enabled) {
-            if (!ADLAK_IS_ERR_OR_NULL(padlak->clk_core)) {
-                clk_disable_unprepare(padlak->clk_core);
-            }
-            padlak->is_clk_core_enabled = false;
+	if (!enable) {
+		if (adla->is_clk_core_enabled)
+			clk_disable_unprepare(adla->clk_core);
+		adla->is_clk_core_enabled = false;
+		adla->clk_core_freq_real = 0;
+		return 0;
+	}
+	previous = clk_get_parent(adla->clk);
+	ret = clk_set_parent(adla->clk, adla->clk_parent0);
+	if (ret)
+		return ret;
+	ret = clk_set_rate(adla->clk_core, core_freq);
+	if (ret)
+		goto restore_parent;
+	if (!was_enabled) {
+		ret = clk_prepare_enable(adla->clk_core);
+		if (ret)
+			goto restore_parent;
+	}
+	adla->is_clk_core_enabled = true;
+	adla->clk_core_freq_real = clk_get_rate(adla->clk_core);
+	adla->clk_axi_freq_real = adla->clk_core_freq_real;
+	adlak_dpm_clk_update(adla, core_freq, axi_freq);
+	return 0;
 
-            /*
-                if adla clk has multi parent clk (T7c),
-                switch adla clk parent to clk_parent1 when adla clk off;
-            */
-            if (!ADLAK_IS_ERR_OR_NULL(padlak->clk_parent1) &&
-                !ADLAK_IS_ERR_OR_NULL(padlak->clk)) {
-                clk_set_parent(padlak->clk, padlak->clk_parent1);
-                AML_LOG_WARN("clk_set_parent to parent 1\n");
-            }
-
-        }
-        padlak->clk_core_freq_real = 0;
-    } else {
-        // clk enable
-        if (false == padlak->is_clk_axi_enabled) {
-            if (!ADLAK_IS_ERR_OR_NULL(padlak->clk_axi)) {
-                ret = clk_prepare_enable(padlak->clk_axi);
-                if (ret) {
-                    AML_LOG_ERR("Failed to enable adla_axi_clk\n");
-                }
-            }
-            padlak->is_clk_axi_enabled = true;
-        }
-        if (false == padlak->is_clk_core_enabled) {
-            /*
-                if adla clk has multi parent clk(T7c),
-                switch adla clk parent to clk_parent0 when adla clk on;
-            */
-            if (!ADLAK_IS_ERR_OR_NULL(padlak->clk_parent0) &&
-                !ADLAK_IS_ERR_OR_NULL(padlak->clk)) {
-                clk_set_parent(padlak->clk,padlak->clk_parent0);
-                AML_LOG_WARN("clk_set_parent to parent 0\n");
-            }
-
-            if (!ADLAK_IS_ERR_OR_NULL(padlak->clk_core)) {
-                ret = clk_prepare_enable(padlak->clk_core);
-                if (ret) {
-                    AML_LOG_ERR("Failed to enable adla_core_clk\n");
-                }
-                padlak->is_clk_core_enabled = true;
-            }
-        }
-            if (!ADLAK_IS_ERR_OR_NULL(padlak->clk_axi)) {
-                clk_set_rate(padlak->clk_axi, axi_freq);
-                if (ret) {
-                    AML_LOG_ERR("Failed to set adla_axi_clk\n");
-                }
-                padlak->clk_axi_freq_real = (int)clk_get_rate(padlak->clk_axi);
-                adlak_os_printf("adlak_axi clk requirement of %d Hz,and real val is %d Hz.",
-                                axi_freq, padlak->clk_axi_freq_real);
-            }
-            if (!ADLAK_IS_ERR_OR_NULL(padlak->clk_core)) {
-                ret = clk_set_rate(padlak->clk_core, core_freq);
-                if (ret) {
-                    AML_LOG_ERR("Failed to set adla_core_clk\n");
-                }
-                padlak->clk_core_freq_real = (int)clk_get_rate(padlak->clk_core);
-
-                AML_LOG_DEBUG("adlak_core clk requirement of %d Hz,and real val is %d Hz.",
-                                core_freq, padlak->clk_core_freq_real);
-            }
-        //}
-    }
-    adlak_dpm_clk_update(padlak, core_freq, axi_freq);
+restore_parent:
+	clk_set_parent(adla->clk, previous);
+	return ret;
 }
 
-void adlak_platform_set_power(void *data, bool enable) {
-#if CONFIG_HAS_PM_DOMAIN
-    int                  ret    = 0;
-    struct adlak_device *padlak = (struct adlak_device *)data;
-#endif
-    AML_LOG_DEBUG("%s", __func__);
-    if (false == enable) {
-        AML_LOG_WARN("adla power off\n");
-#if CONFIG_HAS_PM_DOMAIN
-		pm_runtime_mark_last_busy(padlak->dev);
-		pm_runtime_put_autosuspend(padlak->dev);
-#endif
+int adlak_platform_resume(void *data)
+{
+	struct adlak_device *adla = data;
+	int ret;
 
-    } else {
-        AML_LOG_WARN("adla power on\n");
-#if CONFIG_HAS_PM_DOMAIN
-		if (pm_runtime_enabled(padlak->dev)) {
-			ret = pm_runtime_resume_and_get(padlak->dev);
-			if (ret < 0)
-				AML_LOG_ERR("Getpower failed\n");
-		}
-#endif
-    }
-}
-int adlak_platform_pm_init(void *data) {
-    int                  ret    = 0;
-    struct adlak_device *padlak = (struct adlak_device *)data;
-    AML_LOG_DEBUG("%s", __func__);
-#if CONFIG_HAS_PM_DOMAIN
-	pm_runtime_set_autosuspend_delay(padlak->dev, 300);
-	pm_runtime_use_autosuspend(padlak->dev);
-	pm_runtime_enable(padlak->dev);
-#endif
-    if (ret < 0) {
-        AML_LOG_ERR("Get power failed\n");
-        goto end;
-    }
+	if (!adla->is_suspend)
+		return 0;
+	ret = pm_runtime_resume_and_get(adla->dev);
+	if (ret < 0)
+		goto failed;
+	ret = adlak_platform_set_clock(adla, true, adla->clk_core_freq_set,
+				       adla->clk_axi_freq_set);
+	if (ret) {
+		pm_runtime_put_sync(adla->dev);
+		goto failed;
+	}
+	adla->is_suspend = false;
+	adla->power_error = 0;
+	return 0;
 
-    adlak_os_sema_init(&padlak->sem_pm_wakeup, 1, 0);
-    padlak->pm_suspend = false;
-    // power on
-    adlak_platform_set_power(padlak, true);
-    // clk enable
-    adlak_platform_set_clock(padlak, true, padlak->clk_core_freq_set, padlak->clk_axi_freq_set);
-    padlak->is_suspend = false;
-end:
-    return ret;
-}
-void adlak_platform_pm_deinit(void *data) {
-    struct adlak_device *padlak = (struct adlak_device *)data;
-    AML_LOG_DEBUG("%s", __func__);
-    // clk disable
-    adlak_platform_set_clock(padlak, false, 0, 0);
-    // power off
-    adlak_platform_set_power(padlak, false);
-    padlak->is_suspend = true;
-	pm_runtime_barrier(padlak->dev);
-	pm_runtime_disable(padlak->dev);
-    adlak_os_sema_destroy(&padlak->sem_pm_wakeup);
+failed:
+	WRITE_ONCE(adla->power_error, ret);
+	return ret;
 }
 
-void adlak_platform_resume(void *data) {
-#if CONFIG_ADLAK_DPM_EN
-    struct adlak_device *padlak = (struct adlak_device *)data;
-    AML_LOG_INFO("%s", __func__);
-    if (false != padlak->is_suspend) {
-        // power on
-        adlak_platform_set_power(padlak, true);
-        // clk enable
-        adlak_platform_set_clock(padlak, true, padlak->clk_core_freq_set, padlak->clk_axi_freq_set);
-        padlak->is_suspend = false;
-        adlak_hw_dev_resume(padlak);
-    }
-#endif
+void adlak_platform_suspend(void *data)
+{
+	struct adlak_device *adla = data;
+
+	if (adla->is_suspend)
+		return;
+	adlak_hw_dev_suspend(adla);
+	adlak_platform_set_clock(adla, false, 0, 0);
+	adla->is_suspend = true;
+	pm_runtime_mark_last_busy(adla->dev);
+	pm_runtime_put_autosuspend(adla->dev);
 }
 
-void adlak_platform_suspend(void *data) {
-#if CONFIG_ADLAK_DPM_EN
-    struct adlak_device *padlak = (struct adlak_device *)data;
-    AML_LOG_INFO("%s", __func__);
-    if (false == padlak->is_suspend) {
-        adlak_hw_dev_suspend(padlak);
-        padlak->is_suspend = true;
-        // clk disable
-        adlak_platform_set_clock(padlak, false, 0, 0);
-        // power off
-        adlak_platform_set_power(padlak, false);
-    }
-#endif
+int adlak_platform_pm_init(void *data)
+{
+	struct adlak_device *adla = data;
+	int ret;
+
+	adla->is_suspend = true;
+	ret = adlak_os_sema_init(&adla->sem_pm_wakeup, 1, 0);
+	if (ret)
+		return ret;
+	pm_runtime_set_autosuspend_delay(adla->dev, 300);
+	pm_runtime_use_autosuspend(adla->dev);
+	pm_runtime_enable(adla->dev);
+	ret = adlak_platform_resume(adla);
+	if (ret) {
+		pm_runtime_disable(adla->dev);
+		adlak_os_sema_destroy(&adla->sem_pm_wakeup);
+	}
+	return ret;
+}
+
+void adlak_platform_pm_deinit(void *data)
+{
+	struct adlak_device *adla = data;
+
+	adlak_platform_suspend(adla);
+	pm_runtime_barrier(adla->dev);
+	pm_runtime_disable(adla->dev);
+	pm_runtime_dont_use_autosuspend(adla->dev);
+	adlak_os_sema_destroy(&adla->sem_pm_wakeup);
 }

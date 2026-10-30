@@ -206,6 +206,8 @@ err:
 
 int adlak_ext_mem_attach_request(struct adlak_context *        context,
                                  struct adlak_extern_buf_info *pbuf_req) {
+	if (!pbuf_req->bytes || (pbuf_req->buf_handle & (ADLAK_PAGE_SIZE - 1)))
+		return -EINVAL;
     int                      ret     = 0;
     struct adlak_mem_handle *mm_info = NULL;
     struct adlak_mem_obj *   mem     = &memory;

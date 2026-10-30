@@ -24,6 +24,7 @@
 /***************************** Include Files *********************************/
 #include "adlak_api.h"
 #include "adlak_common.h"
+#include <linux/workqueue.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -64,6 +65,10 @@ struct adlak_context {
     uintptr_t            wait;  // wait_queue_head_t *
     uint32_t             state;
     uint32_t             invoke_cnt;
+	int terminal_invoke;
+	int terminal_error;
+	bool close_deferred;
+	struct work_struct close_work;
 
     uint32_t             invoke_time_elapsed_total;
     uint32_t             invoke_time_elapsed_tmp;

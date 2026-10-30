@@ -89,6 +89,7 @@ struct adlak_cmq_buffer {
     struct adlak_parser_storage parser_storage_info;
 };
 struct adlak_device {
+	struct workqueue_struct *release_wq;
 #ifndef CONFIG_ADLA_FREERTOS
     struct class *class;
     struct platform_device *pdev;
@@ -144,6 +145,8 @@ struct adlak_device {
     unsigned int iova_max_size_GB;  // unit is Gbyte
     uint32_t     save_time_en;
     uint32_t     dev_hw_version; //Gops, base on
+	int recovery_error;
+	int power_error;
 };
 
 /**
@@ -154,6 +157,7 @@ struct adlak_device {
  */
 int adlak_device_init(struct adlak_device *padlak);
 int adlak_device_deinit(struct adlak_device *padlak);
+void adlak_recovery_failed(struct adlak_device *padlak, int error);
 
 /**
  * @brief called in top-half IRQ handler
