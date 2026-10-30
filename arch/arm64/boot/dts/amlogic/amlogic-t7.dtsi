@@ -24,6 +24,28 @@
 	#address-cells = <2>;
 	#size-cells = <2>;
 
+	adla: accelerator@fe371000 {
+		compatible = "amlogic,t7c-adla";
+		reg = <0x0 0xfe371000 0x0 0x200>,
+		      <0x0 0xf7048000 0x0 0x138000>;
+		reg-names = "adla_reg", "adla_sram";
+		interrupts = <GIC_SPI 185 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "adla";
+		clocks = <&clkc_periphs CLKID_ANAKIN>,
+			 <&clkc_periphs CLKID_ANAKIN_01_SEL>,
+			 <&clkc_periphs CLKID_ANAKIN_0>,
+			 <&clkc_periphs CLKID_ANAKIN_1>;
+		clock-names = "adla_core_clk", "adla_clk",
+			      "adla_clk_parent0", "adla_clk_parent1";
+		assigned-clocks = <&clkc_periphs CLKID_ANAKIN_0_SEL>,
+				  <&clkc_periphs CLKID_ANAKIN_01_SEL>,
+				  <&clkc_periphs CLKID_ANAKIN>;
+		assigned-clock-parents = <&scmi_clk CLKID_FCLK_DIV2P5>,
+					<&clkc_periphs CLKID_ANAKIN_0>, <0>;
+		assigned-clock-rates = <0>, <0>, <800000000>;
+		power-domains = <&pwrc PWRC_T7_NNA_TOP_ID>;
+		status = "disabled";
+	};
 	cpus {
 		#address-cells = <0x2>;
 		#size-cells = <0x0>;

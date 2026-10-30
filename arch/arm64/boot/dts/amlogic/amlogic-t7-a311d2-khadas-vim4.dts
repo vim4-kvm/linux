@@ -532,6 +532,11 @@
 	};
 };
 
+&adla {
+	vddnpu-supply = <&vdd_npu>;
+	status = "okay";
+};
+
 &a53_thermal {
 	trips {
 		a53_active: a53-active {
