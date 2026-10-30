@@ -341,11 +341,11 @@ int adlak_os_alloc_contiguous(struct adlak_mem *mm, struct adlak_mem_handle *mm_
     mm_info->phys_addrs = phys_addrs;
 
     order = get_order(ADLAK_PAGE_ALIGN(size));
-    if (order >= MAX_ORDER) {
-        AML_LOG_WARN("contiguous alloc contiguous memory order is bigger than MAX, %d >= %d\n",
-                     order, MAX_ORDER);
-        goto err_order;
-    }
+	if (order > MAX_PAGE_ORDER) {
+		AML_LOG_WARN("contiguous allocation order %d exceeds %d\n",
+			     order, MAX_PAGE_ORDER);
+		goto err_order;
+	}
     gfp |= (GFP_DMA | GFP_USER | __GFP_ZERO);
     if (ADLAK_ENUM_MEMTYPE_INNER_PA_WITHIN_4G & mm_info->req.mem_type) {
         gfp |= (__GFP_DMA32);
@@ -439,7 +439,7 @@ int adlak_os_mmap(struct adlak_mem *mm, struct adlak_mem_handle *mm_info, void *
     struct page **               pages = NULL;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
-    vma->vm_flags |= (VM_IO | VM_DONTCOPY | VM_DONTEXPAND | VM_DONTDUMP);
+	vm_flags_set(vma, VM_IO | VM_DONTCOPY | VM_DONTEXPAND | VM_DONTDUMP);
 #else
     vma->vm_flags |= (VM_IO | VM_DONTCOPY | VM_DONTEXPAND | VM_RESERVED);
 #endif
@@ -649,23 +649,28 @@ int adlak_os_mmap2userspace(struct adlak_mem *mm, struct adlak_mem_handle *mm_in
     vma = find_vma(current->mm, (unsigned long)addr_userspace);
     if (NULL == vma) {
         AML_LOG_ERR("failed to find vma\n");
-        vm_munmap(addr_userspace, mm_info->req.bytes);
-        addr_userspace = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
         mmap_write_unlock(current->mm);
 #else
         up_write(&current->mm->mmap_sem);
 #endif
+		vm_munmap(addr_userspace, mm_info->req.bytes);
+		addr_userspace = 0;
         goto exit;
     }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
-    mmap_write_unlock(current->mm);
+	vma_start_write(vma);
 #else
     up_write(&current->mm->mmap_sem);
 #endif
 
     ret = adlak_os_mmap(mm, mm_info, (void *)vma);
+	mmap_write_unlock(current->mm);
+	if (ret) {
+		vm_munmap(addr_userspace, mm_info->req.bytes);
+		addr_userspace = 0;
+	}
 
 exit:
     mm_info->cpu_addr_user = (void *)addr_userspace;

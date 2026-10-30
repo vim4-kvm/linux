@@ -49,11 +49,10 @@ struct class *adlak_class = NULL;
 static DEFINE_IDA(adlak_ida);
 
 #ifdef CONFIG_OF
-static const struct of_device_id adlak_child_pdev_match[] = {{
-                                                                 .name       = "adla",
-                                                                 .compatible = "amlogic,adla",
-                                                             },
-                                                             {}};
+static const struct of_device_id adlak_child_pdev_match[] = {
+	{ .compatible = "amlogic,t7c-adla" },
+	{}
+};
 
 MODULE_DEVICE_TABLE(of, adlak_child_pdev_match);
 #endif
@@ -82,7 +81,7 @@ static int adlak_destroy_cdev(struct adlak_device *padlak) {
 #endif
     device_destroy(padlak->class, padlak->cdev.dev);
     cdev_del(&padlak->cdev);
-    ida_simple_remove(&adlak_ida, MINOR(padlak->cdev.dev));
+	ida_free(&adlak_ida, MINOR(padlak->cdev.dev));
     return 0;
 }
 
@@ -93,7 +92,7 @@ static int adlak_create_cdev(struct adlak_device *padlak) {
     if (!padlak) {
         return ERR(ENOMEM);
     }
-    id = ida_simple_get(&adlak_ida, 0, ADLAK_MAX_DEVICES, ADLAK_GFP_KERNEL);
+	id = ida_alloc_range(&adlak_ida, 0, ADLAK_MAX_DEVICES - 1, ADLAK_GFP_KERNEL);
     if (id < 0) {
         return id;
     }
@@ -169,7 +168,8 @@ static int adlak_destroy_misc(struct adlak_device *padlak) {
     return 0;
 }
 
-static int adlak_platform_remove(struct platform_device *pdev) {
+static void adlak_platform_remove(struct platform_device *pdev)
+{
     int                  ret    = 0;
     struct adlak_device *padlak = platform_get_drvdata(pdev);
     AML_LOG_DEBUG("%s", __func__);
@@ -195,7 +195,6 @@ static int adlak_platform_remove(struct platform_device *pdev) {
     adlak_os_free(padlak);
     /* success */
     AML_LOG_INFO("ADLA KMD remove done");
-    return 0;
 }
 
 /**
@@ -228,15 +227,14 @@ static int adlak_platform_probe(struct platform_device *pdev) {
     }
     padlak->save_time_en = 0;
     ret               = adlak_platform_get_resource(padlak);
-    if (ret) {
-        goto err_get_res;
-    }
+	if (ret)
+		goto err_get_res;
     /* set voltage */
     ret = adlak_voltage_init(padlak);
-    if (ret < 0)
-    {
-        AML_LOG_ERR("voltage init fail!\n");
-    }
+	if (ret < 0) {
+		AML_LOG_ERR("voltage init fail!\n");
+		goto err_get_res;
+	}
     ret = adlak_axi_sram_init(padlak);
     if (ret < 0)
     {
@@ -368,7 +366,7 @@ static int adlak_class_init(void) {
             return ret;
         }
     }
-    adlak_class = class_create(THIS_MODULE, CLASS_NAME);
+	adlak_class = class_create(CLASS_NAME);
     if (IS_ERR(adlak_class)) {
         AML_LOG_ERR("class_create failed for adla.");
         ret = ADLAK_PTR_ERR(adlak_class);

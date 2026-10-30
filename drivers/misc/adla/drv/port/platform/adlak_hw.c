@@ -218,7 +218,7 @@ static int adlak_hal_hard_reset(void *data) {
     // TODO You need to add this function according to the api of soc
     AML_LOG_DEBUG("%s", __func__);
 
-    return 0;
+	return -EOPNOTSUPP;
 }
 
 uint32_t adlak_hal_get_reg(void *data, uint32_t offset) {
@@ -576,7 +576,9 @@ int adlak_hal_reset_and_start(void *data) {
     AML_LOG_DEBUG("%s", __func__);
     phw_info = padlak->hw_info;
     /*1. hardware reset */
-    adlak_hal_reset(padlak);
+	ret = adlak_hal_reset(padlak);
+	if (ret)
+		return ret;
 
     /*2. hardware start*/
     adlak_hal_start(padlak);

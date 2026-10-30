@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
+config AMLOGIC_ADLA_COMPAT
+	tristate "Amlogic T7C ADLA downstream SDK compatibility"
+	depends on ARM64 && OF && ARCH_MESON
+	depends on PM && REGULATOR
+	help
+	  Downstream compatibility interface for the Amlogic ADLA SDK.
+	  Exposes /dev/adla0 and the vendor ioctl, mmap and sysfs contracts.
+	  This is not a DRM accelerator interface. Hardware validation is
+	  required before use on T7C boards.

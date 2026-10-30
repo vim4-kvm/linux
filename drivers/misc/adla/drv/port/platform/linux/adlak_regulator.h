@@ -20,7 +20,6 @@
 
 /***************************** Include Files *********************************/
 #include <linux/module.h>
-#include <linux/amlogic/gki_module.h>
 
 int adlak_voltage_init(void *data);
 int adlak_voltage_uninit(void *data);

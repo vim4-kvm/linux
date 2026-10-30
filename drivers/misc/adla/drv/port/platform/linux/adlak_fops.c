@@ -469,7 +469,7 @@ err_handle:
 static int adlak_register_fops(struct adlak_device *padlak) {
     AML_LOG_DEBUG("%s", __func__);
     padlak->fops.owner          = THIS_MODULE;
-    padlak->fops.llseek         = no_llseek;
+	padlak->fops.llseek = NULL;
     padlak->fops.open           = &drv_open;
     padlak->fops.release        = &drv_release;
     padlak->fops.poll           = &drv_poll;

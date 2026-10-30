@@ -1,4 +1,4 @@
-M ?= $(srctree)/common_drivers/drivers/adla/kmd
+M := $(src)
 KERNEL_SRC ?= $(srctree)
 
 HAS_PM_DOMAIN ?= 1
@@ -29,7 +29,7 @@ ccflags-y += $(EXTRA_INCLUDE)
 EXTRA_CFLAGS+= -Wno-error -Wno-unused-variable
 EXTRA_CFLAGS += $(EXTRA_INCLUDE) $(EXTRA_CFLAGS1)
 
-obj-m	+=	adla_core.o
+obj-$(CONFIG_AMLOGIC_ADLA_COMPAT) += adla_core.o
 #NPU_DIR := $(shell dirname $(lastword $(MAKEFILE_LIST)))
 adla_core-objs += drv/port/platform/linux/adlak_debugfs.o
 adla_core-objs += drv/port/platform/linux/adlak_interrupt.o

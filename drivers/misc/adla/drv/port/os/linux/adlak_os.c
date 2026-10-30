@@ -411,11 +411,14 @@ MODULE_PARM_DESC(sched_priority, "the adlak_sched_priority of kmd thread");
 
 static void signaler_set_rtpriority(adlak_os_thread_t *pthrd) {
     adlak_os_thread_inner_t *pthread_inner = (adlak_os_thread_inner_t *)pthrd->handle;
-    struct sched_param param = {.sched_priority = adlak_sched_priority};
+	struct sched_attr param = {
+		.size = sizeof(param),
+		.sched_policy = SCHED_RR,
+		.sched_priority = adlak_sched_priority,
+	};
 
-    if (0 != sched_setscheduler(pthread_inner->kthread, SCHED_RR, &param)) {
-        AML_LOG_WARN("set rtpriority of adlak_kthread_x failed!");
-    }
+	if (sched_setattr_nocheck(pthread_inner->kthread, &param))
+		AML_LOG_WARN("set rtpriority of adlak_kthread_x failed!");
 }
 #endif
 
@@ -516,8 +519,8 @@ int adlak_os_timer_init(adlak_os_timer_t *ptim, adlak_timer_cb_func_t func, void
 int adlak_os_timer_destroy(adlak_os_timer_t *ptim) {
     adlak_os_timer_inner_t *ptimer_inner = (adlak_os_timer_inner_t *)*ptim;
     PRINT_FUNC_NAME;
-    if (ptimer_inner != NULL) {
-        del_timer_sync(&ptimer_inner->timer);
+	if (ptimer_inner) {
+		timer_delete_sync(&ptimer_inner->timer);
         adlak_os_free((void *)ptimer_inner);
         *ptim = NULL;
         AML_LOG_DEBUG("timer_destroy success!\n");
@@ -529,8 +532,8 @@ int adlak_os_timer_destroy(adlak_os_timer_t *ptim) {
 int adlak_os_timer_del(adlak_os_timer_t *ptim) {
     adlak_os_timer_inner_t *ptimer_inner = (adlak_os_timer_inner_t *)*ptim;
     PRINT_FUNC_NAME;
-    if (ptimer_inner != NULL) {
-        del_timer_sync(&ptimer_inner->timer);
+	if (ptimer_inner) {
+		timer_delete_sync(&ptimer_inner->timer);
         AML_LOG_DEBUG("timer_del success!\n");
         return ERR(NONE);
     }

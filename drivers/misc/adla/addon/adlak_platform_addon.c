@@ -21,7 +21,6 @@
 /***************************** Include Files *********************************/
 /* adjust nn voltage */
 #include <linux/arm-smccc.h>
-#include <linux/amlogic/media/registers/cpu_version.h>
 #include <linux/regulator/consumer.h>
 
 #include "adlak_platform_addon.h"

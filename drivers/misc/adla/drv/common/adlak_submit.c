@@ -572,6 +572,8 @@ end:
  * been successfully scheduled.
  */
 
+#include "adlak_bounds.h"
+
 static struct adlak_model_attr *adlak_model_create(struct adlak_context *     context,
                                                    struct adlak_network_desc *psubmit_desc) {
     struct adlak_model_attr *pmodel_attr;
@@ -579,6 +581,9 @@ static struct adlak_model_attr *adlak_model_create(struct adlak_context *     co
     int                      ret;
 
     AML_LOG_INFO("%s", __func__);
+	if (psubmit_desc->tasks_num <= 0 || psubmit_desc->config_total_size < 0 ||
+	    psubmit_desc->dep_fixups_num < 0 || psubmit_desc->reg_fixups_num < 0)
+		return ADLAK_ERR_PTR(ERR(EINVAL));
     pmodel_attr = adlak_os_zalloc(sizeof(struct adlak_model_attr), ADLAK_GFP_KERNEL);
     if (!pmodel_attr) {
         return ADLAK_ERR_PTR(ERR(ENOMEM));
@@ -703,6 +708,19 @@ static struct adlak_model_attr *adlak_model_create(struct adlak_context *     co
     }
 #endif
 
+	for (int i = 0; i < psubmit_desc->tasks_num; i++) {
+		struct adlak_submit_task *task = &pmodel_attr->submit_tasks[i];
+
+		if (!adlak_range_valid(task->config_offset, task->config_size,
+				       psubmit_desc->config_total_size) ||
+		    !adlak_range_valid(task->dep_info_offset, task->dep_info_count,
+				       psubmit_desc->dep_fixups_num) ||
+		    !adlak_range_valid(task->reg_fixup_offset, task->reg_fixup_count,
+				       psubmit_desc->reg_fixups_num)) {
+			ret = ERR(EINVAL);
+			goto err_copy_from_user;
+		}
+	}
     AML_LOG_DEBUG("submit_dep_fixups dump...");
     adlak_debug_buf_dump((void *)pmodel_attr->submit_dep_fixups,
                          sizeof(struct adlak_submit_dep_fixup) * psubmit_desc->dep_fixups_num);
@@ -873,6 +891,8 @@ static struct adlak_task *adlak_invoke_create(struct adlak_context *            
         return ADLAK_ERR_PTR(ERR(ENXIO));
     }
     ASSERT(context->net_id == pinvoke_desc->net_register_idx);
+	if (pinvoke_desc->addr_fixups_num < 0)
+		return ADLAK_ERR_PTR(ERR(EINVAL));
     if (pinvoke_desc->start_idx < 0 || pinvoke_desc->end_idx >= pmodel_attr->submit_tasks_num ||
         pinvoke_desc->start_idx > pinvoke_desc->end_idx) {
         AML_LOG_ERR("invoke id is invalid!");

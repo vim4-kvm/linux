@@ -228,7 +228,7 @@ int adlak_platform_get_resource(void *data) {
 
     AML_LOG_DEBUG("%s", __func__);
 
-    padlak->smmu_en = adlak_smmu_available(padlak->dev);
+	padlak->smmu_en = true;
 
     if (padlak->smmu_en) {
         AML_LOG_INFO("smmu available.\n");
@@ -523,22 +523,18 @@ void adlak_platform_set_power(void *data, bool enable) {
     if (false == enable) {
         AML_LOG_WARN("adla power off\n");
 #if CONFIG_HAS_PM_DOMAIN
-        pm_runtime_put_sync(padlak->dev);
-        if (pm_runtime_enabled(padlak->dev)) {
-            pm_runtime_disable(padlak->dev);
-        }
+		pm_runtime_mark_last_busy(padlak->dev);
+		pm_runtime_put_autosuspend(padlak->dev);
 #endif
 
     } else {
         AML_LOG_WARN("adla power on\n");
 #if CONFIG_HAS_PM_DOMAIN
-        pm_runtime_enable(padlak->dev);
-        if (pm_runtime_enabled(padlak->dev)) {
-            ret = pm_runtime_get_sync(padlak->dev);
-            if (ret < 0) {
-                AML_LOG_ERR("Getpower failed\n");
-            }
-        }
+		if (pm_runtime_enabled(padlak->dev)) {
+			ret = pm_runtime_resume_and_get(padlak->dev);
+			if (ret < 0)
+				AML_LOG_ERR("Getpower failed\n");
+		}
 #endif
     }
 }
@@ -547,7 +543,9 @@ int adlak_platform_pm_init(void *data) {
     struct adlak_device *padlak = (struct adlak_device *)data;
     AML_LOG_DEBUG("%s", __func__);
 #if CONFIG_HAS_PM_DOMAIN
-    ret = pm_runtime_set_active(padlak->dev);
+	pm_runtime_set_autosuspend_delay(padlak->dev, 300);
+	pm_runtime_use_autosuspend(padlak->dev);
+	pm_runtime_enable(padlak->dev);
 #endif
     if (ret < 0) {
         AML_LOG_ERR("Get power failed\n");
@@ -572,6 +570,8 @@ void adlak_platform_pm_deinit(void *data) {
     // power off
     adlak_platform_set_power(padlak, false);
     padlak->is_suspend = true;
+	pm_runtime_barrier(padlak->dev);
+	pm_runtime_disable(padlak->dev);
     adlak_os_sema_destroy(&padlak->sem_pm_wakeup);
 }
 
