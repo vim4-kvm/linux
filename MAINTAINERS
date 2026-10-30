@@ -30332,4 +30332,5 @@ M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Odd Fixes
 F:	Documentation/devicetree/bindings/misc/amlogic,t7c-adla.yaml
 F:	drivers/misc/adla/
+F:	drivers/misc/adla/test*.py
 F:	include/trace/events/adla.h
