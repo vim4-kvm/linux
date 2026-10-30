@@ -576,6 +576,11 @@
 	};
 
 	cooling-maps {
+		map-gpu {
+			trip = <&gpu_passive>;
+			cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+		};
+
 		map {
 			trip = <&gpu_active>;
 			cooling-device = <&khadas_mcu 30 100>;
