@@ -27,3 +27,19 @@
 	/* VDD_GPU stays at its existing always-on setting; no voltage scaling. */
 	/delete-property/ mali-supply;
 };
+
+&gpu_thermal {
+	trips {
+		kbase_gpu_trip: kbase-throttle {
+			temperature = <95000>;
+			hysteresis = <5000>;
+			type = "passive";
+		};
+	};
+	cooling-maps {
+		kbase-gpu {
+			trip = <&kbase_gpu_trip>;
+			cooling-device = <&gpu 0 4>;
+		};
+	};
+};
