@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Application-independent capture/display candidate. This deliberately uses
+ * the shared M3-video resource definition: VDIN owns only its split VCBUS
+ * windows, DRM owns VD1 and ENC2, and ASoC owns the independent TX card.
+ * Building this profile does not select it for boot or qualify passthrough.
+ * Keep the deployed M0 profile unchanged until coexistence is validated.
+ */
+#include "amlogic-t7-a311d2-khadas-vim4-display-m3-video.dts"

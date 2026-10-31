@@ -19,6 +19,7 @@ dtb-$(CONFIG_ARCH_MESON) += amlogic-t7-a311d2-khadas-vim4-display-m1.dtb
 dtb-$(CONFIG_ARCH_MESON) += amlogic-t7-a311d2-khadas-vim4-display-m2.dtb
 dtb-$(CONFIG_ARCH_MESON) += amlogic-t7-a311d2-khadas-vim4-display-m3.dtb
 dtb-$(CONFIG_ARCH_MESON) += amlogic-t7-a311d2-khadas-vim4-display-m3-video.dtb
+dtb-$(CONFIG_ARCH_MESON) += amlogic-t7-a311d2-khadas-vim4-passthrough.dtb
 dtb-$(CONFIG_ARCH_MESON) += meson-a1-ad401.dtb
 dtb-$(CONFIG_ARCH_MESON) += meson-a1-ad402.dtb
 dtb-$(CONFIG_ARCH_MESON) += meson-axg-jethome-jethub-j100.dtb
