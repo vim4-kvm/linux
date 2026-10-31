@@ -62,3 +62,19 @@ GBM/EGL setup stage failed or whether compute APIs work. The board was
 rebooted to 5.15; all five helpers and six protected boot-file hashes were
 restored. One-KVM was explicitly started before the final active/UDC check.
 Full evidence: docs/bringup/2026-10-30-kbase-r3-window.md in vim4-kvm.
+
+Independent API diagnostic window (2026-10-30 local date)
+-------------------------------------------------------
+
+The same r3 module again loaded without WARN/BUG/oops. Diagnostic GBM
+creation failed after successful DRM open/GET_CAP: the blob attempted
+system-uncached and heap-gfx DMA heaps, neither present on 7.3. The private
+library prefix and dependency closure were correct; no heap aliases were
+created to bypass the allocation contract.
+
+Vulkan 1.3.231 and OpenCL device/C 3.0 queries reported Mali-G52 independently
+of EGL. Vulkan DMA compute failed with DEVICE_LOST and GPU/MMU faults
+(AS_ACTIVE stuck, cache-clean timeout, AS0 page fault). Extra GPU loads and
+video concurrency were stopped. This is not a voltage diagnosis. The board
+was rebooted normally to 5.15 with helper and boot hashes restored.
+See docs/bringup/2026-10-30-kbase-r4-window.md in vim4-kvm for limitations.
