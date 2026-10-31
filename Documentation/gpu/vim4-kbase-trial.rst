@@ -1,63 +1,59 @@
-VIM4 external kbase uhd5 trial
-=============================
+VIM4 external kbase r11 default-policy validation
+===============================================
 
-The candidate DTS inherits the complete formal uhd4 display-m0 profile at
-8bca939d6bbd3e4d91e9f23b812e920172c99b3d. It changes only GPU ownership,
-the separate WC heap CMA pool and the GPU frequency cooling map. The
-Panfrost DT and the default 5.15 boot selection remain unchanged.
+The tested kernel source remains formal 8bca939d6bbd3, uhd5 GNU build ID
+90cc3dc2ddd1ad2562bf07e8de65f96eeb092a90. Only external modules were rebuilt.
+The main repository's governor commit 1f8c2d9 follows the actual 5.15 live
+/bifrost DT: missing def_clk/max_clk means the vendor defaults to level 4,
+not the def_clk=0 from a different source DT. High load can jump directly
+to 800 MHz. Software PP counts also delay downscaling, despite the vendor
+hardware PP setter being a no-op. Both were missing in the r10 policy.
+Periodic polling now uses a non-deferrable timer, like the vendor's
+periodic wakeup semantics, without claiming identical timer phase.
 
-The uhd5 build changes LOCALVERSION and enables THERMAL_EMULATION. The
-release is 7.3.0-vim4kvm-uhd5+, GNU build ID
-90cc3dc2ddd1ad2562bf07e8de65f96eeb092a90. The configuration patch and all
-external DDK/governor/heaps sources live in vim4-kvm/packaging/kbase, not
-in this kernel tree. Later external-module fixes reused this Image and
-its matching BTF/Module.symvers; no formal kernel output was modified.
+The real governor decision function was compared against the GPL vendor
+state machine for 24,240 frequency/load/hold/software-PP combinations.
+The default remains vim4, 100 ms, with thermal QoS; no performance or
+fixed-frequency product policy, voltage or hardware core gating was added.
 
-The default governor is the separate vim4 module, with the vendor-derived
-100 ms period, five thresholds and low-load hold counters. Performance is
-an explicit diagnostic choice, never the product default. Devfreq retains
-control of OPP and thermal QoS constraints. The first automatic async probe
-exposed a synchronous governor request WARN and blocked other module
-loading. Theme 0008 now supplies a pre: governor_vim4 soft dependency;
-the build checks actual module metadata and staged modprobe ordering.
+Seven samples after the same five-minute idle history and two-second
+probe intervals gave median/P95 values (cached 5.15 in parentheses):
 
-The repaired 2026-10-31 RAM trial passed EGL 1.5/GLES 3.2 pixels, Vulkan
-1.3.231 and OpenCL device/C 3.0. Six native/import memory paths passed
-both compute probes, including default CMA. All completed tests on this
-repaired candidate had zero WARN/BUG/oops/GPU faults. This is not CTS.
+* DMA: 1.535/3.570 ms (1.692/3.618).
+* GLES: 646.280/648.065 FPS (616.361/617.773).
+* CL latency: 53.19/56.54 us (78.32/79.14).
+* CL SP: 101.74/101.76 GFLOPS (101.69/101.71).
 
-Seven samples used the same WC heap-gfx, five-minute idle history and
-probe binaries as the cached 5.15 baseline. Median/P95 results were:
+The default noncoherent DT passed EGL 1.5/GLES 3.2 pixels, Vulkan 1.3.231,
+OpenCL device/C 3.0 and six native/import paths in both compute probes.
+Completed default-path tests had zero WARN/BUG/oops/GPU faults. The
+five-minute idle residency remained 250 MHz. mpgpu reported about 90/45
+percent at continuous/half duty and settled to zero at idle. GPU thermal
+emulation changed cooling state 0 to 1 and 800 to 666.7 MHz, then restored
+state 0 and 800 MHz after emul_temp was cleared. Five OPPs passed.
 
-* DMA: 1.897/3.557 ms versus 1.692/3.618 ms on 5.15.
-* GLES: 646.122/649.165 FPS versus 616.361/617.773 FPS.
-* CL latency: 51.60/53.61 us versus 78.32/79.14 us.
-* CL SP: 99.77/101.00 GFLOPS versus 101.69/101.71 GFLOPS.
+The native 4K60 Wave5 benchmark measured 59.998078 FPS with GPU work.
+The actual One-KVM service received continuous GLES load while a video-only
+browser decoded 2106 frames at 3840x2160 in 35 seconds. Its steady encoder
+samples remained around 60 FPS. No HID, sound request or ptrace was used.
 
-DMA median and CL SP fail parity. The performance gate remains closed;
-frequency at probe exit does not prove residency throughout each kernel.
-No performance-governor numbers replace these default-policy samples.
+The independent negative DT restored only dma-coherent. Six minimal Vulkan
+paths passed, but the first native CL kernel produced job slot 1 exception
+0x51, INSTR_INVALID_ENC, and CL error -14. It was stopped immediately and
+not performance-tested. This is not an AS0 page fault; it rejects that DT
+setting without claiming the cache failure's exact microarchitecture.
+Keep dma-coherent absent in the tested default DT.
 
-mpgpu utilization averaged 90.24 percent under continuous load and 47.60
-percent at half duty; idle settled to zero. Five frequency levels passed.
-GPU-only emul_temp=96000 changed cooling state 0 to 1 and frequency from
-800 to 666.7 MHz. Clearing emul_temp restored state 0 and 800 MHz. No
-trip, PWM or regulator setting was changed.
+After rollback to 5.15, carrier was up but DHCP failed. Serial recovery
+restored helpers and performed one further normal 5.15 reboot; SSH/DHCP
+then recovered. Final boot/registration hashes, kernel build ID, four
+services, UDC and helper restoration passed. Only volatile reboot_mode
+changed from watchdog_reboot to normal. This remains an unattended-rollback
+limitation, not a reason to weaken the generic tool's identity checks.
 
-The native 4K60 Wave5 H.264 benchmark measured 59.993619 FPS alone and
-59.997769 FPS with GPU submissions (600 frames each). One-KVM service
-concurrency did not finish: the test queried HTTP before the restarted
-service was ready. The runner then rolled back, so the independent
-dma-coherent DT was not booted. Neither gate is claimed as passed.
-
-Both RAM trials returned to default 5.15; protected boot/registration
-hashes, four services, UDC and temporary helper restoration were checked.
-The generic tool's final empty-module-directory cleanup failed because
-it passed the full inventory in a single SSH exec argument; the separate
-tool branch fixes that and still awaits hardware retest. Retained private
-trial directories and ownership markers must not be recursively removed.
-
-Full evidence, artifact hashes and remaining gates are documented in
-vim4-kvm/docs/bringup/2026-10-31-kbase-r10-uhd5.md. Product promotion,
-formal source-lock changes and proprietary binary distribution are not
-authorized by these partial results.
+The main tool's compact cleanup command removed the owned empty module
+mountpoint, including the r10 marker. 140 evidence files were hash-checked;
+only the private GStreamer registry cache was omitted. All board tickets
+were released. Formal pins/default boot were not changed and no proprietary
+blob was published. See vim4-kvm/docs/bringup/2026-10-31-kbase-r11-policy.md
+and docs/gpu-kbase-uhd5-integration.md for the proposal awaiting user review.
