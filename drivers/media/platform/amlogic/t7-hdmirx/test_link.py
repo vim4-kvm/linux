@@ -54,10 +54,16 @@ static void t7_hdmirx_update_drm(struct t7_hdmirx *rx) { (void)rx; }
 static bool signal_valid, source_present, hdmi2 = true, pll_fail, late_alignment, lose_during_wait;
 static bool unsupported_signal, unsupported_color, unstable_timings;
 static unsigned int pll_calls, pcs_calls, queued, canceled, last_delay, meter_resets;
-static unsigned int profile_changes;
+static unsigned int profile_changes, recovery_wakes;
+static void *system_wq;
 static u32 meter_reset;
 static u32 cable_hz;
 static struct t7_hdmirx receiver;
+static void mod_delayed_work(void *queue, struct delayed_work *work, unsigned int delay) {
+    (void)queue; (void)work;
+    assert(receiver.link->lock.held && !receiver.link->users && delay==0);
+    recovery_wakes++;
+}
 static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *c) {
     (void)rx; *c=(struct t7_hdmirx_color){.depth=8,.full=1}; return unsupported_color?-ERANGE:0;
 }
@@ -177,7 +183,11 @@ int main(void)
     signal_valid = false; tick(&link, 10);
     assert(!link.ready && pll_calls == 1 && meter_resets == resets_before);
     t7_hdmirx_stream_put(&dev); tick(&link, 10); assert(pll_calls == 1);
-    t7_hdmirx_stream_put(&dev); tick(&link, 4); assert(link.ready && pll_calls == 2);
+    assert(!recovery_wakes);
+    t7_hdmirx_stream_put(&dev);
+    assert(recovery_wakes==1 && !link.previous_cable && !link.stable_samples);
+    tick(&link, 3); assert(!link.ready && pll_calls==1);
+    tick(&link, 1); assert(link.ready && pll_calls == 2);
     signal_valid = false; source_present = false; tick(&link, 10);
     assert(!link.ready && !link.configured && !link.stable_samples && pll_calls == 2);
     source_present = true; hdmi2 = false; tick(&link, 10); assert(pll_calls == 2);
@@ -241,6 +251,11 @@ int main(void)
     unstable_timings=false; tick(&link,1); assert(link.ready);
     t7_hdmirx_link_stop(&link);
     assert(canceled == 1 && !link.ready);
+    unsigned int wakes_before_stop=recovery_wakes, queued_before_stop=queued;
+    link.users=1;
+    t7_hdmirx_stream_put(&dev);
+    t7_hdmirx_link_work(&link.work.work);
+    assert(recovery_wakes==wakes_before_stop && queued==queued_before_stop);
     puts("Receiver recovery: absent/delayed source, DMA leases, PLL failure and late alignment passed");
 }
 '''

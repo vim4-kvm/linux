@@ -247,6 +247,7 @@ struct t7_hdmirx_link {
 	bool previous_uhd;
 	bool ready;
 	bool configured;
+	bool stopping;
 };
 
 struct t7_hdmirx {
@@ -2078,6 +2079,7 @@ EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_bt601);
 void t7_hdmirx_stream_put(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	bool recover;
 
 	mutex_lock(&rx->link->lock);
 	if (WARN_ON(!rx->link->users)) {
@@ -2085,6 +2087,16 @@ void t7_hdmirx_stream_put(struct device *dev)
 		return;
 	}
 	rx->link->users--;
+	recover = !rx->link->users && !rx->link->ready && !rx->link->stopping;
+	if (recover) {
+		/* The last DMA owner is gone. Start a fresh qualification window
+		 * now rather than waiting for the idle monitor's next tick.
+		 */
+		rx->link->stable_samples = 0;
+		rx->link->previous_cable = 0;
+	}
+	if (recover)
+		mod_delayed_work(system_wq, &rx->link->work, 0);
 	mutex_unlock(&rx->link->lock);
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_put);
@@ -2267,14 +2279,18 @@ out:
 	 */
 	delay_ms = !link->ready && !link->users && link->previous_cable &&
 		ret != -EAGAIN ? 50 : 250;
+	if (!link->stopping)
+		schedule_delayed_work(&link->work, msecs_to_jiffies(delay_ms));
 	mutex_unlock(&link->lock);
-	schedule_delayed_work(&link->work, msecs_to_jiffies(delay_ms));
 }
 
 static void t7_hdmirx_link_stop(void *data)
 {
 	struct t7_hdmirx_link *link = data;
 
+	mutex_lock(&link->lock);
+	link->stopping = true;
+	mutex_unlock(&link->lock);
 	cancel_delayed_work_sync(&link->work);
 	WRITE_ONCE(link->ready, false);
 }
