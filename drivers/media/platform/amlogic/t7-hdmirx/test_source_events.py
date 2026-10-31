@@ -8,6 +8,7 @@ source = Path(__file__).with_name('t7-vdin-test.c').read_text()
 functions = source[source.index('static void t7_vdin_source_work'):
                    source.index('static int t7_vdin_querycap')]
 fixture = r'''
+#define t7_vdin_trace_buffer(...) ((void)0)
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>

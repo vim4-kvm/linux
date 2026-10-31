@@ -5,9 +5,13 @@
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/crc32.h>
+#define CREATE_TRACE_POINTS
+#include <trace/events/t7_vdin.h>
 #include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
 #include <linux/dma-buf.h>
+#include <linux/dma-direct.h>
+#include <linux/iommu.h>
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/kref.h>
@@ -101,11 +105,15 @@ struct t7_vdin_slot {
 
 struct t7_vdin_buffer {
 	struct vb2_v4l2_buffer vb;
+	u64 generation, ticket;
 	struct list_head list;
 	struct dma_buf *lease;
 	dma_addr_t dma;
 	bool hardware_used;
 };
+
+/* vb2 allocates this object through its first vb2_v4l2_buffer member. */
+static_assert(__builtin_offsetof(struct t7_vdin_buffer, vb) == 0);
 
 struct t7_vdin_snapshot {
 	size_t size;
@@ -113,6 +121,7 @@ struct t7_vdin_snapshot {
 };
 
 struct t7_vdin {
+	u64 generation, ticket;
 	unsigned int width, height, stride, frame_size, allocation_size, frame_capacity;
 	/* Source lease geometry is independent of the downscaled DMA image. */
 	unsigned int input_width, input_height;
@@ -217,6 +226,27 @@ static void t7_vdin_update(struct t7_vdin *vdin, u32 reg, u32 mask, u32 value)
 #include "t7-vdin-hdr.h"
 #include "t7-vdin-hlg.h"
 
+/* Phases: arm, done, error, requeue, cleanup, retain, begin, end, source change. */
+static void t7_vdin_trace_buffer(struct t7_vdin *vdin,
+				 struct t7_vdin_buffer *buffer, int phase)
+{
+	trace_t7_vdin_buffer(buffer ? buffer->generation : vdin->generation,
+			     buffer ? buffer->ticket : 0,
+			     buffer ? buffer->vb.vb2_buf.index : 0,
+			     buffer && buffer->lease ? buffer->lease->priv : NULL,
+			     buffer && !device_iommu_mapped(vdin->dev) ?
+			     dma_to_phys(vdin->dev, buffer->dma) : 0,
+			     phase);
+}
+
+static void t7_vdin_complete_buffer(struct t7_vdin *vdin,
+				    struct t7_vdin_buffer *buffer,
+				    enum vb2_buffer_state state)
+{
+	t7_vdin_trace_buffer(vdin, buffer, state == VB2_BUF_STATE_DONE ? 1 : 2);
+	vb2_buffer_done(&buffer->vb.vb2_buf, state);
+}
+
 /* Canonical LE samples match the values sent to the LUT data ports. */
 static u32 t7_vdin_lut_crc(const u32 *lut, unsigned int count,
 			   unsigned int shift)
@@ -248,8 +278,14 @@ static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
 	dma_addr_t address = slot->dma;
 
 	if (vdin->direct_dma) {
-		if (!slot->buffer)
+		if (!slot->buffer) {
 			slot->buffer = t7_vdin_next_buffer(vdin);
+			if (slot->buffer) {
+				slot->buffer->generation = vdin->generation;
+				slot->buffer->ticket = ++vdin->ticket;
+				t7_vdin_trace_buffer(vdin, slot->buffer, 0);
+			}
+		}
 		if (!slot->buffer)
 			return;
 		slot->buffer->hardware_used = true;
@@ -650,7 +686,7 @@ static void t7_vdin_return_buffers(struct t7_vdin *vdin, enum vb2_buffer_state s
 	struct t7_vdin_buffer *buffer;
 
 	while ((buffer = t7_vdin_next_buffer(vdin)))
-		vb2_buffer_done(&buffer->vb.vb2_buf, state);
+		t7_vdin_complete_buffer(vdin, buffer, state);
 }
 
 static void t7_vdin_ring_begin(struct t7_vdin *vdin)
@@ -843,8 +879,8 @@ static int t7_vdin_thread(void *data)
 		}
 		t7_vdin_ring_release(vdin, slot);
 		mutex_unlock(&vdin->lock);
-		vb2_buffer_done(&buffer->vb.vb2_buf,
-				ret ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
+		t7_vdin_complete_buffer(vdin, buffer,
+					ret ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
 		if (ret && ret != -EAGAIN)
 			break;
 	}
@@ -867,7 +903,7 @@ static int t7_vdin_thread(void *data)
 
 			if (buffer) {
 				vdin->slots[i].buffer = NULL;
-				vb2_buffer_done(&buffer->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+				t7_vdin_complete_buffer(vdin, buffer, VB2_BUF_STATE_ERROR);
 			}
 		}
 	}
@@ -937,6 +973,7 @@ static void t7_vdin_buffer_cleanup(struct vb2_buffer *vb)
 	 * retain used direct buffers too, until hardware reboot. ERROR contents are
 	 * invalid and the faulted queue cannot restart. Unused buffers may be freed.
 	 */
+	t7_vdin_trace_buffer(vdin, buffer, vdin->faulted && buffer->hardware_used ? 5 : 4);
 	if (buffer->lease && !(vdin->faulted && buffer->hardware_used))
 		dma_buf_put(buffer->lease);
 	buffer->lease = NULL;
@@ -960,6 +997,7 @@ static void t7_vdin_buffer_queue(struct vb2_buffer *vb)
 	unsigned long flags;
 
 	spin_lock_irqsave(&vdin->queue_lock, flags);
+	t7_vdin_trace_buffer(vdin, buffer, 3);
 	list_add_tail(&buffer->list, &vdin->queued);
 	spin_unlock_irqrestore(&vdin->queue_lock, flags);
 	wake_up(&vdin->buffer_wait);
@@ -979,6 +1017,8 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	}
 	if (!ret) {
 		vdin->receiver_lease = true;
+		vdin->generation++;
+		t7_vdin_trace_buffer(vdin, NULL, 6);
 		vdin->streaming = true;
 		vdin->thread = kthread_run(t7_vdin_thread, vdin, "t7-vdin-capture");
 		if (IS_ERR(vdin->thread)) {
@@ -1005,6 +1045,7 @@ static void t7_vdin_stop_streaming(struct vb2_queue *queue)
 	t7_vdin_return_buffers(vdin, VB2_BUF_STATE_ERROR);
 	mutex_lock(&vdin->lock);
 	vdin->streaming = false;
+	t7_vdin_trace_buffer(vdin, NULL, 7);
 	mutex_unlock(&vdin->lock);
 }
 
@@ -1043,6 +1084,7 @@ static void t7_vdin_source_work(struct work_struct *work)
 				delta > vdin->source_period / 2000)))) {
 			event.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION;
 			vdin->source_changes++;
+			t7_vdin_trace_buffer(vdin, NULL, 8);
 			v4l2_event_queue(&vdin->video, &event);
 		}
 		vdin->source_seen = true;

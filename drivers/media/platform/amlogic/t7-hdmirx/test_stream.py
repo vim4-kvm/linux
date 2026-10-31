@@ -8,15 +8,19 @@ import tempfile
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
 source = source.replace('#include "t7-vdin-hdr.h"', Path(__file__).with_name('t7-vdin-hdr.h').read_text())
 source = source.replace('#include "t7-vdin-hlg.h"', Path(__file__).with_name('t7-vdin-hlg.h').read_text())
-source = source[:source.index('/* Canonical LE')] + source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer'):]
+# Ownership is exercised below; trace serialization and CRC have separate tests.
+source = (source[:source.index('static void t7_vdin_trace_buffer(')] +
+          source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer'):])
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('enum t7_vdin_slot_state {'):source.index('static void __iomem *t7_vdin_reg')]
 hardware = source[source.index('static void __iomem *t7_vdin_reg'):source.index('static int t7_vdin_capture')]
 stream = source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)\n{'):
                 source.index('static const struct vb2_ops t7_vdin_queue_ops')]
 prefix = r'''
-#define vb2_get_num_buffers(q) 0U
+#define t7_vdin_trace_buffer(...) ((void)0)
 #define t7_vdin_record_hdr_luts(...) ((void)0)
+#define t7_vdin_complete_buffer(v,b,s) vb2_buffer_done(&(b)->vb.vb2_buf,s)
+#define vb2_get_num_buffers(q) 0U
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
@@ -479,7 +483,8 @@ with tempfile.TemporaryDirectory() as directory:
     binary = Path(directory) / 'stream'
     code.write_text(prefix + defines + '\n' + types + stubs + hardware + stream + checks)
     subprocess.run(['cc', '-std=gnu11', '-pthread', '-Wall', '-Wextra', '-Werror',
+                    '-I', str(Path(__file__).parent),
                     '-O1', '-g', '-fsanitize=address,undefined',
-                    '-I', str(Path(__file__).parent), '-Wno-unused-parameter', '-Wno-unused-function', str(code),
+                    '-Wno-unused-parameter', '-Wno-unused-function', str(code),
                     '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)
