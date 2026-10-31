@@ -17,6 +17,8 @@ hardware = source[source.index('static void __iomem *t7_vdin_reg'):source.index(
 stream = source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)\n{'):
                 source.index('static const struct vb2_ops t7_vdin_queue_ops')]
 prefix = r'''
+#include <linux/videodev2.h>
+#define div_u64(a,b) ((a)/(b))
 #define t7_vdin_trace_buffer(...) ((void)0)
 #define t7_vdin_record_hdr_luts(...) ((void)0)
 #define t7_vdin_complete_buffer(v,b,s) vb2_buffer_done(&(b)->vb.vb2_buf,s)
@@ -208,6 +210,12 @@ static bool t7_hdmirx_stream_is_yuv(void *dev) { (void)dev; return false; }
 static bool t7_hdmirx_stream_needs_yuv444_swap(void *dev) { (void)dev; return false; }
 static bool t7_hdmirx_stream_is_full_range(void *dev) { (void)dev; return true; }
 static bool t7_hdmirx_stream_is_bt601(void *dev) { (void)dev; return false; }
+static int t7_hdmirx_query_timings(void *dev, struct v4l2_dv_timings *mode,
+                                 struct v4l2_fract *interval) {
+    (void)dev;
+    mode->bt.width=3840; mode->bt.height=2160;
+    *interval=(struct v4l2_fract){1,60}; return 0;
+}
 static int t7_hdmirx_stream_get(void *dev, unsigned int width, unsigned int height) {
     int ret=t7_hdmirx_check_video(dev);
     if (!ret) receiver_users++;
@@ -279,6 +287,7 @@ static void setup(struct t7_vdin_buffer b[4]) {
     memset(registers,0,sizeof(registers)); memset(cpu_owned,0,sizeof(cpu_owned));
     pthread_mutex_init(&receiver.lock.native,NULL); pthread_mutex_init(&receiver.queue_lock,NULL);
     pthread_mutex_init(&receiver.irq_lock,NULL);
+    pthread_mutex_init(&receiver.video_lock.native,NULL);
     init_wait(&receiver.buffer_wait); init_wait(&receiver.done.wait);
     receiver.queued.next=receiver.queued.prev=&receiver.queued;
     receiver.queue.priv=&receiver; receiver.queue.mem_ops=&mem_ops; receiver.regs=registers;

@@ -1003,11 +1003,31 @@ static void t7_vdin_buffer_queue(struct vb2_buffer *vb)
 	wake_up(&vdin->buffer_wait);
 }
 
+/* video_lock serializes the monitor with the already qualified new lease.
+ * Otherwise its cached loss becomes a second source-change after STREAMON,
+ * making userspace retire and negotiate the very same recovered source again.
+ */
+static void t7_vdin_source_resumed(struct t7_vdin *vdin)
+{
+	struct v4l2_dv_timings timings;
+	struct v4l2_fract interval;
+
+	if (t7_hdmirx_query_timings(vdin->receiver, &timings, &interval))
+		return;
+	vdin->source_seen = true;
+	vdin->source_locked = true;
+	vdin->source_width = timings.bt.width;
+	vdin->source_height = timings.bt.height;
+	vdin->source_period = interval.denominator ?
+		div_u64((u64)interval.numerator * 1000000, interval.denominator) : 0;
+}
+
 static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 {
 	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
 	int ret;
 
+	mutex_lock(&vdin->video_lock);
 	mutex_lock(&vdin->lock);
 	ret = vdin->faulted ? -EIO :
 		t7_hdmirx_stream_get(vdin->receiver, vdin->input_width, vdin->input_height);
@@ -1017,6 +1037,7 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	}
 	if (!ret) {
 		vdin->receiver_lease = true;
+		t7_vdin_source_resumed(vdin);
 		vdin->generation++;
 		t7_vdin_trace_buffer(vdin, NULL, 6);
 		vdin->streaming = true;
@@ -1030,6 +1051,7 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 		}
 	}
 	mutex_unlock(&vdin->lock);
+	mutex_unlock(&vdin->video_lock);
 	if (ret)
 		t7_vdin_return_buffers(vdin, VB2_BUF_STATE_QUEUED);
 	return ret;
