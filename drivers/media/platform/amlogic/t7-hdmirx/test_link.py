@@ -151,7 +151,9 @@ static void tick(struct t7_hdmirx_link *link, int count)
 {
     while (count--) {
         t7_hdmirx_link_work(&link->work.work);
-        assert(!link->lock.held && last_delay == 250);
+        assert(!link->lock.held && (last_delay == 250 || last_delay == 50));
+        if (link->ready || link->users || !source_present || unstable_timings)
+            assert(last_delay == 250);
     }
 }
 int main(void)
@@ -164,8 +166,11 @@ int main(void)
     assert(!link.ready && !pll_calls && queued == 100);
     assert(t7_hdmirx_stream_get(&dev,3840,2160) == -ENOLINK && !link.users);
     source_present = true; cable_hz = 148500000;
-    tick(&link, 3); assert(!pll_calls);
+    for (unsigned int sample=0; sample<3; sample++) {
+        tick(&link, 1); assert(!pll_calls && last_delay==50);
+    }
     tick(&link, 1); assert(pll_calls == 1 && pcs_calls == 1 && link.ready);
+    assert(last_delay==250);
     tick(&link, 100); assert(pll_calls == 1);
     assert(!t7_hdmirx_stream_get(&dev,3840,2160) && !t7_hdmirx_stream_get(&dev,3840,2160) && link.users == 2);
     unsigned int resets_before = meter_resets;

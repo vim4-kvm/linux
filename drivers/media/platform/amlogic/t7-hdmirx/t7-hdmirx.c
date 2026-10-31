@@ -2128,6 +2128,7 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	bool next_uhd, yuv;
 	bool sampled = false;
 	u32 previous_pll;
+	unsigned int delay_ms;
 	struct t7_hdmirx_color color;
 	const char *reason = "video-status";
 	int ret;
@@ -2259,8 +2260,15 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	}
 	WRITE_ONCE(link->ready, !ret);
 out:
+	/* A recovered cable still needs three matching clock samples plus the
+	 * PLL/PCS and video checks above. Sample recovery at 50ms (150ms total),
+	 * rather than stretching it across three idle-monitor periods. Keep the
+	 * 250ms retry cadence for torn timing snapshots and absent sources.
+	 */
+	delay_ms = !link->ready && !link->users && link->previous_cable &&
+		ret != -EAGAIN ? 50 : 250;
 	mutex_unlock(&link->lock);
-	schedule_delayed_work(&link->work, msecs_to_jiffies(250));
+	schedule_delayed_work(&link->work, msecs_to_jiffies(delay_ms));
 }
 
 static void t7_hdmirx_link_stop(void *data)
