@@ -7,6 +7,7 @@ import tempfile
 
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
 source = source.replace('#include "t7-vdin-hdr.h"', Path(__file__).with_name('t7-vdin-hdr.h').read_text())
+source = source.replace('#include "t7-vdin-hlg.h"', Path(__file__).with_name('t7-vdin-hlg.h').read_text())
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('enum t7_vdin_slot_state {'):source.index('static void __iomem *t7_vdin_reg')]
 hardware = source[source.index('static void __iomem *t7_vdin_reg'):source.index('static int t7_vdin_capture')]
@@ -195,6 +196,7 @@ static void vb2_queue_error(struct vb2_queue *q) {
 static int t7_hdmirx_check_video(void *dev) { return fail_timing?-ENOLINK:0; }
 static unsigned int receiver_users;
 static bool t7_hdmirx_stream_is_hdr(void *dev) { (void)dev; return false; }
+static bool t7_hdmirx_stream_is_hlg(void *dev) { (void)dev; return false; }
 static bool t7_hdmirx_stream_is_yuv(void *dev) { (void)dev; return false; }
 static bool t7_hdmirx_stream_needs_yuv444_swap(void *dev) { (void)dev; return false; }
 static bool t7_hdmirx_stream_is_full_range(void *dev) { (void)dev; return true; }
@@ -475,6 +477,6 @@ with tempfile.TemporaryDirectory() as directory:
     code.write_text(prefix + defines + '\n' + types + stubs + hardware + stream + checks)
     subprocess.run(['cc', '-std=gnu11', '-pthread', '-Wall', '-Wextra', '-Werror',
                     '-O1', '-g', '-fsanitize=address,undefined',
-                    '-Wno-unused-parameter', '-Wno-unused-function', str(code),
+                    '-I', str(Path(__file__).parent), '-Wno-unused-parameter', '-Wno-unused-function', str(code),
                     '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

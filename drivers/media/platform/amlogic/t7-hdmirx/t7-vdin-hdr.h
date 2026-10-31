@@ -101,23 +101,23 @@ static void t7_vdin_hdr_configure(struct t7_vdin *vdin)
 {
 	static const int input[9] = {1196, 0, 1724, 1196, -193, -668, 1196, 2200, 0};
 	static const int output[9] = {186, 627, 63, -103, -345, 448, 448, -407, -41};
-	static const int gamut[9] = {425, -150, -18, -31, 290, -2, -4, -25, 286};
+	static const int gamut[9] = {3401, -1204, -149, -255, 2320, -17, -37, -206, 2291};
 	unsigned int i;
 
 	t7_vdin_hdr_matrix(vdin, 0x1282, input);
 	t7_vdin_write(vdin, 0x128a, 0);
 	t7_vdin_write(vdin, 0x128b, 0);
 	t7_vdin_write(vdin, 0x128c, ((u32)-64 << 16) | ((-512) & 0xfff));
-	t7_vdin_write(vdin, 0x128d, (-512) & 0xfff);
+	t7_vdin_write(vdin, 0x128d, (u32)-512);
 	t7_vdin_hdr_matrix(vdin, 0x128e, output);
 	t7_vdin_write(vdin, 0x1296, 0x00400200);
 	t7_vdin_write(vdin, 0x1297, 512);
 	t7_vdin_write(vdin, 0x1298, 0);
 	t7_vdin_write(vdin, 0x1299, 0);
-	t7_vdin_write(vdin, 0x12b0, 0x18);
+	t7_vdin_write(vdin, 0x12b0, BIT(4) | 11);
 	for (i = 0; i < 4; i++)
 		t7_vdin_write(vdin, 0x12b1 + i,
-			      ((gamut[2 * i + 1] & 0xffff) << 16) |
+			      ((u32)(gamut[2 * i + 1] & 0xffff) << 16) |
 			      (gamut[2 * i] & 0xffff));
 	t7_vdin_write(vdin, 0x12b5, gamut[8]);
 	t7_vdin_write(vdin, 0x12a8, 1);

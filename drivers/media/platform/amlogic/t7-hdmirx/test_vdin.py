@@ -6,6 +6,7 @@ import tempfile
 
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
 source = source.replace('#include "t7-vdin-hdr.h"', Path(__file__).with_name('t7-vdin-hdr.h').read_text())
+source = source.replace('#include "t7-vdin-hlg.h"', Path(__file__).with_name('t7-vdin-hlg.h').read_text())
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('enum t7_vdin_slot_state {'):source.index('static void __iomem *t7_vdin_reg')]
 functions = source[source.index('static void __iomem *t7_vdin_reg'):
@@ -62,6 +63,7 @@ static unsigned int pins, requests, timing_checks, receiver_users;
 static unsigned int pq_writes, gain_writes, oetf_writes;
 static bool hdr_input, yuv_input, yuv444_input;
 static bool t7_hdmirx_stream_is_hdr(struct device *dev) { (void)dev; return hdr_input; }
+static bool t7_hdmirx_stream_is_hlg(struct device *dev) { (void)dev; return false; }
 static bool t7_hdmirx_stream_is_yuv(struct device *dev) { (void)dev; return hdr_input || yuv_input; }
 static bool t7_hdmirx_stream_needs_yuv444_swap(struct device *dev) { (void)dev; return yuv444_input; }
 static bool t7_hdmirx_stream_is_full_range(struct device *dev) { (void)dev; return !hdr_input && !yuv_input; }
@@ -217,7 +219,7 @@ static void scenarios(void)
     reset(); receiver.nv12=true;hdr_input=true;
     t7_vdin_configure(&receiver);
     assert(pq_writes==143 && gain_writes==75 && oetf_writes==75);
-    assert(readl(registers+0x12b0*4)==0x18);
+    assert(readl(registers+0x12b0*4)==0x1b);
     assert(!(readl(registers+VDIN_HDR_CTRL*4)&BIT(16)));
     assert(readl(registers+VDIN_HDR_MATRIX_OUT*4)==1);
     hdr_input=false;yuv_input=true;t7_vdin_configure(&receiver);
@@ -265,5 +267,5 @@ with tempfile.TemporaryDirectory() as directory:
     executable = Path(directory) / 'vdin'
     code.write_text(prefix + defines + '\n' + types + mmio + functions + checks)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
-                    '-Wno-unused-parameter', str(code), '-o', str(executable)], check=True)
+                    '-I', str(Path(__file__).parent), '-Wno-unused-parameter', str(code), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)

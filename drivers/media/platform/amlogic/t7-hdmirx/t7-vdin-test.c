@@ -212,6 +212,7 @@ static void t7_vdin_update(struct t7_vdin *vdin, u32 reg, u32 mask, u32 value)
 }
 
 #include "t7-vdin-hdr.h"
+#include "t7-vdin-hlg.h"
 
 static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin);
 
@@ -237,7 +238,8 @@ static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
 			      (address + vdin->stride * vdin->height) >> 4);
 	vdin->dma_idle = false;
 	vdin->ring_running = true;
-	if (vdin->hdr_curve_pending && t7_hdmirx_stream_is_hdr(vdin->receiver)) {
+	if (vdin->hdr_curve_pending && t7_hdmirx_stream_is_hdr(vdin->receiver) &&
+	    !t7_hdmirx_stream_is_hlg(vdin->receiver)) {
 		/* Requests are gated at an AXI-complete frame boundary. Ignore the
 		 * first frame after a LUT change if programming crosses blanking.
 		 */
@@ -453,8 +455,11 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 		t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 1);
 		t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 1);
 	}
-	if (t7_hdmirx_stream_is_hdr(vdin->receiver))
+	if (t7_hdmirx_stream_is_hlg(vdin->receiver) && vdin->nv12) {
+		t7_vdin_hlg_configure(vdin);
+	} else if (t7_hdmirx_stream_is_hdr(vdin->receiver)) {
 		t7_vdin_hdr_configure(vdin);
+	}
 	t7_vdin_update(vdin, VDIN_LFIFO_CTRL, GENMASK(13, 0) | BIT(17) | BIT(18),
 		       BIT(17) | 0x780);
 	t7_vdin_write(vdin, VDIN_WR_CTRL2, BIT(18) | (2 << 12));
@@ -1063,6 +1068,7 @@ static void t7_vdin_fill_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 		.bytesperline = stride,
 		.sizeimage = vdin->nv12 ? stride * ALIGN(height, 16) * 3 / 2 : stride * height,
 		.colorspace = vdin->nv12 ? V4L2_COLORSPACE_REC709 : V4L2_COLORSPACE_SRGB,
+		/* Keep the vendor product's SDR video interpretation. */
 		.xfer_func = vdin->nv12 ? V4L2_XFER_FUNC_709 : V4L2_XFER_FUNC_SRGB,
 		.ycbcr_enc = vdin->nv12 ? V4L2_YCBCR_ENC_709 : V4L2_YCBCR_ENC_DEFAULT,
 		.quantization = vdin->nv12 ? V4L2_QUANTIZATION_LIM_RANGE :

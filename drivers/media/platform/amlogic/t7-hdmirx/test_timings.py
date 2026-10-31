@@ -12,6 +12,7 @@ vdin = Path(__file__).with_name('t7-vdin-test.c').read_text()
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define T7_RX_'))
 types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
                source.index('static int t7_hdmirx_validate_edid')]
+types = Path(__file__).with_name('t7-hlg-state.h').read_text() + types
 functions = source[source.index('static u32 t7_hdmirx_core_read16'):
                    source.index('static u32 t7_hdmirx_audio_word')]
 functions = source[source.index('static u32 t7_hdmirx_meter_hz'):
