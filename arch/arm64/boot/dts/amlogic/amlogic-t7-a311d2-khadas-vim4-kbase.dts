@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Candidate only: preserve the display M0 profile and all its peripherals. */
+#include "amlogic-t7-a311d2-khadas-vim4-display-m0.dts"
+
+&gpu {
+	compatible = "khadas,vim4-mali-kbase-r44p0";
+	/* VDD_GPU stays at its existing always-on setting; no voltage scaling. */
+	/delete-property/ mali-supply;
+};
