@@ -738,6 +738,8 @@ struct dec_info {
 };
 
 struct enc_info {
+	struct vpu_buf vb_vui;
+	u32 vui_bits;
 	bool destroyed;
 	struct enc_open_param open_param;
 	struct enc_initial_info initial_info;

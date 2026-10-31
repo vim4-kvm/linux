@@ -4,9 +4,14 @@
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
+#include <linux/crc32.h>
+#define CREATE_TRACE_POINTS
+#include <trace/events/t7_vdin.h>
 #include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
 #include <linux/dma-buf.h>
+#include <linux/dma-direct.h>
+#include <linux/iommu.h>
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/kref.h>
@@ -100,11 +105,15 @@ struct t7_vdin_slot {
 
 struct t7_vdin_buffer {
 	struct vb2_v4l2_buffer vb;
+	u64 generation, ticket;
 	struct list_head list;
 	struct dma_buf *lease;
 	dma_addr_t dma;
 	bool hardware_used;
 };
+
+/* vb2 allocates this object through its first vb2_v4l2_buffer member. */
+static_assert(__builtin_offsetof(struct t7_vdin_buffer, vb) == 0);
 
 struct t7_vdin_snapshot {
 	size_t size;
@@ -112,6 +121,7 @@ struct t7_vdin_snapshot {
 };
 
 struct t7_vdin {
+	u64 generation, ticket;
 	unsigned int width, height, stride, frame_size, allocation_size, frame_capacity;
 	/* Source lease geometry is independent of the downscaled DMA image. */
 	unsigned int input_width, input_height;
@@ -172,6 +182,8 @@ struct t7_vdin {
 	const char *last_stop_reason;
 	u32 hdr_gain[149], hdr_oetf[149];
 	bool hdr_curve_pending;
+	u32 hdr_gain_programmed_crc, hdr_oetf_programmed_crc;
+	bool hdr_profile_programmed;
 };
 
 static void __iomem *t7_vdin_reg(struct t7_vdin *vdin, u32 reg)
@@ -212,6 +224,50 @@ static void t7_vdin_update(struct t7_vdin *vdin, u32 reg, u32 mask, u32 value)
 }
 
 #include "t7-vdin-hdr.h"
+#include "t7-vdin-hlg.h"
+
+/* Phases: arm, done, error, requeue, cleanup, retain, begin, end, source change. */
+static void t7_vdin_trace_buffer(struct t7_vdin *vdin,
+				 struct t7_vdin_buffer *buffer, int phase)
+{
+	trace_t7_vdin_buffer(buffer ? buffer->generation : vdin->generation,
+			     buffer ? buffer->ticket : 0,
+			     buffer ? buffer->vb.vb2_buf.index : 0,
+			     buffer && buffer->lease ? buffer->lease->priv : NULL,
+			     buffer && !device_iommu_mapped(vdin->dev) ?
+			     dma_to_phys(vdin->dev, buffer->dma) : 0,
+			     phase);
+}
+
+static void t7_vdin_complete_buffer(struct t7_vdin *vdin,
+				    struct t7_vdin_buffer *buffer,
+				    enum vb2_buffer_state state)
+{
+	t7_vdin_trace_buffer(vdin, buffer, state == VB2_BUF_STATE_DONE ? 1 : 2);
+	vb2_buffer_done(&buffer->vb.vb2_buf, state);
+}
+
+/* Canonical LE samples match the values sent to the LUT data ports. */
+static u32 t7_vdin_lut_crc(const u32 *lut, unsigned int count,
+			   unsigned int shift)
+{
+	u32 crc = ~0U;
+	unsigned int i;
+
+	for (i = 0; i < count; i++) {
+		__le32 value = cpu_to_le32(lut[i] >> shift);
+
+		crc = crc32_le(crc, (u8 *)&value, sizeof(value));
+	}
+	return crc ^ ~0U;
+}
+
+static void t7_vdin_record_hdr_luts(struct t7_vdin *vdin)
+{
+	vdin->hdr_gain_programmed_crc = t7_vdin_lut_crc(vdin->hdr_gain, 149, 0);
+	vdin->hdr_oetf_programmed_crc = t7_vdin_lut_crc(vdin->hdr_oetf, 149, 2);
+	vdin->hdr_profile_programmed = true;
+}
 
 static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin);
 
@@ -222,8 +278,14 @@ static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
 	dma_addr_t address = slot->dma;
 
 	if (vdin->direct_dma) {
-		if (!slot->buffer)
+		if (!slot->buffer) {
 			slot->buffer = t7_vdin_next_buffer(vdin);
+			if (slot->buffer) {
+				slot->buffer->generation = vdin->generation;
+				slot->buffer->ticket = ++vdin->ticket;
+				t7_vdin_trace_buffer(vdin, slot->buffer, 0);
+			}
+		}
 		if (!slot->buffer)
 			return;
 		slot->buffer->hardware_used = true;
@@ -237,11 +299,13 @@ static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
 			      (address + vdin->stride * vdin->height) >> 4);
 	vdin->dma_idle = false;
 	vdin->ring_running = true;
-	if (vdin->hdr_curve_pending && t7_hdmirx_stream_is_hdr(vdin->receiver)) {
+	if (vdin->hdr_curve_pending && t7_hdmirx_stream_is_hdr(vdin->receiver) &&
+	    !t7_hdmirx_stream_is_hlg(vdin->receiver)) {
 		/* Requests are gated at an AXI-complete frame boundary. Ignore the
 		 * first frame after a LUT change if programming crosses blanking.
 		 */
 		t7_vdin_hdr_reload(vdin);
+		t7_vdin_record_hdr_luts(vdin);
 		vdin->ring_discard = true;
 	}
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR,
@@ -453,8 +517,13 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 		t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 1);
 		t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 1);
 	}
-	if (t7_hdmirx_stream_is_hdr(vdin->receiver))
+	vdin->hdr_profile_programmed = false;
+	if (t7_hdmirx_stream_is_hlg(vdin->receiver) && vdin->nv12) {
+		t7_vdin_hlg_configure(vdin);
+	} else if (t7_hdmirx_stream_is_hdr(vdin->receiver)) {
 		t7_vdin_hdr_configure(vdin);
+		t7_vdin_record_hdr_luts(vdin);
+	}
 	t7_vdin_update(vdin, VDIN_LFIFO_CTRL, GENMASK(13, 0) | BIT(17) | BIT(18),
 		       BIT(17) | 0x780);
 	t7_vdin_write(vdin, VDIN_WR_CTRL2, BIT(18) | (2 << 12));
@@ -617,7 +686,7 @@ static void t7_vdin_return_buffers(struct t7_vdin *vdin, enum vb2_buffer_state s
 	struct t7_vdin_buffer *buffer;
 
 	while ((buffer = t7_vdin_next_buffer(vdin)))
-		vb2_buffer_done(&buffer->vb.vb2_buf, state);
+		t7_vdin_complete_buffer(vdin, buffer, state);
 }
 
 static void t7_vdin_ring_begin(struct t7_vdin *vdin)
@@ -810,8 +879,8 @@ static int t7_vdin_thread(void *data)
 		}
 		t7_vdin_ring_release(vdin, slot);
 		mutex_unlock(&vdin->lock);
-		vb2_buffer_done(&buffer->vb.vb2_buf,
-				ret ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
+		t7_vdin_complete_buffer(vdin, buffer,
+					ret ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
 		if (ret && ret != -EAGAIN)
 			break;
 	}
@@ -834,7 +903,7 @@ static int t7_vdin_thread(void *data)
 
 			if (buffer) {
 				vdin->slots[i].buffer = NULL;
-				vb2_buffer_done(&buffer->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+				t7_vdin_complete_buffer(vdin, buffer, VB2_BUF_STATE_ERROR);
 			}
 		}
 	}
@@ -856,10 +925,16 @@ static int t7_vdin_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
 			       struct device *alloc_devs[])
 {
 	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
+	unsigned int limit = (192U * 1024 * 1024) / vdin->allocation_size;
 
 	/* Reject retries before vb2 can allocate a new CMA-backed buffer pool. */
 	if (vdin->faulted)
 		return -EIO;
+	/* Leave CMA for codec reference/work buffers; account for CREATE_BUFS. */
+	if (vb2_get_num_buffers(queue) >= limit)
+		return -ENOBUFS;
+	if (*buffers > limit - vb2_get_num_buffers(queue))
+		*buffers = limit - vb2_get_num_buffers(queue);
 	if (*planes)
 		return *planes == 1 && sizes[0] >= vdin->allocation_size ? 0 : -EINVAL;
 	*planes = 1;
@@ -898,6 +973,7 @@ static void t7_vdin_buffer_cleanup(struct vb2_buffer *vb)
 	 * retain used direct buffers too, until hardware reboot. ERROR contents are
 	 * invalid and the faulted queue cannot restart. Unused buffers may be freed.
 	 */
+	t7_vdin_trace_buffer(vdin, buffer, vdin->faulted && buffer->hardware_used ? 5 : 4);
 	if (buffer->lease && !(vdin->faulted && buffer->hardware_used))
 		dma_buf_put(buffer->lease);
 	buffer->lease = NULL;
@@ -921,9 +997,29 @@ static void t7_vdin_buffer_queue(struct vb2_buffer *vb)
 	unsigned long flags;
 
 	spin_lock_irqsave(&vdin->queue_lock, flags);
+	t7_vdin_trace_buffer(vdin, buffer, 3);
 	list_add_tail(&buffer->list, &vdin->queued);
 	spin_unlock_irqrestore(&vdin->queue_lock, flags);
 	wake_up(&vdin->buffer_wait);
+}
+
+/* video_lock serializes the monitor with the already qualified new lease.
+ * Otherwise its cached loss becomes a second source-change after STREAMON,
+ * making userspace retire and negotiate the very same recovered source again.
+ */
+static void t7_vdin_source_resumed(struct t7_vdin *vdin)
+{
+	struct v4l2_dv_timings timings;
+	struct v4l2_fract interval;
+
+	if (t7_hdmirx_query_timings(vdin->receiver, &timings, &interval))
+		return;
+	vdin->source_seen = true;
+	vdin->source_locked = true;
+	vdin->source_width = timings.bt.width;
+	vdin->source_height = timings.bt.height;
+	vdin->source_period = interval.denominator ?
+		div_u64((u64)interval.numerator * 1000000, interval.denominator) : 0;
 }
 
 static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
@@ -931,6 +1027,7 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
 	int ret;
 
+	mutex_lock(&vdin->video_lock);
 	mutex_lock(&vdin->lock);
 	ret = vdin->faulted ? -EIO :
 		t7_hdmirx_stream_get(vdin->receiver, vdin->input_width, vdin->input_height);
@@ -940,6 +1037,9 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	}
 	if (!ret) {
 		vdin->receiver_lease = true;
+		t7_vdin_source_resumed(vdin);
+		vdin->generation++;
+		t7_vdin_trace_buffer(vdin, NULL, 6);
 		vdin->streaming = true;
 		vdin->thread = kthread_run(t7_vdin_thread, vdin, "t7-vdin-capture");
 		if (IS_ERR(vdin->thread)) {
@@ -951,6 +1051,7 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 		}
 	}
 	mutex_unlock(&vdin->lock);
+	mutex_unlock(&vdin->video_lock);
 	if (ret)
 		t7_vdin_return_buffers(vdin, VB2_BUF_STATE_QUEUED);
 	return ret;
@@ -966,6 +1067,7 @@ static void t7_vdin_stop_streaming(struct vb2_queue *queue)
 	t7_vdin_return_buffers(vdin, VB2_BUF_STATE_ERROR);
 	mutex_lock(&vdin->lock);
 	vdin->streaming = false;
+	t7_vdin_trace_buffer(vdin, NULL, 7);
 	mutex_unlock(&vdin->lock);
 }
 
@@ -1004,6 +1106,7 @@ static void t7_vdin_source_work(struct work_struct *work)
 				delta > vdin->source_period / 2000)))) {
 			event.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION;
 			vdin->source_changes++;
+			t7_vdin_trace_buffer(vdin, NULL, 8);
 			v4l2_event_queue(&vdin->video, &event);
 		}
 		vdin->source_seen = true;
@@ -1063,6 +1166,7 @@ static void t7_vdin_fill_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 		.bytesperline = stride,
 		.sizeimage = vdin->nv12 ? stride * ALIGN(height, 16) * 3 / 2 : stride * height,
 		.colorspace = vdin->nv12 ? V4L2_COLORSPACE_REC709 : V4L2_COLORSPACE_SRGB,
+		/* Keep the vendor product's SDR video interpretation. */
 		.xfer_func = vdin->nv12 ? V4L2_XFER_FUNC_709 : V4L2_XFER_FUNC_SRGB,
 		.ycbcr_enc = vdin->nv12 ? V4L2_YCBCR_ENC_709 : V4L2_YCBCR_ENC_DEFAULT,
 		.quantization = vdin->nv12 ? V4L2_QUANTIZATION_LIM_RANGE :
@@ -1351,6 +1455,51 @@ static int t7_vdin_video_register(struct t7_vdin *vdin)
 unregister_v4l2:
 	v4l2_device_unregister(&vdin->v4l2);
 	return ret;
+}
+
+static int t7_vdin_hdr_status(struct seq_file *s, void *unused)
+{
+	struct t7_vdin *vdin = dev_get_drvdata(s->private);
+	unsigned long flags;
+	u32 gain, oetf, programmed_gain, programmed_oetf;
+	u32 ctrl = 0, matrix_in = 0, matrix_out = 0, gamut = 0;
+	bool active, programmed, pending;
+
+	mutex_lock(&vdin->lock);
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	active = vdin->streaming && vdin->receiver_lease;
+	programmed = vdin->hdr_profile_programmed;
+	pending = vdin->hdr_curve_pending;
+	gain = t7_vdin_lut_crc(vdin->hdr_gain, 149, 0);
+	oetf = t7_vdin_lut_crc(vdin->hdr_oetf, 149, 2);
+	programmed_gain = vdin->hdr_gain_programmed_crc;
+	programmed_oetf = vdin->hdr_oetf_programmed_crc;
+	/* Only the held, powered stream may read these side-effect-free controls.
+	 * LUT address/data ports are deliberately absent.
+	 */
+	if (active) {
+		ctrl = t7_vdin_read(vdin, VDIN_HDR_CTRL);
+		matrix_in = t7_vdin_read(vdin, VDIN_HDR_MATRIX_IN);
+		matrix_out = t7_vdin_read(vdin, VDIN_HDR_MATRIX_OUT);
+		gamut = t7_vdin_read(vdin, 0x12b0);
+	}
+	spin_unlock_irqrestore(&vdin->irq_lock, flags);
+	mutex_unlock(&vdin->lock);
+	seq_printf(s, "stream_active: %u\nprofile_programmed: %u\ncurve_pending: %u\n",
+		   active, programmed, pending);
+	seq_printf(s, "configured_gain_crc: %08x\nconfigured_oetf_crc: %08x\n",
+		   gain, oetf);
+	seq_printf(s, "configured_pq_eotf_crc: %08x\n",
+		   t7_vdin_lut_crc(t7_hdr_pq, ARRAY_SIZE(t7_hdr_pq), 0));
+	seq_printf(s, "last_programmed_gain_crc: %08x\nlast_programmed_oetf_crc: %08x\n",
+		   programmed_gain, programmed_oetf);
+	seq_puts(s, "crc_domain: little-endian u32 port samples; shadow, not LUT readback\n");
+	if (active)
+		seq_printf(s, "hdr_ctrl: %08x\nmatrix_in: %08x\nmatrix_out: %08x\ngamut: %08x\n",
+			   ctrl, matrix_in, matrix_out, gamut);
+	else
+		seq_puts(s, "registers: not read without active stream lease\n");
+	return 0;
 }
 
 static int t7_vdin_status(struct seq_file *s, void *unused)
@@ -1672,6 +1821,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 		return PTR_ERR(debugfs);
 	debugfs_create_file("frame", 0400, debugfs, vdin, &t7_vdin_frame_fops);
 	debugfs_create_devm_seqfile(dev, "status", debugfs, t7_vdin_status);
+	debugfs_create_devm_seqfile(dev, "hdr_status", debugfs, t7_vdin_hdr_status);
 	ret = devm_add_action_or_reset(dev, t7_vdin_debugfs_remove, debugfs);
 	if (ret)
 		return ret;

@@ -5,9 +5,11 @@ import subprocess
 import tempfile
 
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
-functions = source[source.index('static void t7_vdin_source_work'):
+functions = source[source.index('static void t7_vdin_source_resumed'):
+                   source.index('static int t7_vdin_start_streaming')] + source[source.index('static void t7_vdin_source_work'):
                    source.index('static int t7_vdin_querycap')]
 fixture = r'''
+#define t7_vdin_trace_buffer(...) ((void)0)
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -76,6 +78,22 @@ int main(void) {
     frame_period=41667; t7_vdin_source_work(&receiver.source_work.work); assert(events==6);
     frame_period=16667; t7_vdin_source_work(&receiver.source_work.work); assert(events==7);
     assert(!receiver.video_lock.held && receiver.source_changes==events);
+    /* Loss and reacquisition belong to one reconfiguration. STREAMON has
+     * already qualified the new source; do not immediately tear it down.
+     */
+    input_error=-ENOLINK; t7_vdin_source_work(&receiver.source_work.work);
+    unsigned int changes=events;
+    input_error=0; mutex_lock(&receiver.video_lock);
+    t7_vdin_source_resumed(&receiver); mutex_unlock(&receiver.video_lock);
+    t7_vdin_source_work(&receiver.source_work.work); assert(events==changes);
+    /* A subsequent real change still has to notify the consumer. */
+    width=1920; t7_vdin_source_work(&receiver.source_work.work);
+    assert(events==changes+1);
+    input_error=-ENOLINK; t7_vdin_source_work(&receiver.source_work.work);
+    changes=events; t7_vdin_source_resumed(&receiver);
+    assert(!receiver.source_locked);
+    input_error=0; t7_vdin_source_work(&receiver.source_work.work);
+    assert(events==changes+1);
     t7_vdin_source_stop(&receiver); assert(canceled==1);
     puts("Source monitor: real mode/loss/recovery events, stable input and torn-counter retry passed");
 }

@@ -90,6 +90,7 @@ def function(name):
 
 
 scheduler = r'''
+#define wave5_trace_source(...) ((void)0)
 #define BIT(n) (1U<<(n))
 #include <assert.h>
 #include <stdbool.h>

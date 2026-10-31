@@ -24,6 +24,7 @@
 #include <sound/soc.h>
 
 #include "t7-hdmirx.h"
+#include "t7-hlg-state.h"
 
 /* TOP register indices use 32-bit words; EDID RAM uses byte offsets. */
 #define T7_RX_TOP_SW_RESET	(0x000 * 4)
@@ -246,6 +247,7 @@ struct t7_hdmirx_link {
 	bool previous_uhd;
 	bool ready;
 	bool configured;
+	bool stopping;
 };
 
 struct t7_hdmirx {
@@ -255,12 +257,14 @@ struct t7_hdmirx {
 	bool hdr_probe;
 	bool hdr_capture;
 	bool lease_hdr;
+	u8 lease_eotf;
 	bool lease_yuv;
 	bool lease_420;
 	struct t7_hdmirx_measurement lease_mode;
 	struct t7_hdmirx_color lease_color;
 	u32 phy_band, pll_band;
 	unsigned long long drm_received_ns;
+	u8 drm_eotf;
 	u8 saved_unrec_ctrl, saved_unrec_type;
 	u8 saved_packet_irq_mode;
 	struct mutex audio_lock;
@@ -830,10 +834,11 @@ static void t7_hdmirx_update_drm(struct t7_hdmirx *rx)
 		packet[i] = readb(rx->cor + 0x11c0 + i);
 	for (i = 0; i < sizeof(again); i++)
 		again[i] = readb(rx->cor + 0x11c0 + i);
+	WRITE_ONCE(rx->drm_eotf, packet[4]);
 	WRITE_ONCE(rx->drm_received_ns,
 		   !memcmp(packet, again, sizeof(packet)) &&
 		   t7_hdmirx_packet_valid(packet, 0x87, 1, 26) &&
-		   packet[4] == 2 && packet[5] == 0 ? ktime_get_ns() : 0);
+		   t7_hdr_eotf_supported(packet[4]) && packet[5] == 0 ? ktime_get_ns() : 0);
 }
 
 static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx)
@@ -853,8 +858,12 @@ static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx)
 	    !t7_hdmirx_packet_valid(avi, 0x82, 2, 13) ||
 	    (avi[5] >> 6) != 3 || ((avi[6] >> 4) & 7) != 6 || (avi[8] & 0xc0))
 		return false;
+	/* HLG is initially qualified only for dynamic limited-range YCbCr. */
+	if (READ_ONCE(rx->drm_eotf) == 3 &&
+	    (!rx->dynamic_modes || (avi[8] >> 6) != 0))
+		return false;
 	/* HDR2 receives normalized Y/Cb/Cr after TOP's unpacker for each YUV
-	 * transport. Its PQ/2020 matrices and LUTs are independent of timing.
+		 * transport. Its HDR/2020 matrices and LUTs are independent of timing.
 	 * RGB/2020 needs a different input matrix and remains unsupported.
 	 */
 	if (rx->dynamic_modes)
@@ -947,7 +956,7 @@ static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *co
 		color->colorimetry = avi[5] >> 6;
 		if (!color->colorimetry)
 			color->colorimetry = t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT) <= 576 ? 1 : 2;
-		/* Keep the qualified PQ/2020 path; reject HLG and other extended spaces. */
+			/* Accept only qualified PQ/HLG BT.2020, not other extended spaces. */
 		if (color->colorimetry == 3 && !t7_hdmirx_hdr_input(rx))
 			return -ERANGE;
 	}
@@ -1176,7 +1185,9 @@ static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reas
 	    readb(rx->cor + T7_RX_COR_COLOR_DEPTH) > 4))
 		return -ERANGE;
 	if (rx->link && rx->link->users &&
-	    (hdr != rx->lease_hdr || yuv != rx->lease_yuv || yuv420 != rx->lease_420))
+	    (t7_hdr_encoding_changed(hdr, READ_ONCE(rx->drm_eotf),
+				     rx->lease_hdr, rx->lease_eotf) ||
+	     yuv != rx->lease_yuv || yuv420 != rx->lease_420))
 		return t7_hdmirx_video_error(reason, "lease-encoding", -ENOLINK);
 	if (rx->dynamic_modes) {
 		ret = t7_hdmirx_measure_live(rx, yuv420, &measured);
@@ -1988,6 +1999,7 @@ int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int he
 			writel(control, rx->top + T7_RX_TOP_VID_CNTL);
 		}
 		rx->lease_hdr = t7_hdmirx_hdr_input(rx);
+			rx->lease_eotf = rx->lease_hdr ? READ_ONCE(rx->drm_eotf) : 0;
 		rx->lease_420 = rx->dynamic_modes ? color.space == 3 :
 			rx->lease_hdr || t7_hdmirx_sdr420_input(rx);
 		rx->lease_yuv = rx->dynamic_modes ? color.space != 0 :
@@ -2006,6 +2018,31 @@ bool t7_hdmirx_stream_is_hdr(struct device *dev)
 	return READ_ONCE(rx->lease_hdr);
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_hdr);
+
+bool t7_hdmirx_capture_is_hdr(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	bool hdr = false;
+
+	if (!rx->link)
+		return false;
+	mutex_lock(&rx->link->lock);
+	if (rx->link->users)
+		hdr = rx->lease_hdr;
+	else if (rx->link->ready)
+		hdr = t7_hdmirx_hdr_input(rx);
+	mutex_unlock(&rx->link->lock);
+	return hdr;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_capture_is_hdr);
+
+bool t7_hdmirx_stream_is_hlg(struct device *dev)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+
+	return READ_ONCE(rx->lease_hdr) && READ_ONCE(rx->lease_eotf) == 3;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_hlg);
 
 bool t7_hdmirx_stream_is_yuv(struct device *dev)
 {
@@ -2042,6 +2079,7 @@ EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_bt601);
 void t7_hdmirx_stream_put(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	bool recover;
 
 	mutex_lock(&rx->link->lock);
 	if (WARN_ON(!rx->link->users)) {
@@ -2049,6 +2087,16 @@ void t7_hdmirx_stream_put(struct device *dev)
 		return;
 	}
 	rx->link->users--;
+	recover = !rx->link->users && !rx->link->ready && !rx->link->stopping;
+	if (recover) {
+		/* The last DMA owner is gone. Start a fresh qualification window
+		 * now rather than waiting for the idle monitor's next tick.
+		 */
+		rx->link->stable_samples = 0;
+		rx->link->previous_cable = 0;
+	}
+	if (recover)
+		mod_delayed_work(system_wq, &rx->link->work, 0);
 	mutex_unlock(&rx->link->lock);
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_put);
@@ -2092,6 +2140,7 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	bool next_uhd, yuv;
 	bool sampled = false;
 	u32 previous_pll;
+	unsigned int delay_ms;
 	struct t7_hdmirx_color color;
 	const char *reason = "video-status";
 	int ret;
@@ -2223,14 +2272,25 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 	}
 	WRITE_ONCE(link->ready, !ret);
 out:
+	/* A recovered cable still needs three matching clock samples plus the
+	 * PLL/PCS and video checks above. Sample recovery at 50ms (150ms total),
+	 * rather than stretching it across three idle-monitor periods. Keep the
+	 * 250ms retry cadence for torn timing snapshots and absent sources.
+	 */
+	delay_ms = !link->ready && !link->users && link->previous_cable &&
+		ret != -EAGAIN ? 50 : 250;
+	if (!link->stopping)
+		schedule_delayed_work(&link->work, msecs_to_jiffies(delay_ms));
 	mutex_unlock(&link->lock);
-	schedule_delayed_work(&link->work, msecs_to_jiffies(250));
 }
 
 static void t7_hdmirx_link_stop(void *data)
 {
 	struct t7_hdmirx_link *link = data;
 
+	mutex_lock(&link->lock);
+	link->stopping = true;
+	mutex_unlock(&link->lock);
 	cancel_delayed_work_sync(&link->work);
 	WRITE_ONCE(link->ready, false);
 }

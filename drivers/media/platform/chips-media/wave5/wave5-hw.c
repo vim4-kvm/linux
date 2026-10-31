@@ -2040,7 +2040,10 @@ int wave5_vpu_enc_init_seq(struct vpu_instance *inst)
 			      (p_param->nr_inter_weight_cb << 20) |
 			      (p_param->nr_inter_weight_cr << 25));
 	}
-	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_VUI_HRD_PARAM, 0);
+	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_VUI_RBSP_ADDR,
+		      p_enc_info->vb_vui.daddr);
+	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_VUI_HRD_PARAM,
+		      (p_enc_info->vui_bits << 4) | 1);
 
 	return send_firmware_command(inst, W5_ENC_SET_PARAM, true, NULL, NULL);
 }

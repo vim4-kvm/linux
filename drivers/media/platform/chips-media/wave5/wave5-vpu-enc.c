@@ -6,7 +6,29 @@
  */
 
 #include <linux/pm_runtime.h>
+#include <linux/dma-buf.h>
+#include <linux/dma-direct.h>
+#include <linux/iommu.h>
+#define CREATE_TRACE_POINTS
+#include <trace/events/wave5_buffers.h>
 #include "wave5-helper.h"
+
+static void wave5_trace_source(struct vb2_v4l2_buffer *buffer, int phase)
+{
+	struct vb2_buffer *vb;
+	struct dma_buf *dbuf;
+	u64 phys = 0;
+
+	if (!buffer)
+		return;
+	vb = &buffer->vb2_buf;
+	dbuf = vb->planes[0].dbuf;
+	if (!device_iommu_mapped(vb->vb2_queue->dev))
+		phys = dma_to_phys(vb->vb2_queue->dev, vb2_dma_contig_plane_dma_addr(vb, 0));
+	/* Only this exporter defines priv as the shared allocator instance. */
+	if (dbuf && !strcmp(dbuf->exp_name, "videobuf2_dma_contig"))
+		trace_wave5_buffers_buffer(dbuf->priv, phys, phase);
+}
 
 #define VPU_ENC_DEV_NAME "C&M Wave5 VPU encoder"
 #define VPU_ENC_DRV_NAME "wave5-enc"
@@ -292,10 +314,13 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 			vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
 			v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
 		}
-		if (src_buf)
+		if (src_buf) {
+			wave5_trace_source(src_buf, 2);
 			v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
+		}
 		return ret;
 	} else {
+		wave5_trace_source(src_buf, 0);
 		if (src_buf)
 			WRITE_ONCE(wave5_to_vpu_src_buf(src_buf)->consumed, true);
 		dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame success\n",
@@ -347,6 +372,7 @@ static void wave5_vpu_enc_finish_encode(struct vpu_instance *inst)
 			dev_warn(inst->dev->dev, "%s: no source buffer found\n", __func__);
 		} else {
 			inst->timestamp = src_buf->vb2_buf.timestamp;
+			wave5_trace_source(src_buf, 1);
 			v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_DONE);
 		}
 	}
@@ -2001,6 +2027,7 @@ static void streamoff_output(struct vpu_instance *inst, struct vb2_queue *q)
 	struct vb2_v4l2_buffer *buf;
 
 	while ((buf = v4l2_m2m_src_buf_remove(m2m_ctx))) {
+		wave5_trace_source(buf, 2);
 		dev_dbg(inst->dev->dev, "%s: buf type %4u | index %4u\n",
 			__func__, buf->vb2_buf.type, buf->vb2_buf.index);
 		v4l2_m2m_buf_done(buf, VB2_BUF_STATE_ERROR);

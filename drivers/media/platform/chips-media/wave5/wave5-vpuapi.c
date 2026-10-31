@@ -12,6 +12,7 @@
 #include "wave5-vpu.h"
 #include "wave5-regdefine.h"
 #include "wave5.h"
+#include "wave5-vui.h"
 
 #define DECODE_ALL_TEMPORAL_LAYERS 0
 #define DECODE_ALL_SPATIAL_LAYERS 0
@@ -747,6 +748,7 @@ void wave5_vpu_enc_free_buffers(struct vpu_instance *inst)
 	if (!inst->codec_info)
 		return;
 	info = &inst->codec_info->enc_info;
+	wave5_vdi_free_dma_memory(inst->dev, &info->vb_vui);
 	wave5_vdi_free_dma_memory(inst->dev, &info->vb_work);
 	if (inst->std == W_HEVC_ENC || inst->std == W_AVC_ENC) {
 		wave5_vdi_free_dma_memory(inst->dev, &info->vb_sub_sam_buf);
@@ -1036,9 +1038,27 @@ int wave5_vpu_enc_give_command(struct vpu_instance *inst, enum codec_command cmd
 
 int wave5_vpu_enc_issue_seq_init(struct vpu_instance *inst)
 {
+	struct enc_info *info = &inst->codec_info->enc_info;
+	u8 vui[5];
 	int ret;
 	struct vpu_device *vpu_dev = inst->dev;
 
+	ret = wave5_make_vui(vui, inst->std == W_HEVC_ENC, inst->colorspace,
+			     inst->xfer_func, inst->ycbcr_enc, inst->quantization);
+	if (ret < 0)
+		return ret;
+	info->vui_bits = ret;
+	if (!info->vb_vui.vaddr) {
+		info->vb_vui.size = SZ_4K;
+		ret = wave5_vdi_allocate_dma_memory(inst->dev, &info->vb_vui);
+		if (ret)
+			return ret;
+	}
+	ret = wave5_vdi_write_memory(inst->dev, &info->vb_vui, 0, vui, sizeof(vui));
+	if (ret < 0)
+		return ret;
+	/* Keep coherent RBSP storage until DESTROY succeeds, including errors. */
+	dma_wmb();
 	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
 	if (ret)
 		return ret;

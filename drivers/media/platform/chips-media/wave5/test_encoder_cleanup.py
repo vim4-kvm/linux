@@ -52,7 +52,7 @@ struct enc_info {
 	bool destroyed;
     struct enc_open_param open_param;
     u32 stride, rotation_angle, mirror_direction, vlc_buf_size, param_buf_size;
-    struct vpu_buf vb_work, vb_mv, vb_fbc_y_tbl, vb_fbc_c_tbl, vb_sub_sam_buf, vb_task;
+    struct vpu_buf vb_work, vb_mv, vb_fbc_y_tbl, vb_fbc_c_tbl, vb_sub_sam_buf, vb_task, vb_vui;
 };
 struct codec_info { struct enc_info enc_info; };
 struct device { void *data; };
@@ -128,6 +128,9 @@ int main(void)
         u32 reason;
         attempts = 0; fail_at = 0; commands = 0;
         firmware_owns = false; fail_command = false; fail_queue = false;
+        /* Sequence init owns coherent VUI even if registration later fails. */
+        info.enc_info.vb_vui.size = 4096;
+        assert(!wave5_vdi_allocate_dma_memory(&vpu, &info.enc_info.vb_vui));
         if (existing_task) {
             info.enc_info.vb_task.size = 256;
             assert(!wave5_vdi_allocate_dma_memory(&vpu, &info.enc_info.vb_task));
@@ -141,14 +144,14 @@ int main(void)
         if (failure && !(failure == 5 && existing_task)) assert(ret < 0);
         else assert(!ret);
         if (commands) {
-            assert(live == 5);
+            assert(live == 6);
             // A failed destroy must retain every DMA allocation for hardware.
             fail_close = true;
             assert(wave5_vpu_enc_close(&inst, &reason) == -ETIMEDOUT);
             assert(!pm_refs);
-            assert(live == 5);
+            assert(live == 6);
         } else {
-            assert(live == (unsigned)existing_task);
+            assert(live == (unsigned)existing_task + 1);
         }
         fail_close = false;
         assert(!wave5_vpu_enc_close(&inst, &reason));
