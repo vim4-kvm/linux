@@ -11,3 +11,15 @@ Description:
 		report_length	HID report length
 		subclass	HID device subclass to use
 		=============	============================================
+
+What:		/config/usb-gadget/gadget/functions/hid.name/interval
+Date:		October 2026
+Description:
+		Optional endpoint bInterval override (unsigned byte, 0..255).
+		The USB descriptor encoding is speed dependent: full-speed uses
+		milliseconds; high/super-speed uses 125us * 2^(bInterval - 1).
+		Users must select values valid for their negotiated USB speed.
+		Reading an unset override returns 4; descriptors retain the
+		original defaults (FS=10, HS/SS=4) until an override is written.
+		Writes fail with EBUSY while the function is linked into a
+		configuration. Configure before linking and host enumeration.

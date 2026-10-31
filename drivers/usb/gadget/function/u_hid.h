@@ -22,6 +22,8 @@ struct f_hid_opts {
 	unsigned char			protocol;
 	unsigned char			no_out_endpoint;
 	unsigned short			report_length;
+	unsigned char			interval;
+	bool				interval_user_set;
 	unsigned short			report_desc_length;
 	unsigned char			*report_desc;
 	bool				report_desc_alloc;
