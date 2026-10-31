@@ -17,6 +17,7 @@ config VIDEO_MESON_T7_VDIN_TEST
 	tristate "Amlogic T7 VDIN capture experiment"
 	depends on VIDEO_MESON_T7_HDMIRX
 	depends on VIDEO_DEV && OF && HAS_DMA
+	select CRC32
 	select VIDEOBUF2_DMA_CONTIG
 	help
 	  Progressive RGB or NV12 capture, including measured UHD timings,

@@ -4,6 +4,7 @@
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
+#include <linux/crc32.h>
 #include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
 #include <linux/dma-buf.h>
@@ -172,6 +173,8 @@ struct t7_vdin {
 	const char *last_stop_reason;
 	u32 hdr_gain[149], hdr_oetf[149];
 	bool hdr_curve_pending;
+	u32 hdr_gain_programmed_crc, hdr_oetf_programmed_crc;
+	bool hdr_profile_programmed;
 };
 
 static void __iomem *t7_vdin_reg(struct t7_vdin *vdin, u32 reg)
@@ -214,6 +217,28 @@ static void t7_vdin_update(struct t7_vdin *vdin, u32 reg, u32 mask, u32 value)
 #include "t7-vdin-hdr.h"
 #include "t7-vdin-hlg.h"
 
+/* Canonical LE samples match the values sent to the LUT data ports. */
+static u32 t7_vdin_lut_crc(const u32 *lut, unsigned int count,
+			   unsigned int shift)
+{
+	u32 crc = ~0U;
+	unsigned int i;
+
+	for (i = 0; i < count; i++) {
+		__le32 value = cpu_to_le32(lut[i] >> shift);
+
+		crc = crc32_le(crc, (u8 *)&value, sizeof(value));
+	}
+	return crc ^ ~0U;
+}
+
+static void t7_vdin_record_hdr_luts(struct t7_vdin *vdin)
+{
+	vdin->hdr_gain_programmed_crc = t7_vdin_lut_crc(vdin->hdr_gain, 149, 0);
+	vdin->hdr_oetf_programmed_crc = t7_vdin_lut_crc(vdin->hdr_oetf, 149, 2);
+	vdin->hdr_profile_programmed = true;
+}
+
 static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin);
 
 /* Caller holds irq_lock and has proved that no request targets the old slot. */
@@ -244,6 +269,7 @@ static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
 		 * first frame after a LUT change if programming crosses blanking.
 		 */
 		t7_vdin_hdr_reload(vdin);
+		t7_vdin_record_hdr_luts(vdin);
 		vdin->ring_discard = true;
 	}
 	t7_vdin_update(vdin, VDIN_WR_CTRL, VDIN_WR_REQ | VDIN_VCP_WR,
@@ -455,10 +481,12 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 		t7_vdin_write(vdin, VDIN_HDR_MATRIX_IN, 1);
 		t7_vdin_write(vdin, VDIN_MATRIX_CTRL, 1);
 	}
+	vdin->hdr_profile_programmed = false;
 	if (t7_hdmirx_stream_is_hlg(vdin->receiver) && vdin->nv12) {
 		t7_vdin_hlg_configure(vdin);
 	} else if (t7_hdmirx_stream_is_hdr(vdin->receiver)) {
 		t7_vdin_hdr_configure(vdin);
+		t7_vdin_record_hdr_luts(vdin);
 	}
 	t7_vdin_update(vdin, VDIN_LFIFO_CTRL, GENMASK(13, 0) | BIT(17) | BIT(18),
 		       BIT(17) | 0x780);
@@ -1359,6 +1387,51 @@ unregister_v4l2:
 	return ret;
 }
 
+static int t7_vdin_hdr_status(struct seq_file *s, void *unused)
+{
+	struct t7_vdin *vdin = dev_get_drvdata(s->private);
+	unsigned long flags;
+	u32 gain, oetf, programmed_gain, programmed_oetf;
+	u32 ctrl = 0, matrix_in = 0, matrix_out = 0, gamut = 0;
+	bool active, programmed, pending;
+
+	mutex_lock(&vdin->lock);
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	active = vdin->streaming && vdin->receiver_lease;
+	programmed = vdin->hdr_profile_programmed;
+	pending = vdin->hdr_curve_pending;
+	gain = t7_vdin_lut_crc(vdin->hdr_gain, 149, 0);
+	oetf = t7_vdin_lut_crc(vdin->hdr_oetf, 149, 2);
+	programmed_gain = vdin->hdr_gain_programmed_crc;
+	programmed_oetf = vdin->hdr_oetf_programmed_crc;
+	/* Only the held, powered stream may read these side-effect-free controls.
+	 * LUT address/data ports are deliberately absent.
+	 */
+	if (active) {
+		ctrl = t7_vdin_read(vdin, VDIN_HDR_CTRL);
+		matrix_in = t7_vdin_read(vdin, VDIN_HDR_MATRIX_IN);
+		matrix_out = t7_vdin_read(vdin, VDIN_HDR_MATRIX_OUT);
+		gamut = t7_vdin_read(vdin, 0x12b0);
+	}
+	spin_unlock_irqrestore(&vdin->irq_lock, flags);
+	mutex_unlock(&vdin->lock);
+	seq_printf(s, "stream_active: %u\nprofile_programmed: %u\ncurve_pending: %u\n",
+		   active, programmed, pending);
+	seq_printf(s, "configured_gain_crc: %08x\nconfigured_oetf_crc: %08x\n",
+		   gain, oetf);
+	seq_printf(s, "configured_pq_eotf_crc: %08x\n",
+		   t7_vdin_lut_crc(t7_hdr_pq, ARRAY_SIZE(t7_hdr_pq), 0));
+	seq_printf(s, "last_programmed_gain_crc: %08x\nlast_programmed_oetf_crc: %08x\n",
+		   programmed_gain, programmed_oetf);
+	seq_puts(s, "crc_domain: little-endian u32 port samples; shadow, not LUT readback\n");
+	if (active)
+		seq_printf(s, "hdr_ctrl: %08x\nmatrix_in: %08x\nmatrix_out: %08x\ngamut: %08x\n",
+			   ctrl, matrix_in, matrix_out, gamut);
+	else
+		seq_puts(s, "registers: not read without active stream lease\n");
+	return 0;
+}
+
 static int t7_vdin_status(struct seq_file *s, void *unused)
 {
 	struct t7_vdin *vdin = dev_get_drvdata(s->private);
@@ -1678,6 +1751,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 		return PTR_ERR(debugfs);
 	debugfs_create_file("frame", 0400, debugfs, vdin, &t7_vdin_frame_fops);
 	debugfs_create_devm_seqfile(dev, "status", debugfs, t7_vdin_status);
+	debugfs_create_devm_seqfile(dev, "hdr_status", debugfs, t7_vdin_hdr_status);
 	ret = devm_add_action_or_reset(dev, t7_vdin_debugfs_remove, debugfs);
 	if (ret)
 		return ret;

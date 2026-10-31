@@ -20,7 +20,7 @@ formats = driver[driver.index(format_start):
 queries = driver[driver.index('static int t7_vdin_query_dv_timings'):
                  driver.index('static int t7_vdin_set_input')]
 registration = driver[driver.index('static void t7_vdin_video_unregister'):
-                       driver.index('static int t7_vdin_status')]
+                       driver.index('static int t7_vdin_hdr_status')]
 selector = core[core.index('static struct mutex *v4l2_ioctl_get_lock'):
                 core.index('/* Common ioctl debug function')]
 commands = ['VIDIOC_QUERY_DV_TIMINGS', 'VIDIOC_G_PARM', 'VIDIOC_G_FMT',

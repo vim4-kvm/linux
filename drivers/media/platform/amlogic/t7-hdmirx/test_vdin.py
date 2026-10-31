@@ -7,11 +7,13 @@ import tempfile
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
 source = source.replace('#include "t7-vdin-hdr.h"', Path(__file__).with_name('t7-vdin-hdr.h').read_text())
 source = source.replace('#include "t7-vdin-hlg.h"', Path(__file__).with_name('t7-vdin-hlg.h').read_text())
+source = source[:source.index('/* Canonical LE')] + source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer'):]
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('enum t7_vdin_slot_state {'):source.index('static void __iomem *t7_vdin_reg')]
 functions = source[source.index('static void __iomem *t7_vdin_reg'):
                    source.index('static int t7_vdin_frame_open')]
 prefix = r'''
+#define t7_vdin_record_hdr_luts(...) ((void)0)
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>

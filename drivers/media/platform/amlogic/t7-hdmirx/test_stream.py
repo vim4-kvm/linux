@@ -8,12 +8,14 @@ import tempfile
 source = Path(__file__).with_name('t7-vdin-test.c').read_text()
 source = source.replace('#include "t7-vdin-hdr.h"', Path(__file__).with_name('t7-vdin-hdr.h').read_text())
 source = source.replace('#include "t7-vdin-hlg.h"', Path(__file__).with_name('t7-vdin-hlg.h').read_text())
+source = source[:source.index('/* Canonical LE')] + source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer'):]
 defines = '\n'.join(line for line in source.splitlines() if line.startswith('#define '))
 types = source[source.index('enum t7_vdin_slot_state {'):source.index('static void __iomem *t7_vdin_reg')]
 hardware = source[source.index('static void __iomem *t7_vdin_reg'):source.index('static int t7_vdin_capture')]
 stream = source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)\n{'):
                 source.index('static const struct vb2_ops t7_vdin_queue_ops')]
 prefix = r'''
+#define t7_vdin_record_hdr_luts(...) ((void)0)
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
