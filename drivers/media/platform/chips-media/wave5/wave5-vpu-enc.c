@@ -140,6 +140,10 @@ static const struct vpu_format enc_fmt_list[FMT_TYPES][MAX_FMTS] = {
 			.v4l2_pix_fmt = V4L2_PIX_FMT_VYUY,
 			.v4l2_frmsize = &enc_frmsize[VPU_FMT_TYPE_RAW],
 		},
+		{
+			.v4l2_pix_fmt = V4L2_PIX_FMT_P010,
+			.v4l2_frmsize = &enc_frmsize[VPU_FMT_TYPE_RAW],
+		},
 	}
 };
 
@@ -1685,10 +1689,18 @@ static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 	if (!info)
 		return -EINVAL;
 
-	if (info->hdiv == 2 && info->vdiv == 1)
+	if (info->format == V4L2_PIX_FMT_P010) {
+		/* P010 has little-endian words with samples in bits 15..6.
+		 * The firmware's LSB enum describes the six padding bits.
+		 */
+		if (inst->std != W_HEVC_ENC || input.internal_bit_depth != 10)
+			return -EINVAL;
+		open_param->src_format = FORMAT_420_P10_16BIT_LSB;
+	} else if (info->hdiv == 2 && info->vdiv == 1) {
 		open_param->src_format = FORMAT_422;
-	else
+	} else {
 		open_param->src_format = FORMAT_420;
+	}
 
 	switch (info->format) {
 	case V4L2_PIX_FMT_YUYV:
