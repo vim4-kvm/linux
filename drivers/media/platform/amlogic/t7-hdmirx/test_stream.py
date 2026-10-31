@@ -15,6 +15,7 @@ hardware = source[source.index('static void __iomem *t7_vdin_reg'):source.index(
 stream = source[source.index('static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *vdin)\n{'):
                 source.index('static const struct vb2_ops t7_vdin_queue_ops')]
 prefix = r'''
+#define vb2_get_num_buffers(q) 0U
 #define t7_vdin_record_hdr_luts(...) ((void)0)
 #include <assert.h>
 #include <errno.h>

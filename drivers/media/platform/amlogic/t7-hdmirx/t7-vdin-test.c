@@ -889,10 +889,16 @@ static int t7_vdin_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
 			       struct device *alloc_devs[])
 {
 	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
+	unsigned int limit = (192U * 1024 * 1024) / vdin->allocation_size;
 
 	/* Reject retries before vb2 can allocate a new CMA-backed buffer pool. */
 	if (vdin->faulted)
 		return -EIO;
+	/* Leave CMA for codec reference/work buffers; account for CREATE_BUFS. */
+	if (vb2_get_num_buffers(queue) >= limit)
+		return -ENOBUFS;
+	if (*buffers > limit - vb2_get_num_buffers(queue))
+		*buffers = limit - vb2_get_num_buffers(queue);
 	if (*planes)
 		return *planes == 1 && sizes[0] >= vdin->allocation_size ? 0 : -EINVAL;
 	*planes = 1;
