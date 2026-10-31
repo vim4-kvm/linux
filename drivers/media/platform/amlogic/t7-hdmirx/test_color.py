@@ -39,7 +39,9 @@ fixture = r'''
 struct link {int lock, users; bool ready;};
 struct t7_hdmirx {struct link *link; bool lease_hdr, live_hdr;};
 struct device {struct t7_hdmirx *rx;};
-struct t7_vdin {bool nv12; unsigned pixel_format; struct device *receiver;};
+typedef __u32 u32;
+static bool nv12=true;
+struct t7_vdin {bool nv12; unsigned pixel_format; struct device *receiver; bool direct_dma;};
 static unsigned reads;
 static void mutex_lock(int *lock) {assert(!*lock); *lock=1;}
 static void mutex_unlock(int *lock) {assert(*lock); *lock=0;}
@@ -48,11 +50,12 @@ static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx)
 {assert(rx->link->lock && rx->link->ready); reads++; return rx->live_hdr;}
 '''
 fixture += function('t7-hdmirx.c', 'bool t7_hdmirx_capture_is_hdr(')
+fixture += '\n#include "' + str(root.parents[4] / 'include/uapi/linux/amlogic-vdin.h') + '"\n'
 fixture += '\n' + function('t7-vdin-test.c', 'static void t7_vdin_fill_fmt(')
 fixture += r'''
 int main(void) {
  struct link link={0}; struct t7_hdmirx rx={.link=&link};
- struct device dev={&rx}; struct t7_vdin v={true,V4L2_PIX_FMT_NV12,&dev};
+ struct device dev={&rx}; struct t7_vdin v={.nv12=true,.pixel_format=V4L2_PIX_FMT_NV12,.receiver=&dev};
  struct v4l2_format fmt={0};
  assert(!t7_hdmirx_capture_is_hdr(&dev) && reads==0);
  link.ready=true; rx.live_hdr=true;
@@ -67,7 +70,7 @@ int main(void) {
  assert(fmt.fmt.pix.xfer_func==V4L2_XFER_FUNC_709 && reads==0);
  rx.lease_hdr=false; t7_vdin_fill_fmt(&v,&fmt,3840,2160);
  assert(fmt.fmt.pix.xfer_func==V4L2_XFER_FUNC_709 && reads==0);
- v.nv12=false; t7_vdin_fill_fmt(&v,&fmt,1920,1080);
+ v.nv12=false; nv12=false; t7_vdin_fill_fmt(&v,&fmt,1920,1080);
  assert(fmt.fmt.pix.xfer_func==V4L2_XFER_FUNC_SRGB);
  assert(fmt.fmt.pix.quantization==V4L2_QUANTIZATION_FULL_RANGE);
  rx.link=NULL; assert(!t7_hdmirx_capture_is_hdr(&dev));

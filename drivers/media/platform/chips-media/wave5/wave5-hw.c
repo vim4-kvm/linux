@@ -2374,6 +2374,17 @@ static u32 wave5_vpu_enc_validate_sec_axi(struct vpu_instance *inst)
 	return ret;
 }
 
+static u32 wave5_enc_source_endian(enum frame_buffer_format format, bool legacy)
+{
+	/* P010 uses LE words with low six padding bits. The legacy firmware
+	 * reads those words with VDI_128BIT_LE_BYTE_SWAP (17): the source
+	 * register takes ~(17 & 0xf), rather than the eight-bit default 0xf.
+	 */
+	if (legacy && format == FORMAT_420_P10_16BIT_LSB)
+		return 0xe;
+	return PIC_SRC_ENDIANNESS_BIG_ENDIAN;
+}
+
 int wave5_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *fail_res)
 {
 	u32 src_frame_format;
@@ -2528,7 +2539,9 @@ int wave5_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *f
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_SRC_STRIDE,
 		      (p_src_frame->stride << 16) | src_stride_c);
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_SRC_FORMAT, src_frame_format |
-		      (format_no << 3) | (justified << 5) | (PIC_SRC_ENDIANNESS_BIG_ENDIAN << 6));
+		      (format_no << 3) | (justified << 5) |
+		      (wave5_enc_source_endian(p_open_param->src_format,
+					inst->dev->legacy_firmware) << 6));
 
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_CUSTOM_MAP_OPTION_ADDR, 0);
 	vpu_write_reg(inst->dev, W5_CMD_ENC_PIC_CUSTOM_MAP_OPTION_PARAM, 0);

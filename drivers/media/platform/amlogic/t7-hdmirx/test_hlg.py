@@ -178,7 +178,7 @@ typedef uint8_t u8; typedef uint64_t u64;
 #define T7_RX_TOP_TMDS_ALIGN_STAT 4
 #define T7_RX_COR_COLOR_DEPTH 0
 struct t7_hdmirx {unsigned char *cor,*top; bool hdr_capture,dynamic_modes;
- unsigned port; unsigned long long drm_received_ns; u8 drm_eotf;};
+ unsigned port; unsigned long long drm_received_ns; u8 drm_eotf; u8 drm_packet[30];};
 static unsigned char cor[0x1200],top[8];
 static unsigned now=100;
 static bool tear;

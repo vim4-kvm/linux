@@ -20,6 +20,8 @@ formats = driver[driver.index(format_start):
 queries = driver[driver.index('static int t7_vdin_query_dv_timings'):
                  driver.index('static int t7_vdin_set_input')]
 registration = driver[driver.index('static void t7_vdin_video_unregister'):
+                      driver.index('static int t7_vdin_get_control')]
+registration += driver[driver.index('static int t7_vdin_video_register'):
                        driver.index('static int t7_vdin_hdr_status')]
 selector = core[core.index('static struct mutex *v4l2_ioctl_get_lock'):
                 core.index('/* Common ioctl debug function')]
@@ -43,6 +45,19 @@ prefix = r'''
 #include <string.h>
 #include <time.h>
 #include <linux/videodev2.h>
+typedef uint32_t u32;
+static bool nv12 = true;
+struct v4l2_ctrl_handler { int error; };
+struct v4l2_ctrl { unsigned int flags; };
+static const int t7_vdin_control_ops;
+#define v4l2_ctrl_ptr_create(p) (p)
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+static struct v4l2_ctrl *v4l2_ctrl_new_std_compound(
+    struct v4l2_ctrl_handler *h, const void *ops, unsigned int id,
+    void *value, void *minimum, void *maximum) {
+    static struct v4l2_ctrl control;
+    return &control;
+}
 struct mutex { pthread_mutex_t native; };
 struct t7_vdin_buffer { int unused; };
 struct device { int refs; };
@@ -53,6 +68,7 @@ struct vb2_queue {
     struct mutex *lock; struct device *dev; bool busy;
 };
 struct video_device {
+    struct v4l2_ctrl_handler *ctrl_handler;
     char name[32]; struct v4l2_device *v4l2_dev;
     const void *fops,*ioctl_ops;
     void (*release)(struct video_device *);
@@ -61,12 +77,13 @@ struct video_device {
     struct device dev;
 };
 struct t7_vdin {
+    struct v4l2_ctrl_handler controls;
     struct mutex video_lock,queue_mutex,lock;
     struct video_device video; struct vb2_queue queue;
     struct device *dev,*receiver; struct v4l2_device v4l2; unsigned int ref;
     unsigned int width,height,pixel_format,stride,allocation_size,frame_capacity,frame_size;
     unsigned int input_width,input_height;
-    bool nv12,faulted;
+    bool nv12,faulted,direct_dma,native_hdr;
 };
 struct file { struct t7_vdin *data; };
 struct v4l2_m2m_ctx { struct mutex *q_lock; };
@@ -284,6 +301,7 @@ int main(void) {
     puts("ioctl locks: status during gated stop, S_FMT exclusion, query/removal and old fd passed");
 }
 '''
+prefix = '#include "' + str(directory.parents[4] / 'include/uapi/linux/amlogic-vdin.h') + '"\n' + prefix
 with tempfile.TemporaryDirectory(prefix='t7-ioctl-locks-') as temporary:
     path = Path(temporary)
     (path/'test.c').write_text(prefix + '\n'.join(entries) + stubs + formats + queries +

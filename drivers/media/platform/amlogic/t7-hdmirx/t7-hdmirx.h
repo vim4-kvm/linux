@@ -6,6 +6,14 @@ struct device;
 struct v4l2_dv_timings;
 struct v4l2_fract;
 struct v4l2_edid;
+struct v4l2_ctrl_hdr10_cll_info;
+struct v4l2_ctrl_hdr10_mastering_display;
+
+/* Fresh, checksum-qualified HDMI DRM metadata. Zero fields are preserved;
+ * ENODATA means no current PQ packet, not a fabricated mastering default.
+ */
+int t7_hdmirx_get_hdr10(struct device *dev, struct v4l2_ctrl_hdr10_cll_info *cll,
+			struct v4l2_ctrl_hdr10_mastering_display *mastering);
 
 /* EDID changes are idempotent and refused while a capture lease owns DMA. */
 int t7_hdmirx_get_edid(struct device *dev, struct v4l2_edid *edid);

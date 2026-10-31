@@ -265,6 +265,7 @@ struct t7_hdmirx {
 	u32 phy_band, pll_band;
 	unsigned long long drm_received_ns;
 	u8 drm_eotf;
+	u8 drm_packet[30]; /* Protected by link->lock, like drm_received_ns. */
 	u8 saved_unrec_ctrl, saved_unrec_type;
 	u8 saved_packet_irq_mode;
 	struct mutex audio_lock;
@@ -839,6 +840,8 @@ static void t7_hdmirx_update_drm(struct t7_hdmirx *rx)
 		   !memcmp(packet, again, sizeof(packet)) &&
 		   t7_hdmirx_packet_valid(packet, 0x87, 1, 26) &&
 		   t7_hdr_eotf_supported(packet[4]) && packet[5] == 0 ? ktime_get_ns() : 0);
+	if (rx->drm_received_ns)
+		memcpy(rx->drm_packet, packet, sizeof(packet));
 }
 
 static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx)
@@ -2035,6 +2038,42 @@ bool t7_hdmirx_capture_is_hdr(struct device *dev)
 	return hdr;
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_capture_is_hdr);
+
+static u16 t7_drm_word(const u8 *packet, unsigned int offset)
+{
+	return packet[offset] | (packet[offset + 1] << 8);
+}
+
+int t7_hdmirx_get_hdr10(struct device *dev, struct v4l2_ctrl_hdr10_cll_info *cll,
+			struct v4l2_ctrl_hdr10_mastering_display *mastering)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	const u8 *p = rx->drm_packet;
+	unsigned int i;
+	int ret = -ENODATA;
+
+	if (!rx->link)
+		return ret;
+	mutex_lock(&rx->link->lock);
+	if (!rx->drm_received_ns || ktime_get_ns() - rx->drm_received_ns > 1000000000ULL ||
+	    p[4] != 2)
+		goto out;
+	for (i = 0; i < 3; i++) {
+		mastering->display_primaries_x[i] = t7_drm_word(p, 6 + i * 4);
+		mastering->display_primaries_y[i] = t7_drm_word(p, 8 + i * 4);
+	}
+	mastering->white_point_x = t7_drm_word(p, 18);
+	mastering->white_point_y = t7_drm_word(p, 20);
+	mastering->max_display_mastering_luminance = (u32)t7_drm_word(p, 22) * 10000;
+	mastering->min_display_mastering_luminance = t7_drm_word(p, 24);
+	cll->max_content_light_level = t7_drm_word(p, 26);
+	cll->max_pic_average_light_level = t7_drm_word(p, 28);
+	ret = 0;
+out:
+	mutex_unlock(&rx->link->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_get_hdr10);
 
 bool t7_hdmirx_stream_is_hlg(struct device *dev)
 {

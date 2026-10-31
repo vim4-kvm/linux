@@ -11,7 +11,9 @@ types = source[source.index('static const u32 t7_hdmirx_phy_top_regs'):
 start = source.index('static u32 t7_hdmirx_sample_cable(')
 functions = source[start:source.index('\n}', start) + 2] + '\n'
 functions += source[source.index('int t7_hdmirx_stream_get('):
-                   source.index('static int t7_hdmirx_status(')]
+                   source.index('static u16 t7_drm_word(')]
+functions += source[source.index('void t7_hdmirx_stream_put('):
+                    source.index('static int t7_hdmirx_status(')]
 prefix = r'''
 #include <assert.h>
 #include <stdbool.h>

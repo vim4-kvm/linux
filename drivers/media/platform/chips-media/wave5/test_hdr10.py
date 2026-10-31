@@ -18,6 +18,9 @@ setup = setup[:setup.index('\n\tswitch (info->format)')]
 api = (root / 'wave5-vpuapi.h').read_text()
 formats = api[api.index('enum frame_buffer_format {'):]
 formats = formats[:formats.index('};') + 2]
+hardware = (root / 'wave5-hw.c').read_text()
+endian = hardware[hardware.index('static u32 wave5_enc_source_endian('):
+                  hardware.index('int wave5_vpu_encode(')]
 core = root.parents[2] / 'v4l2-core' / 'v4l2-common.c'
 # Extract the actual core entry so a broken bpp/divisor combination fails the
 # buffer capacity test, rather than merely checking the driver's fourcc list.
@@ -37,6 +40,7 @@ typedef uint32_t u32;
 #define W_HEVC_ENC 1
 #define W_AVC_ENC 2
 #define V4L2_PIXEL_ENC_YUV 1
+#define PIC_SRC_ENDIANNESS_BIG_ENDIAN 15
 struct v4l2_format_info { unsigned format, pixel_enc, mem_planes, comp_planes;
  unsigned bpp[4], bpp_div[4], hdiv, vdiv; };
 struct vpu_instance { unsigned std; };
@@ -50,6 +54,12 @@ int main(void) {
  struct enc_wave_param in={.internal_bit_depth=10};
  assert(!setup(&out,&inst,in));
  assert(out.src_format==FORMAT_420_P10_16BIT_LSB);
+ /* Match the actual legacy SDK: convert_endian(17)=1, then invert its
+  * low nibble for PIC_SRC_FORMAT. Eight-bit source bytes are unchanged. */
+ assert(wave5_enc_source_endian(out.src_format,true)==((~17U)&15));
+ assert(wave5_enc_source_endian(out.src_format,false)==15);
+ assert(wave5_enc_source_endian(FORMAT_420,true)==15);
+ assert(wave5_enc_source_endian(FORMAT_422,true)==15);
  in.internal_bit_depth=8;
  assert(setup(&out,&inst,in)==-EINVAL);
  in.internal_bit_depth=10; inst.std=W_AVC_ENC;
@@ -78,7 +88,8 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='wave5-hdr10-') as temp:
     temp = Path(temp)
     source, exe = temp / 'test.c', temp / 'test'
-    source.write_text(prefix + formats + '\nstatic const struct v4l2_format_info p010=' +
+    source.write_text(prefix + formats + '\n' + endian +
+                      '\nstatic const struct v4l2_format_info p010=' +
                       entry + ';\nstatic int setup(struct enc_open_param *open_param, '
                       'struct vpu_instance *inst, struct enc_wave_param input) {\n'
                       'const struct v4l2_format_info *info=&p010;\n' + setup +

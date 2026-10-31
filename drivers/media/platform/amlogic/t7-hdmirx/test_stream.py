@@ -97,6 +97,7 @@ struct device { int unused; };
 struct clk_bulk_data { int unused; };
 struct kref { int unused; };
 struct v4l2_device { int unused; };
+struct v4l2_ctrl_handler { int unused; };
 struct video_device { int unused; };
 struct allocation { unsigned char *data; unsigned int refs; };
 struct dma_buf { struct allocation *allocation; };
@@ -204,11 +205,12 @@ static void vb2_queue_error(struct vb2_queue *q) {
 }
 static int t7_hdmirx_check_video(void *dev) { return fail_timing?-ENOLINK:0; }
 static unsigned int receiver_users;
-static bool t7_hdmirx_stream_is_hdr(void *dev) { (void)dev; return false; }
-static bool t7_hdmirx_stream_is_hlg(void *dev) { (void)dev; return false; }
-static bool t7_hdmirx_stream_is_yuv(void *dev) { (void)dev; return false; }
+static bool source_hdr, source_hlg, source_yuv, source_full=true;
+static bool t7_hdmirx_stream_is_hdr(void *dev) { (void)dev; return source_hdr; }
+static bool t7_hdmirx_stream_is_hlg(void *dev) { (void)dev; return source_hlg; }
+static bool t7_hdmirx_stream_is_yuv(void *dev) { (void)dev; return source_yuv; }
 static bool t7_hdmirx_stream_needs_yuv444_swap(void *dev) { (void)dev; return false; }
-static bool t7_hdmirx_stream_is_full_range(void *dev) { (void)dev; return true; }
+static bool t7_hdmirx_stream_is_full_range(void *dev) { (void)dev; return source_full; }
 static bool t7_hdmirx_stream_is_bt601(void *dev) { (void)dev; return false; }
 static int t7_hdmirx_query_timings(void *dev, struct v4l2_dv_timings *mode,
                                  struct v4l2_fract *interval) {
@@ -281,6 +283,7 @@ static void destroy_wait(wait_queue_head_t *w) {
 }
 static void setup(struct t7_vdin_buffer b[4]) {
     receiver_users=0;
+    source_hdr=source_hlg=source_yuv=false; source_full=true;
     memset(&receiver,0,sizeof(receiver)); memset(b,0,4*sizeof(*b));
     memcpy(receiver.hdr_gain,t7_hdr_gain,sizeof(t7_hdr_gain));
     memcpy(receiver.hdr_oetf,t7_hdr_srgb,sizeof(t7_hdr_srgb));
@@ -416,6 +419,26 @@ static void check_direct(void) {
 }
 int main(void) {
     struct t7_vdin_buffer b[4]; pthread_t stop;
+    /* Native capture admits only the validated PQ/limited YUV transport.
+     * Rejection must release RX and every queued lease without starting DMA.
+     */
+    for (int bad=0;bad<4;bad++) {
+        setup_direct(b); receiver.native_hdr=true;
+        source_hdr=bad!=0; source_hlg=bad==1;
+        source_yuv=bad!=2; source_full=bad==3;
+        assert(t7_vdin_start_streaming(&receiver.queue,4)==-EOPNOTSUPP);
+        assert(!receiver_users && !receiver.thread && !receiver.streaming);
+        teardown(b);
+    }
+    setup_direct(b); receiver.native_hdr=true; receiver.hdr_curve_pending=true;
+    source_hdr=source_yuv=true; source_full=false;
+    assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+    assert(receiver.hdr_curve_pending); /* Mapped-mode LUT update stays pending. */
+    assert((readl(registers+VDIN_WR_CTRL2*4)&BIT(19))!=0);
+    assert(((readl(registers+VDIN_WR_CTRL*4)>>12)&3)==3);
+    assert(!pthread_create(&stop,NULL,stop_stream,NULL)); await(&stop_waiting,1);
+    step(1,false); pthread_join(stop,NULL);
+    teardown(b); assert(!live_leases);
     /* Import tail capacity must not enlarge the visible bytesused payload. */
     receiver.queue.priv=&receiver;
     receiver.frame_size=1920*1080*3/2;

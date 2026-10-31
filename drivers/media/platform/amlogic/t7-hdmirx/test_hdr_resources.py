@@ -21,7 +21,8 @@ typedef uint32_t u32;
 #define VDIN_HDR_MATRIX_OUT 0x12bc
 #define VDIN_HDR_CTRL 0x1280
 #define VDIN_MATRIX_CTRL 0x1210
-struct t7_vdin {u32 hdr_gain[149], hdr_oetf[149]; bool hdr_curve_pending, faulted; unsigned allocation_size;};
+struct t7_vdin {u32 hdr_gain[149], hdr_oetf[149]; bool hdr_curve_pending, faulted, direct_dma;
+ unsigned allocation_size, frame_capacity;};
 struct device {int unused;};
 struct vb2_queue {struct t7_vdin *priv; unsigned allocated;};
 static void *vb2_get_drv_priv(struct vb2_queue *q) {return q->priv;}

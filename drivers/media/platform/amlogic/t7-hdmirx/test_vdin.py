@@ -54,6 +54,7 @@ struct kref { int unused; };
 struct list_head { int unused; };
 struct vb2_v4l2_buffer { int unused; };
 struct v4l2_device { int unused; };
+struct v4l2_ctrl_handler { int unused; };
 struct video_device { int unused; };
 struct vb2_queue { int unused; };
 static u64 ktime_get_ns(void) { return 123456789; }

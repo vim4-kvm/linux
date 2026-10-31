@@ -31,9 +31,11 @@
 #include <media/v4l2-fh.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
+#include <media/v4l2-ctrls.h>
 #include <media/videobuf2-dma-contig.h>
 
 #include "t7-hdmirx.h"
+#include <linux/amlogic-vdin.h>
 
 static bool nv12;
 module_param(nv12, bool, 0400);
@@ -121,12 +123,17 @@ struct t7_vdin_snapshot {
 };
 
 struct t7_vdin {
+	struct v4l2_ctrl_handler controls;
 	u64 generation, ticket;
 	unsigned int width, height, stride, frame_size, allocation_size, frame_capacity;
 	/* Source lease geometry is independent of the downscaled DMA image. */
 	unsigned int input_width, input_height;
 	u32 pixel_format;
 	bool nv12;
+	/* Changed only by S_FMT with the queue empty; STREAMOFF joins the
+	 * capture worker before a different HDR2/MIF mode can be selected.
+	 */
+	bool native_hdr;
 	bool direct_dma;
 	struct kref ref;
 	struct device *dev;
@@ -299,7 +306,8 @@ static void t7_vdin_ring_arm(struct t7_vdin *vdin, unsigned int index)
 			      (address + vdin->stride * vdin->height) >> 4);
 	vdin->dma_idle = false;
 	vdin->ring_running = true;
-	if (vdin->hdr_curve_pending && t7_hdmirx_stream_is_hdr(vdin->receiver) &&
+	if (!vdin->native_hdr && vdin->hdr_curve_pending &&
+	    t7_hdmirx_stream_is_hdr(vdin->receiver) &&
 	    !t7_hdmirx_stream_is_hlg(vdin->receiver)) {
 		/* Requests are gated at an AXI-complete frame boundary. Ignore the
 		 * first frame after a LUT change if programming crosses blanking.
@@ -488,7 +496,8 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	t7_vdin_write(vdin, VDIN_GCLK_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_GCLK_CTRL2, 0);
 	/* The core supplies R/G/B; the packed MIF emits components 2/1/0. */
-	t7_vdin_write(vdin, VDIN_COM_CTRL0, vdin->nv12 ? 0x915 : 0x195);
+	t7_vdin_write(vdin, VDIN_COM_CTRL0,
+		      vdin->native_hdr || vdin->nv12 ? 0x915 : 0x195);
 	/* The fixed legacy RX leaves TOP format at RGB for 4:4:4, requiring this
 	 * component rotation. Dynamic mode configures TOP's native YUV mapping,
 	 * which already supplies Y/Cb/Cr, as does expanded 4:2:0.
@@ -520,13 +529,14 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	vdin->hdr_profile_programmed = false;
 	if (t7_hdmirx_stream_is_hlg(vdin->receiver) && vdin->nv12) {
 		t7_vdin_hlg_configure(vdin);
-	} else if (t7_hdmirx_stream_is_hdr(vdin->receiver)) {
+	} else if (!vdin->native_hdr && t7_hdmirx_stream_is_hdr(vdin->receiver)) {
 		t7_vdin_hdr_configure(vdin);
 		t7_vdin_record_hdr_luts(vdin);
 	}
 	t7_vdin_update(vdin, VDIN_LFIFO_CTRL, GENMASK(13, 0) | BIT(17) | BIT(18),
 		       BIT(17) | 0x780);
-	t7_vdin_write(vdin, VDIN_WR_CTRL2, BIT(18) | (2 << 12));
+	t7_vdin_write(vdin, VDIN_WR_CTRL2,
+		      BIT(18) | (2 << 12) | (vdin->native_hdr ? BIT(19) : 0));
 	t7_vdin_write(vdin, VDIN_WR_H_WIN, BIT(30) | (vdin->width - 1));
 	t7_vdin_write(vdin, VDIN_WR_V_WIN, vdin->height - 1);
 	/* Packed 24-bit output; use EOL to reset the packer on every line. */
@@ -535,6 +545,11 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 		      BIT(24) | BIT(23) | BIT(22) |
 		      (vdin->nv12 ? BIT(18) : (3 << 16)) |
 		      (vdin->nv12 ? (2 << 12) : BIT(12)) | BIT(10) | BIT(9));
+	if (vdin->native_hdr)
+		/* Full-pack422=3, average chroma pairs=2, no_swap=1. */
+		t7_vdin_write(vdin, VDIN_WR_CTRL,
+			      (2U << 30) | BIT(29) | BIT(27) | BIT(24) |
+			      BIT(23) | BIT(22) | (3 << 12) | BIT(10) | BIT(9));
 	t7_vdin_write(vdin, VDIN_WR_BADDR, vdin->frame_dma >> 4);
 	t7_vdin_write(vdin, VDIN_WR_STRIDE, vdin->stride >> 4);
 	if (vdin->nv12) {
@@ -925,7 +940,13 @@ static int t7_vdin_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
 			       struct device *alloc_devs[])
 {
 	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
-	unsigned int limit = (192U * 1024 * 1024) / vdin->allocation_size;
+	unsigned int budget = 192U * 1024 * 1024;
+	unsigned int limit;
+
+	/* Direct capture still owns a discard/snapshot DMA allocation. */
+	if (vdin->direct_dma)
+		budget -= vdin->frame_capacity;
+	limit = budget / vdin->allocation_size;
 
 	/* Reject retries before vb2 can allocate a new CMA-backed buffer pool. */
 	if (vdin->faulted)
@@ -1031,7 +1052,13 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	mutex_lock(&vdin->lock);
 	ret = vdin->faulted ? -EIO :
 		t7_hdmirx_stream_get(vdin->receiver, vdin->input_width, vdin->input_height);
-	if (!ret && !vdin->nv12 && t7_hdmirx_stream_is_yuv(vdin->receiver)) {
+	if (!ret && ((vdin->native_hdr &&
+		      (!t7_hdmirx_stream_is_hdr(vdin->receiver) ||
+		       t7_hdmirx_stream_is_hlg(vdin->receiver) ||
+		       !t7_hdmirx_stream_is_yuv(vdin->receiver) ||
+		       t7_hdmirx_stream_is_full_range(vdin->receiver))) ||
+		     (!vdin->native_hdr && !vdin->nv12 &&
+		      t7_hdmirx_stream_is_yuv(vdin->receiver)))) {
 		t7_hdmirx_stream_put(vdin->receiver);
 		ret = -EOPNOTSUPP;
 	}
@@ -1143,9 +1170,15 @@ static int t7_vdin_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *
 {
 	struct t7_vdin *vdin = video_drvdata(file);
 
-	if (fmt->index)
+	if (fmt->index > 1 || (fmt->index == 1 && !vdin->direct_dma))
 		return -EINVAL;
-	fmt->pixelformat = vdin->pixel_format;
+	fmt->pixelformat = fmt->index == 1 ? V4L2_PIX_FMT_AMLY :
+		(nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24);
+	/* Private formats must describe themselves or V4L2 emits an unknown
+	 * pixelformat WARN while completing ENUM_FMT.
+	 */
+	if (fmt->pixelformat == V4L2_PIX_FMT_AMLY)
+		strscpy(fmt->description, "T7 packed 10-bit CbYCrY");
 	return 0;
 }
 
@@ -1155,29 +1188,41 @@ static void t7_vdin_fill_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 	/* VDIN needs 16-byte rows; Wave5 imports NV12 with 32-byte rows.
 	 * Preserve the visible width while sharing the same DMA allocation.
 	 */
-	unsigned int stride = ALIGN(width * (vdin->nv12 ? 1 : 3),
-				    vdin->nv12 ? 32 : 16);
+	u32 format = fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY && vdin->direct_dma ?
+		V4L2_PIX_FMT_AMLY : nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24;
+	bool semiplanar = format == V4L2_PIX_FMT_NV12;
+	unsigned int stride = ALIGN(width * (semiplanar ? 1 : 3),
+				    semiplanar ? 32 : 16);
 
 	fmt->fmt.pix = (struct v4l2_pix_format) {
 		.width = width,
 		.height = height,
-		.pixelformat = vdin->pixel_format,
+		.pixelformat = format,
 		.field = V4L2_FIELD_NONE,
 		.bytesperline = stride,
-		.sizeimage = vdin->nv12 ? stride * ALIGN(height, 16) * 3 / 2 : stride * height,
-		.colorspace = vdin->nv12 ? V4L2_COLORSPACE_REC709 : V4L2_COLORSPACE_SRGB,
+		.sizeimage = semiplanar ? stride * ALIGN(height, 16) * 3 / 2 : stride * height,
+		.colorspace = semiplanar ? V4L2_COLORSPACE_REC709 : V4L2_COLORSPACE_SRGB,
 		/* Keep the vendor product's SDR video interpretation. */
-		.xfer_func = vdin->nv12 ? V4L2_XFER_FUNC_709 : V4L2_XFER_FUNC_SRGB,
-		.ycbcr_enc = vdin->nv12 ? V4L2_YCBCR_ENC_709 : V4L2_YCBCR_ENC_DEFAULT,
-		.quantization = vdin->nv12 ? V4L2_QUANTIZATION_LIM_RANGE :
+		.xfer_func = semiplanar ? V4L2_XFER_FUNC_709 : V4L2_XFER_FUNC_SRGB,
+		.ycbcr_enc = semiplanar ? V4L2_YCBCR_ENC_709 : V4L2_YCBCR_ENC_DEFAULT,
+		.quantization = semiplanar ? V4L2_QUANTIZATION_LIM_RANGE :
 					   V4L2_QUANTIZATION_FULL_RANGE,
 	};
+	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY) {
+		fmt->fmt.pix.bytesperline = ALIGN(width * 5 / 2, 32);
+		fmt->fmt.pix.sizeimage = fmt->fmt.pix.bytesperline * height;
+		fmt->fmt.pix.colorspace = V4L2_COLORSPACE_BT2020;
+		fmt->fmt.pix.xfer_func = V4L2_XFER_FUNC_SMPTE2084;
+		fmt->fmt.pix.ycbcr_enc = V4L2_YCBCR_ENC_BT2020;
+		fmt->fmt.pix.quantization = V4L2_QUANTIZATION_LIM_RANGE;
+	}
 }
 
 static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
 {
 	struct t7_vdin *vdin = video_drvdata(file);
 
+	fmt->fmt.pix.pixelformat = vdin->pixel_format;
 	t7_vdin_fill_fmt(vdin, fmt, vdin->width, vdin->height);
 	return 0;
 }
@@ -1194,7 +1239,11 @@ static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 		return ret;
 	if (timings->bt.width > 3840 || timings->bt.height > 2160)
 		return -ERANGE;
-	if (!vdin->nv12 || !width || !height) {
+	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY &&
+	    (!vdin->direct_dma || (timings->bt.width & 1) ||
+	     (timings->bt.height & 1)))
+		return -EINVAL;
+	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY || !nv12 || !width || !height) {
 		width = timings->bt.width;
 		height = timings->bt.height;
 	} else {
@@ -1242,11 +1291,14 @@ static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fm
 	if (!ret) {
 		unsigned int frame_size = fmt->fmt.pix.bytesperline * fmt->fmt.pix.height;
 
-		if (vdin->nv12)
+		if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_NV12)
 			frame_size += frame_size / 2;
 		if (frame_size > vdin->frame_capacity) {
 			ret = -ERANGE;
 		} else {
+			vdin->pixel_format = fmt->fmt.pix.pixelformat;
+			vdin->nv12 = vdin->pixel_format == V4L2_PIX_FMT_NV12;
+			vdin->native_hdr = vdin->pixel_format == V4L2_PIX_FMT_AMLY;
 			vdin->input_width = timings.bt.width;
 			vdin->input_height = timings.bt.height;
 			vdin->width = fmt->fmt.pix.width;
@@ -1370,7 +1422,10 @@ static const struct v4l2_file_operations t7_vdin_video_fops = {
 
 static void t7_vdin_release(struct kref *ref)
 {
-	kfree(container_of(ref, struct t7_vdin, ref));
+	struct t7_vdin *vdin = container_of(ref, struct t7_vdin, ref);
+
+	v4l2_ctrl_handler_free(&vdin->controls);
+	kfree(vdin);
 }
 
 static void t7_vdin_put(void *data)
@@ -1407,11 +1462,47 @@ static void t7_vdin_video_unregister(void *data)
 	put_device(&video->dev);
 }
 
+static int t7_vdin_get_control(struct v4l2_ctrl *ctrl)
+{
+	struct t7_vdin *vdin = container_of(ctrl->handler, struct t7_vdin, controls);
+	struct v4l2_ctrl_hdr10_cll_info cll;
+	struct v4l2_ctrl_hdr10_mastering_display mastering;
+	int ret;
+
+	ret = t7_hdmirx_get_hdr10(vdin->receiver, &cll, &mastering);
+	if (ret)
+		return ret;
+	if (ctrl->id == V4L2_CID_COLORIMETRY_HDR10_CLL_INFO)
+		memcpy(ctrl->p_new.p, &cll, sizeof(cll));
+	else
+		memcpy(ctrl->p_new.p, &mastering, sizeof(mastering));
+	return 0;
+}
+
+static const struct v4l2_ctrl_ops t7_vdin_control_ops = {
+	.g_volatile_ctrl = t7_vdin_get_control,
+};
+
 static int t7_vdin_video_register(struct t7_vdin *vdin)
 {
 	struct vb2_queue *queue = &vdin->queue;
 	struct video_device *video = &vdin->video;
 	int ret;
+	struct v4l2_ctrl *ctrl;
+	u32 ids[] = { V4L2_CID_COLORIMETRY_HDR10_CLL_INFO,
+		      V4L2_CID_COLORIMETRY_HDR10_MASTERING_DISPLAY };
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ids); i++) {
+		ctrl = v4l2_ctrl_new_std_compound(&vdin->controls, &t7_vdin_control_ops,
+						  ids[i], v4l2_ctrl_ptr_create(NULL),
+						  v4l2_ctrl_ptr_create(NULL),
+						  v4l2_ctrl_ptr_create(NULL));
+		if (ctrl)
+			ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE | V4L2_CTRL_FLAG_READ_ONLY;
+	}
+	if (vdin->controls.error)
+		return vdin->controls.error;
 
 	ret = v4l2_device_register(vdin->dev, &vdin->v4l2);
 	if (ret)
@@ -1432,6 +1523,7 @@ static int t7_vdin_video_register(struct t7_vdin *vdin)
 		goto unregister_v4l2;
 	strscpy(video->name, "t7-vdin-test", sizeof(video->name));
 	video->v4l2_dev = &vdin->v4l2;
+	video->ctrl_handler = &vdin->controls;
 	video->fops = &t7_vdin_video_fops;
 	video->ioctl_ops = &t7_vdin_ioctl_ops;
 	video->release = t7_vdin_video_release;
@@ -1690,6 +1782,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	if (!vdin)
 		return -ENOMEM;
 	kref_init(&vdin->ref);
+	v4l2_ctrl_handler_init(&vdin->controls, 2);
 	vdin->direct_dma = direct_dma;
 	ret = devm_add_action_or_reset(dev, t7_vdin_put, vdin);
 	if (ret)
@@ -1732,6 +1825,9 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	if (nv12)
 		vdin->frame_size += vdin->frame_size / 2;
 	vdin->frame_capacity = vdin->frame_size;
+	if (direct_dma)
+		vdin->frame_capacity = max(vdin->frame_capacity,
+					   ALIGN(vdin->width * 5 / 2, 32) * vdin->height);
 	/* Keep NV12 tightly packed, with tail room for aligned encoder plane views. */
 	vdin->allocation_size = nv12 ? vdin->stride * ALIGN(vdin->height, 16) * 3 / 2 :
 				       vdin->frame_size;
@@ -1788,7 +1884,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
-	vdin->frame = dma_alloc_coherent(dev, vdin->frame_size, &vdin->frame_dma, GFP_KERNEL);
+	vdin->frame = dma_alloc_coherent(dev, vdin->frame_capacity, &vdin->frame_dma, GFP_KERNEL);
 	if (!vdin->frame)
 		return -ENOMEM;
 	ret = devm_add_action_or_reset(dev, t7_vdin_free_frame, vdin);
