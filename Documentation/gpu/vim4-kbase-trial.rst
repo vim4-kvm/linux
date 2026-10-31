@@ -48,3 +48,17 @@ UK 11.39. Its delivery SHA256 is
 No DT or in-tree driver behavior changed in this follow-up. Rootfs runtime
 snapshots and the revised bounded CL probes live in the vim4-kvm repository.
 See docs/gpu-kbase-repair.md there for audit limits and the next board gate.
+
+Second board gate (2026-10-30 local date)
+---------------------------------------
+
+The r3 module booted with no WARN/BUG/oops in the complete captured dmesg.
+It created /dev/mali0 and reported UK 11.39. The matched rootfs helper
+snapshot brought HDMI, gadget, One-KVM and manager services active.
+
+The first GBM/FBO EGL capability probe exited 2 without output. No other
+candidate APIs or workloads were attempted. This does not establish which
+GBM/EGL setup stage failed or whether compute APIs work. The board was
+rebooted to 5.15; all five helpers and six protected boot-file hashes were
+restored. One-KVM was explicitly started before the final active/UDC check.
+Full evidence: docs/bringup/2026-10-30-kbase-r3-window.md in vim4-kvm.
