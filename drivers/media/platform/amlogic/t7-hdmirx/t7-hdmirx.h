@@ -7,6 +7,18 @@ struct v4l2_dv_timings;
 struct v4l2_fract;
 struct v4l2_edid;
 
+/* Source classification for an active dynamic stream, not the VDIN output. */
+struct t7_hdmirx_stream_color {
+	unsigned int depth;
+	unsigned int space;
+	unsigned int colorimetry;
+	bool full_range;
+	bool hdr10;
+};
+
+int t7_hdmirx_get_stream_color(struct device *dev,
+			       struct t7_hdmirx_stream_color *color);
+
 /* EDID changes are idempotent and refused while a capture lease owns DMA. */
 int t7_hdmirx_get_edid(struct device *dev, struct v4l2_edid *edid);
 int t7_hdmirx_set_edid(struct device *dev, const struct v4l2_edid *edid);

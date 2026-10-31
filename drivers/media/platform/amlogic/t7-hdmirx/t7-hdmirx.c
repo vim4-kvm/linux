@@ -1999,6 +1999,34 @@ int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int he
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_get);
 
+int t7_hdmirx_get_stream_color(struct device *dev,
+			       struct t7_hdmirx_stream_color *color)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	int ret = 0;
+
+	if (!color)
+		return -EINVAL;
+	mutex_lock(&rx->link->lock);
+	if (!rx->link->users) {
+		ret = -ENODATA;
+	} else if (!rx->dynamic_modes) {
+		/* Legacy fixed profiles do not retain complete source metadata. */
+		ret = -EOPNOTSUPP;
+	} else {
+		*color = (struct t7_hdmirx_stream_color) {
+			.depth = rx->lease_color.depth,
+			.space = rx->lease_color.space,
+			.colorimetry = rx->lease_color.colorimetry,
+			.full_range = rx->lease_color.full,
+			.hdr10 = rx->lease_hdr,
+		};
+	}
+	mutex_unlock(&rx->link->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_get_stream_color);
+
 bool t7_hdmirx_stream_is_hdr(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);
