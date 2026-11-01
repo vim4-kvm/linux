@@ -1939,7 +1939,12 @@ int t7_hdmirx_set_edid(struct device *dev, const struct v4l2_edid *edid)
 		goto out;
 	}
 	if (!size) {
-		t7_hdmirx_ddc_stop(rx);
+		/* Withdraw the EDID without restoring the pre-probe TOP reset and
+		 * port state underneath the running receiver workers. Keep DDC
+		 * ownership until driver teardown restores those saved registers.
+		 */
+		t7_hdmirx_set_hpd(rx, false);
+		rx->edid_blob.size = 0;
 		goto out;
 	}
 	previous_size = rx->edid_blob.size;

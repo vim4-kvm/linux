@@ -30,7 +30,7 @@ struct t7_hdmirx { struct link *link; struct { size_t size; } edid_blob;
     bool ddc_active, core_active, uhd60; };
 struct device { struct t7_hdmirx *data; };
 struct v4l2_edid { unsigned int pad, start_block, blocks; u8 *edid; };
-static int depth, programs, failures, stops;
+static int depth, programs, failures;
 static bool hpd = true;
 static void t7_hdmirx_set_hpd(struct t7_hdmirx *rx, bool high) { (void)rx; hpd=high; }
 static void *dev_get_drvdata(struct device *dev) { return dev->data; }
@@ -41,9 +41,6 @@ static int t7_hdmirx_ddc_start(struct t7_hdmirx *rx, const u8 *data, size_t size
     rx->edid_blob.size=0; rx->ddc_active=true; hpd=false;
     if (failures) { failures--; rx->ddc_active=false; return -EIO; }
     memcpy(rx->edid,data,size); rx->edid_blob.size=size; return 0;
-}
-static void t7_hdmirx_ddc_stop(struct t7_hdmirx *rx) {
-    stops++; rx->edid_blob.size=0; rx->ddc_active=false; hpd=false;
 }
 '''
 checks = r'''
@@ -82,9 +79,16 @@ int main(void) {
     request.blocks=2; table[127]^=1;
     assert(t7_hdmirx_set_edid(&dev,&request)==-EINVAL && programs==3);
     request.blocks=0; link.users=1;
-    assert(t7_hdmirx_set_edid(&dev,&request)==-EBUSY && stops==0);
-    link.users=0; assert(t7_hdmirx_set_edid(&dev,&request)==0 && stops==1);
-    assert(!hpd);
+    assert(t7_hdmirx_set_edid(&dev,&request)==-EBUSY && hpd);
+    link.users=0; assert(t7_hdmirx_set_edid(&dev,&request)==0);
+    /* HPD withdraws the EDID, but receiver workers retain live TOP state.
+     * DDC ownership must survive so final teardown still restores it.
+     */
+    assert(!hpd && !rx.edid_blob.size && rx.ddc_active && rx.core_active);
+    assert(rx.saved_reset==3 && rx.saved_port_sel==7);
+    read=(struct v4l2_edid){0};
+    assert(t7_hdmirx_get_edid(&dev,&read)==0 && !read.blocks);
+    assert(t7_hdmirx_set_edid(&dev,&request)==0 && !hpd && rx.ddc_active);
     request.blocks=2; request.edid=changed;
     assert(t7_hdmirx_set_edid(&dev,&request)==0 && hpd);
     table[127]^=1; request.edid=table; failures=2;
