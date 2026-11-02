@@ -59,6 +59,7 @@ static bool brcmf_wcc_extsae(struct brcmf_pub *drvr)
 static void brcmf_wcc_feat_attach(struct brcmf_if *ifp)
 {
 	char caps[768] = {};
+	bool discovery_bss;
 	int err;
 
 	if (ifp->drvr->bus_if->chip != BRCM_CC_43752_CHIP_ID)
@@ -67,7 +68,9 @@ static void brcmf_wcc_feat_attach(struct brcmf_if *ifp)
 	 * a separate firmware interface. Query p2p_dev instead of waiting for
 	 * IF_ADD/IF_DEL; group interfaces still use their normal IF events.
 	 */
-	if (!strcmp(ifp->drvr->fwver, "01-16e134aa"))
+	discovery_bss = !strcmp(ifp->drvr->fwver, "01-16e134aa") ||
+			!strcmp(ifp->drvr->fwver, "01-e47f9a86");
+	if (discovery_bss)
 		ifp->drvr->chip_quirks |= BIT(BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT) |
 					 BIT(BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY) |
 					 BIT(BRCMF_FEAT_QUIRK_ND_HOSTIP_V1);
@@ -77,7 +80,7 @@ static void brcmf_wcc_feat_attach(struct brcmf_if *ifp)
 	 * queueing frames for an interface whose radio context is absent.
 	 * Keep an explicit fcmode=0/1/2 request and other firmware defaults.
 	 */
-	if (!err && !strcmp(ifp->drvr->fwver, "01-16e134aa") &&
+	if (!err && discovery_bss &&
 	    strstr(caps, "proptxstatus ") &&
 	    ifp->drvr->settings->fcmode == BRCMF_FWS_FCMODE_AUTO)
 		ifp->drvr->settings->fcmode = BRCMF_FWS_FCMODE_EXPLICIT_CREDIT;

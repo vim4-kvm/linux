@@ -301,12 +301,18 @@ int main(void) {
      */
     struct brcmf_bus bus = {.chip=BRCM_CC_43752_CHIP_ID};
     struct brcmf_mp_device settings = {.fcmode=BRCMF_FWS_FCMODE_AUTO};
-    pub.bus_if=&bus; pub.settings=&settings; pub.fwver="01-16e134aa";
-    brcmf_wcc_feat_attach(&primary);
-    assert(settings.fcmode == BRCMF_FWS_FCMODE_EXPLICIT_CREDIT);
-    assert(pub.chip_quirks & BIT(BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT));
-    assert(pub.chip_quirks & BIT(BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY));
-    assert(pub.feat_flags & BIT(BRCMF_FEAT_SAE_EXT));
+    pub.bus_if=&bus; pub.settings=&settings;
+    const char *sdio_firmware[] = {"01-16e134aa", "01-e47f9a86"};
+    for (int i=0; i<2; i++) {
+        pub.fwver=sdio_firmware[i];
+        pub.chip_quirks=0; pub.feat_flags=0;
+        settings.fcmode=BRCMF_FWS_FCMODE_AUTO;
+        brcmf_wcc_feat_attach(&primary);
+        assert(settings.fcmode == BRCMF_FWS_FCMODE_EXPLICIT_CREDIT);
+        assert(pub.chip_quirks & BIT(BRCMF_FEAT_QUIRK_P2P_DEV_NO_IF_EVT));
+        assert(pub.chip_quirks & BIT(BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY));
+        assert(pub.feat_flags & BIT(BRCMF_FEAT_SAE_EXT));
+    }
     for (int mode=0; mode<=2; mode++) {
         settings.fcmode=mode;
         brcmf_wcc_feat_attach(&primary);
