@@ -934,6 +934,11 @@ static void meson_mmc_start_cmd(struct mmc_host *mmc, struct mmc_command *cmd)
 			dma_wmb();
 		}
 
+		if (!host->dram_access_quirk)
+			dma_sync_single_for_device(host->dev,
+						   host->bounce_dma_addr, xfer_bytes,
+						   DMA_BIDIRECTIONAL);
+
 		cmd_data = host->bounce_dma_addr & CMD_DATA_MASK;
 	} else {
 		cmd_cfg |= FIELD_PREP(CMD_CFG_TIMEOUT_MASK,
@@ -1117,6 +1122,14 @@ static int meson_mmc_wait_desc_stop(struct meson_host *host)
 				  100, 5000);
 }
 
+static void meson_mmc_bounce_sync_for_cpu(struct meson_host *host,
+					  struct mmc_data *data)
+{
+	if (data && !meson_mmc_desc_chain_mode(data) && !host->dram_access_quirk)
+		dma_sync_single_for_cpu(host->dev, host->bounce_dma_addr,
+					data->blksz * data->blocks, DMA_BIDIRECTIONAL);
+}
+
 static irqreturn_t meson_mmc_irq_thread(int irq, void *dev_id)
 {
 	struct meson_host *host = dev_id;
@@ -1129,12 +1142,14 @@ static irqreturn_t meson_mmc_irq_thread(int irq, void *dev_id)
 
 	if (cmd->error) {
 		meson_mmc_wait_desc_stop(host);
+		meson_mmc_bounce_sync_for_cpu(host, cmd->data);
 		meson_mmc_request_done(host->mmc, cmd->mrq);
 
 		return IRQ_HANDLED;
 	}
 
 	data = cmd->data;
+	meson_mmc_bounce_sync_for_cpu(host, data);
 	if (meson_mmc_bounce_buf_read(data)) {
 		xfer_bytes = data->blksz * data->blocks;
 		WARN_ON(xfer_bytes > host->bounce_buf_size);
@@ -1231,6 +1246,15 @@ static const struct mmc_host_ops meson_mmc_ops = {
 	.enable_sdio_irq = meson_mmc_enable_sdio_irq,
 	.ack_sdio_irq	= meson_mmc_ack_sdio_irq,
 };
+
+static void meson_mmc_free_bounce_buffer(void *data)
+{
+	struct meson_host *host = data;
+
+	dma_free_noncoherent(host->dev, host->bounce_buf_size,
+			     host->bounce_buf, host->bounce_dma_addr,
+			     DMA_BIDIRECTIONAL);
+}
 
 static int meson_mmc_probe(struct platform_device *pdev)
 {
@@ -1368,13 +1392,21 @@ static int meson_mmc_probe(struct platform_device *pdev)
 		/* data bounce buffer */
 		host->bounce_buf_size = mmc->max_req_size;
 		host->bounce_buf =
-			dmam_alloc_coherent(host->dev, host->bounce_buf_size,
-					    &host->bounce_dma_addr, GFP_KERNEL);
+			dma_alloc_noncoherent(host->dev, host->bounce_buf_size,
+					      &host->bounce_dma_addr,
+					      DMA_BIDIRECTIONAL, GFP_KERNEL);
 		if (host->bounce_buf == NULL) {
 			dev_err(host->dev, "Unable to map allocate DMA bounce buffer.\n");
 			ret = -ENOMEM;
 			goto err_free_irq;
 		}
+	}
+
+	if (!host->dram_access_quirk) {
+		ret = devm_add_action_or_reset(host->dev,
+					       meson_mmc_free_bounce_buffer, host);
+		if (ret)
+			goto err_free_irq;
 	}
 
 	host->descs = dmam_alloc_coherent(host->dev, SD_EMMC_DESC_BUF_LEN,
