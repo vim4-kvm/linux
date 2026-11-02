@@ -91,6 +91,7 @@
 #define   STATUS_BUSY BIT(31)
 #define   STATUS_DESC_BUSY BIT(30)
 #define   STATUS_DATI GENMASK(23, 16)
+#define   STATUS_DAT1 BIT(17)
 
 #define SD_EMMC_IRQ_EN 0x4c
 #define   IRQ_RXD_ERR_MASK GENMASK(7, 0)
@@ -1028,17 +1029,27 @@ static void __meson_mmc_enable_sdio_irq(struct mmc_host *mmc, int enable)
 	if (enable)
 		reg_irqen |= IRQ_SDIO;
 	writel(reg_irqen, host->regs + SD_EMMC_IRQ_EN);
+
+	if (enable) {
+		u32 status = readl(host->regs + SD_EMMC_STATUS);
+
+		/* Catch a card interrupt pending while masked, including at ack. */
+		if ((status & IRQ_SDIO) || !(status & STATUS_DAT1)) {
+			writel(IRQ_EN_MASK, host->regs + SD_EMMC_IRQ_EN);
+			writel(IRQ_SDIO, host->regs + SD_EMMC_STATUS);
+			sdio_signal_irq(mmc);
+		}
+	}
 }
 
 static irqreturn_t meson_mmc_irq(int irq, void *dev_id)
 {
 	struct meson_host *host = dev_id;
 	struct mmc_command *cmd;
-	u32 status, raw_status, irq_mask = IRQ_EN_MASK;
+	u32 status, raw_status, irq_mask;
 	irqreturn_t ret = IRQ_NONE;
 
-	if (host->mmc->caps & MMC_CAP_SDIO_IRQ)
-		irq_mask |= IRQ_SDIO;
+	irq_mask = readl(host->regs + SD_EMMC_IRQ_EN);
 	raw_status = readl(host->regs + SD_EMMC_STATUS);
 	status = raw_status & irq_mask;
 
@@ -1049,7 +1060,7 @@ static irqreturn_t meson_mmc_irq(int irq, void *dev_id)
 		return IRQ_NONE;
 	}
 
-	/* ack all raised interrupts */
+	/* Leave masked SDIO status pending until it is enabled again. */
 	writel(status, host->regs + SD_EMMC_STATUS);
 
 	cmd = host->cmd;
