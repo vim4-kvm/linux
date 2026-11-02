@@ -1373,6 +1373,7 @@ static int brcmf_sdio_hdparse(struct brcmf_sdio *bus, u8 *header,
 {
 	u16 len, checksum;
 	u8 rx_seq, fc, tx_seq_max;
+	u8 max_window = bus->ci->chip == BRCM_CC_43752_CHIP_ID ? 0x70 : 0x40;
 	u32 swheader;
 
 	trace_brcmf_sdpcm_hdr(SDPCM_RX, header);
@@ -1469,7 +1470,7 @@ static int brcmf_sdio_hdparse(struct brcmf_sdio *bus, u8 *header,
 		bus->flowcontrol = fc;
 	}
 	tx_seq_max = (swheader & SDPCM_WINDOW_MASK) >> SDPCM_WINDOW_SHIFT;
-	if ((u8)(tx_seq_max - bus->tx_seq) > 0x40) {
+	if ((u8)(tx_seq_max - bus->tx_seq) > max_window) {
 		brcmf_err("seq %d: max tx seq number error\n", rx_seq);
 		tx_seq_max = bus->tx_seq + 2;
 	}
