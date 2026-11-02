@@ -1458,7 +1458,9 @@ brcmf_fws_txs_process(struct brcmf_fws_info *fws, u8 flags, u32 hslot,
 	else if (flags == BRCMF_FWS_TXSTATUS_HOST_TOSSED)
 		fws->stats.txs_host_tossed += compcnt;
 	else
-		bphy_err(drvr, "unexpected txstatus\n");
+		bphy_err(drvr,
+			 "unexpected txstatus %u: hslot %u genbit %u seq %u count %u\n",
+			 flags, hslot, genbit, seq, compcnt);
 
 	while (cnt < compcnt) {
 		ret = brcmf_fws_hanger_poppkt(&fws->hanger, hslot, &skb,
