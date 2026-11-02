@@ -1042,6 +1042,14 @@ static void __meson_mmc_enable_sdio_irq(struct mmc_host *mmc, int enable)
 	}
 }
 
+static void meson_mmc_bounce_sync_for_cpu(struct meson_host *host,
+					  struct mmc_data *data)
+{
+	if (data && !meson_mmc_desc_chain_mode(data) && !host->dram_access_quirk)
+		dma_sync_single_for_cpu(host->dev, host->bounce_dma_addr,
+					data->blksz * data->blocks, DMA_BIDIRECTIONAL);
+}
+
 static irqreturn_t meson_mmc_irq(int irq, void *dev_id)
 {
 	struct meson_host *host = dev_id;
@@ -1101,7 +1109,14 @@ static irqreturn_t meson_mmc_irq(int irq, void *dev_id)
 		if (data && !cmd->error)
 			data->bytes_xfered = data->blksz * data->blocks;
 
-		return IRQ_WAKE_THREAD;
+		/* Keep the potentially large bounce read copy in the thread. */
+		if ((data && data->error) || meson_mmc_bounce_buf_read(data) ||
+		    meson_mmc_get_next_command(cmd))
+			return IRQ_WAKE_THREAD;
+
+		meson_mmc_bounce_sync_for_cpu(host, data);
+		meson_mmc_request_done(host->mmc, cmd->mrq);
+		return IRQ_HANDLED;
 	}
 
 out:
@@ -1131,14 +1146,6 @@ static int meson_mmc_wait_desc_stop(struct meson_host *host)
 	return readl_poll_timeout(host->regs + SD_EMMC_STATUS, status,
 				  !(status & (STATUS_BUSY | STATUS_DESC_BUSY)),
 				  100, 5000);
-}
-
-static void meson_mmc_bounce_sync_for_cpu(struct meson_host *host,
-					  struct mmc_data *data)
-{
-	if (data && !meson_mmc_desc_chain_mode(data) && !host->dram_access_quirk)
-		dma_sync_single_for_cpu(host->dev, host->bounce_dma_addr,
-					data->blksz * data->blocks, DMA_BIDIRECTIONAL);
 }
 
 static irqreturn_t meson_mmc_irq_thread(int irq, void *dev_id)
