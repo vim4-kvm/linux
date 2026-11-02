@@ -118,11 +118,15 @@ int brcmf_sdiod_intr_register(struct brcmf_sdio_dev *sdiodev)
 		sdiodev->oob_irq_requested = true;
 
 		ret = enable_irq_wake(pdata->oob_irq_nr);
-		if (ret != 0) {
+		if (!ret) {
+			disable_irq_wake(pdata->oob_irq_nr);
+		} else if (ret == -ENXIO) {
+			/* The IRQ can signal traffic without waking the host. */
+			sdiodev->bus_if->wowl_supported = false;
+		} else {
 			brcmf_err("enable_irq_wake failed %d\n", ret);
 			return ret;
 		}
-		disable_irq_wake(pdata->oob_irq_nr);
 
 		sdio_claim_host(sdiodev->func1);
 
