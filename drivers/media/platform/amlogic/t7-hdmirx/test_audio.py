@@ -13,6 +13,8 @@ functions = source[source.index('static u32 t7_hdmirx_audio_word'):
                    source.index('static const struct snd_soc_dai_ops t7_hdmirx_audio_ops')]
 worker = source[source.index('static const char * const t7_hdmirx_audio_control_names'):
                 source.index('static int t7_hdmirx_audio_control_info')]
+pcs = source[source.index('static void t7_hdmirx_reset_pcs'):
+             source.index('static int t7_hdmirx_core_start')]
 prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -59,7 +61,15 @@ struct snd_pcm_hw_params { unsigned int rate, channels; int format; };
 '''
 stubs = r'''
 static void mutex_lock(struct mutex *m) { assert(!m->held); m->held=true; }
-static void mutex_unlock(struct mutex *m) { assert(m->held); m->held=false; }
+static void (*pending_free)(void);
+static void mutex_unlock(struct mutex *m) {
+    assert(m->held); m->held=false;
+    if (pending_free) {
+        void (*run)(void) = pending_free;
+        pending_free = NULL;
+        run();
+    }
+}
 static u8 core[0x8000], top[0x4000], phy[0x90], fifo[0x30];
 static bool clocks, fail_clocks, pll_locked, lose_during_pll;
 static unsigned int writes, enables, disables;
@@ -126,6 +136,21 @@ static void schedule_delayed_work(struct delayed_work *work, unsigned int delay)
 }
 '''
 checks = r'''
+static struct snd_soc_dai *pulse_dai;
+static void free_pcm(void) {
+    assert(!t7_hdmirx_audio_hw_free(NULL, pulse_dai));
+}
+static void usleep_range(unsigned int low, unsigned int high) {
+    if (core[T7_RX_COR_POWER_RESET] & BIT(4)) {
+        /* Schedule PCM free between asserting and releasing the FIFO reset. */
+        struct t7_hdmirx *rx = dev_get_drvdata(pulse_dai->dev);
+        if (rx->audio_lock.held)
+            pending_free = free_pcm;
+        else
+            free_pcm();
+    }
+}
+''' + pcs + r'''
 int main(void) {
     struct t7_hdmirx rx = { .top=top, .phy=phy, .cor=core, .frhdmirx=fifo,
                             .core_active=true, .uhd60=true };
@@ -228,7 +253,10 @@ int main(void) {
     assert(clocks && rx.audio_active && (readl(fifo)&BIT(31)));
     assert((core[0x1429] & (BIT(6)|BIT(0)))==BIT(0));
     assert(t7_hdmirx_audio_hw_params(NULL,&params,&dai)==-EBUSY);
-    assert(!t7_hdmirx_audio_hw_free(NULL,&dai));
+    pulse_dai = &dai;
+    assert(!(core[T7_RX_COR_POWER_RESET] & (BIT(1) | BIT(4))));
+    t7_hdmirx_reset_pcs(&rx);
+    assert((core[T7_RX_COR_POWER_RESET] & (BIT(1) | BIT(4))) == BIT(1));
     assert(!clocks && !rx.audio_active && !readl(fifo));
     assert(!memcmp(phy+T7_RX_AUD_PLL0,saved,sizeof(saved)));
     for (unsigned int i=0;i<ARRAY_SIZE(t7_hdmirx_audio_core_settings);i++)

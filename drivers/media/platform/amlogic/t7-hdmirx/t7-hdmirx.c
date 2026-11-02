@@ -700,10 +700,13 @@ static void t7_hdmirx_reset_pcs(struct t7_hdmirx *rx)
 	/* T7 rx_cor_reset also pulses the deep-colour FIFO after TMDS relock.
 	 * PCS alignment alone can leave FDET at width+2/height zero.
 	 */
+	/* PCM prepare/free update bit 1 of the same register. */
+	mutex_lock(&rx->audio_lock);
 	reset = readb(rx->cor + T7_RX_COR_POWER_RESET) & ~BIT(4);
 	writeb(reset | BIT(4), rx->cor + T7_RX_COR_POWER_RESET);
 	usleep_range(1, 5);
 	writeb(reset, rx->cor + T7_RX_COR_POWER_RESET);
+	mutex_unlock(&rx->audio_lock);
 }
 
 static int t7_hdmirx_core_start(struct t7_hdmirx *rx)

@@ -26,6 +26,8 @@ prefix = r'''
 #include <errno.h>
 #include <stdio.h>
 struct mutex { int unused; };
+#define mutex_lock(m) ((void)(m))
+#define mutex_unlock(m) ((void)(m))
 struct delayed_work { int unused; };
 #define READ_ONCE(value) (value)
 #define WRITE_ONCE(place, value) ((place) = (value))
