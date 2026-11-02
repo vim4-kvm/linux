@@ -197,6 +197,7 @@ static inline bool ac_bitmap_tst(u8 bitmap, int prec)
 #define	CRYPTO_ALGO_TKIP		2
 #define	CRYPTO_ALGO_WEP128		3
 #define CRYPTO_ALGO_AES_CCM		4
+#define CRYPTO_ALGO_BIP			13
 #define CRYPTO_ALGO_AES_RESERVED1	5
 #define CRYPTO_ALGO_AES_RESERVED2	6
 #define CRYPTO_ALGO_NALG		7

@@ -2894,7 +2894,8 @@ brcmf_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
 		brcmf_dbg(CONN, "WLAN_CIPHER_SUITE_TKIP\n");
 		break;
 	case WLAN_CIPHER_SUITE_AES_CMAC:
-		key->algo = CRYPTO_ALGO_AES_CCM;
+		key->algo = drvr->bus_if->chip == BRCM_CC_43752_CHIP_ID ?
+			    CRYPTO_ALGO_BIP : CRYPTO_ALGO_AES_CCM;
 		val = AES_ENABLED;
 		brcmf_dbg(CONN, "WLAN_CIPHER_SUITE_AES_CMAC\n");
 		break;
