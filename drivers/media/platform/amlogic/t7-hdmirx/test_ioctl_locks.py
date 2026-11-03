@@ -79,6 +79,7 @@ struct video_device {
     struct device dev;
 };
 struct t7_vdin {
+    struct v4l2_fract fixed_interval;
     struct v4l2_ctrl_handler controls;
     struct mutex video_lock,queue_mutex,lock;
     struct video_device video; struct vb2_queue queue;
@@ -109,6 +110,8 @@ static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static bool queue_entered, release_queue, query_done, format_done;
 static bool pause_query, query_entered, release_query, remove_has_queue;
 static unsigned int rx_reads, queue_releases;
+#define min(a,b) ((a)<(b)?(a):(b))
+#define max(a,b) ((a)>(b)?(a):(b))
 static bool input_locked;
 static int vrr;
 static struct v4l2_fract measured = {1001, 60000};
@@ -258,6 +261,14 @@ int main(void) {
     assert(!t7_vdin_enum_frameintervals(&format_file,NULL,&iv));
     assert(iv.type==V4L2_FRMIVAL_TYPE_DISCRETE && iv.discrete.numerator==1001 &&
            iv.discrete.denominator==60000);
+    measured=(struct v4l2_fract){2777823,166666664};
+    assert(!t7_vdin_enum_frameintervals(&format_file,NULL,&iv));
+    measured.numerator=2777825;
+    assert(!t7_vdin_enum_frameintervals(&format_file,NULL,&iv));
+    assert(iv.discrete.numerator==2777823 && iv.discrete.denominator==166666664);
+    struct v4l2_streamparm parm={.type=V4L2_BUF_TYPE_VIDEO_CAPTURE};
+    assert(!t7_vdin_get_parm(&format_file,NULL,&parm));
+    assert(parm.parm.capture.timeperframe.numerator==2777825);
     for (vrr=-1; vrr<=60; vrr+=61) {
         assert(!t7_vdin_enum_frameintervals(&format_file,NULL,&iv));
         assert(iv.type==V4L2_FRMIVAL_TYPE_CONTINUOUS && iv.stepwise.min.numerator==1 &&

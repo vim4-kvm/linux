@@ -166,6 +166,7 @@ struct t7_vdin {
 	bool source_seen, source_locked;
 	struct v4l2_dv_timings source_mode;
 	unsigned int source_period;
+	struct v4l2_fract fixed_interval;
 	int source_vrr;
 	spinlock_t queue_lock;
 	struct list_head queued;
@@ -1141,6 +1142,7 @@ static void t7_vdin_source_work(struct work_struct *work)
 						       vdin->source_mode.bt.pixelclock / 2000,
 						       false) ||
 				(!vrr && delta > vdin->source_period / 2000))))) {
+			vdin->fixed_interval.denominator = 0;
 			event.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION;
 			vdin->source_changes++;
 			t7_vdin_trace_buffer(vdin, NULL, 8);
@@ -1329,14 +1331,25 @@ static int t7_vdin_enum_frameintervals(struct file *file, void *priv,
 		return -EINVAL;
 	vrr = t7_hdmirx_vrr_rate(vdin->receiver);
 	if (vrr) {
+		vdin->fixed_interval.denominator = 0;
 		/* The receiver admits 20..120 Hz when no base was signalled. */
 		ival->type = V4L2_FRMIVAL_TYPE_CONTINUOUS;
 		ival->stepwise.min = (struct v4l2_fract) { 1, vrr > 0 ? vrr : 120 };
 		ival->stepwise.max = (struct v4l2_fract) { 1, 20 };
 		ival->stepwise.step = (struct v4l2_fract) { 1, 1 };
 	} else {
+		struct v4l2_fract *fixed = &vdin->fixed_interval;
+		u32 delta = max(fixed->numerator, interval.numerator) -
+			    min(fixed->numerator, interval.numerator);
+
+		/* Keep the first measured fraction through RX meter jitter.
+		 * Detect a new cadence even before the source-change poll.
+		 */
+		if (fixed->denominator != interval.denominator ||
+		    delta > fixed->numerator / 2000)
+			*fixed = interval;
 		ival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
-		ival->discrete = interval;
+		ival->discrete = *fixed;
 	}
 	return 0;
 }

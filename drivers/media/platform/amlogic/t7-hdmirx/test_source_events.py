@@ -27,6 +27,7 @@ struct delayed_work { struct work_struct work; };
 struct device { int unused; };
 struct video_device { int unused; };
 struct t7_vdin {
+    struct v4l2_fract fixed_interval;
     struct delayed_work source_work; struct mutex video_lock;
     struct device *receiver; struct video_device video;
     bool source_seen,source_locked; struct v4l2_dv_timings source_mode;
