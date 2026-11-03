@@ -209,12 +209,12 @@ static unsigned int receiver_users;
 static bool source_hdr, source_hlg, source_yuv, source_full=true;
 static bool source_yuv444;
 static int source_yuv444_error;
-static unsigned source_quantization;
+static unsigned source_quantization, source_ycbcr_enc;
 static int t7_hdmirx_yuv444_format(void *dev, struct v4l2_pix_format *pix)
 {
  (void)dev;
  if (source_yuv444_error) return source_yuv444_error;
- if (pix) pix->quantization=source_quantization;
+ pix->quantization=source_quantization; pix->ycbcr_enc=source_ycbcr_enc;
  return source_yuv444 ? 0 : -EOPNOTSUPP;
 }
 static bool t7_hdmirx_stream_is_hdr(void *dev) { (void)dev; return source_hdr; }
@@ -308,7 +308,7 @@ static void setup(struct t7_vdin_buffer b[4]) {
     receiver.queue.priv=&receiver; receiver.queue.mem_ops=&mem_ops; receiver.regs=registers;
     receiver.width=1920; receiver.height=1080; receiver.stride=5760;
     receiver.input_width=1920; receiver.input_height=1080;
-    receiver.frame_size=VDIN_FRAME_SIZE;
+    receiver.frame_size=VDIN_FRAME_SIZE; receiver.configured_format.pixelformat=V4L2_PIX_FMT_RGB24;
     receiver.allocation_size=VDIN_FRAME_SIZE;
     started=entered=permits=completed=pins=stop_waiting=0;
     stopping=fail_timing=expire=false;
@@ -431,26 +431,30 @@ static void check_direct(void) {
 }
 int main(void) {
     struct t7_vdin_buffer b[4]; pthread_t stop;
-    setup_direct(b); receiver.nv12=false; receiver.pixel_format=V4L2_PIX_FMT_YUV24;
+    setup_direct(b); receiver.nv12=false; receiver.configured_format.pixelformat=V4L2_PIX_FMT_YUV24;
     assert(t7_vdin_start_streaming(&receiver.queue,4)==-EOPNOTSUPP);
     assert(!receiver_users && !receiver.thread && !receiver.streaming);
     teardown(b);
-    setup_direct(b); receiver.nv12=false; receiver.pixel_format=V4L2_PIX_FMT_YUV24;
-    source_yuv444=source_yuv=true;
-    source_quantization=V4L2_QUANTIZATION_FULL_RANGE;
-    receiver.configured_format.quantization=V4L2_QUANTIZATION_LIM_RANGE;
-    assert(t7_vdin_start_streaming(&receiver.queue,4)==-EPIPE);
-    assert(!receiver_users && !receiver.thread && !receiver.streaming);
-    teardown(b);
+    for (int range=0;range<2;range++) {
+        setup_direct(b); receiver.nv12=false; receiver.configured_format.pixelformat=V4L2_PIX_FMT_YUV24;
+        source_yuv444=source_yuv=true;
+        source_quantization=range ? V4L2_QUANTIZATION_FULL_RANGE : V4L2_QUANTIZATION_LIM_RANGE;
+        source_ycbcr_enc=range ? V4L2_YCBCR_ENC_709 : V4L2_YCBCR_ENC_601;
+        receiver.configured_format.quantization=V4L2_QUANTIZATION_LIM_RANGE;
+        receiver.configured_format.ycbcr_enc=V4L2_YCBCR_ENC_709;
+        assert(t7_vdin_start_streaming(&receiver.queue,4)==-EPIPE);
+        assert(!receiver_users && !receiver.thread && !receiver.streaming);
+        teardown(b);
+    }
     for (int error=0;error<2;error++) {
-        setup_direct(b); receiver.nv12=false; receiver.pixel_format=V4L2_PIX_FMT_YUV24;
+        setup_direct(b); receiver.nv12=false; receiver.configured_format.pixelformat=V4L2_PIX_FMT_YUV24;
         source_yuv444_error=error ? -ENOLINK : -EAGAIN;
         assert(t7_vdin_start_streaming(&receiver.queue,4)==source_yuv444_error);
         assert(!receiver_users && !receiver.thread && !receiver.streaming);
         teardown(b);
     }
-    source_yuv444_error=0; source_quantization=0;
-    setup_direct(b); receiver.nv12=false; receiver.pixel_format=V4L2_PIX_FMT_YUV24;
+    source_yuv444_error=0; source_quantization=source_ycbcr_enc=0;
+    setup_direct(b); receiver.nv12=false; receiver.configured_format.pixelformat=V4L2_PIX_FMT_YUV24;
     assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
     assert(!pthread_create(&stop,NULL,stop_stream,NULL)); await(&stop_waiting,1);
     step(1,false); pthread_join(stop,NULL);
@@ -460,14 +464,14 @@ int main(void) {
      * Rejection must release RX and every queued lease without starting DMA.
      */
     for (int bad=0;bad<4;bad++) {
-        setup_direct(b); receiver.native_hdr=true;
+        setup_direct(b); receiver.native_hdr=true; receiver.configured_format.pixelformat=V4L2_PIX_FMT_AMLY;
         source_hdr=bad!=0; source_hlg=bad==1;
         source_yuv=bad!=2; source_full=bad==3;
         assert(t7_vdin_start_streaming(&receiver.queue,4)==-EOPNOTSUPP);
         assert(!receiver_users && !receiver.thread && !receiver.streaming);
         teardown(b);
     }
-    setup_direct(b); receiver.native_hdr=true; receiver.hdr_curve_pending=true;
+    setup_direct(b); receiver.native_hdr=true; receiver.configured_format.pixelformat=V4L2_PIX_FMT_AMLY; receiver.hdr_curve_pending=true;
     source_hdr=source_yuv=true; source_full=false;
     assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
     assert(receiver.hdr_curve_pending); /* Mapped-mode LUT update stays pending. */
@@ -553,6 +557,7 @@ with tempfile.TemporaryDirectory() as directory:
     code.write_text(prefix + defines + '\n' + types + stubs + hardware + stream + checks)
     subprocess.run(['cc', '-std=gnu11', '-pthread', '-Wall', '-Wextra', '-Werror',
                     '-I', str(Path(__file__).parent),
+                    '-include', str(Path(__file__).resolve().parents[5] / 'include/uapi/linux/amlogic-vdin.h'),
                     '-O1', '-g', '-fsanitize=address,undefined',
                     '-Wno-unused-parameter', '-Wno-unused-function', str(code),
                     '-o', str(binary)], check=True)

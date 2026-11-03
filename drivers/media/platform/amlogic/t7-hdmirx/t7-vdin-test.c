@@ -131,7 +131,6 @@ struct t7_vdin {
 	struct v4l2_pix_format configured_format;
 	/* Source lease geometry is independent of the downscaled DMA image. */
 	unsigned int input_width, input_height;
-	u32 pixel_format;
 	bool nv12;
 	/* Changed only by S_FMT with the queue empty; STREAMOFF joins the
 	 * capture worker before a different HDR2/MIF mode can be selected.
@@ -499,7 +498,9 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	t7_vdin_update(vdin, VDIN_TOP_MISC, BIT(26) | BIT(29), 0);
 	t7_vdin_write(vdin, VDIN_GCLK_CTRL, 0);
 	t7_vdin_write(vdin, VDIN_GCLK_CTRL2, 0);
-	/* The core supplies R/G/B; the packed MIF emits components 2/1/0. */
+	/* Packed MIF emits components 2/1/0. Reverse the selectors for RGB24
+	 * and native YUV24 to preserve R/G/B or Y/Cb/Cr byte order.
+	 */
 	t7_vdin_write(vdin, VDIN_COM_CTRL0,
 		      vdin->native_hdr || vdin->nv12 ? 0x915 : 0x195);
 	/* The fixed legacy RX leaves TOP format at RGB for 4:4:4, requiring this
@@ -508,11 +509,6 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	 */
 	if (t7_hdmirx_stream_needs_yuv444_swap(vdin->receiver))
 		t7_vdin_write(vdin, VDIN_COM_CTRL0, 0x255);
-	/* TOP supplies Y/Cb/Cr. Packed MIF writes component 2/1/0, so
-	 * reverse the component selectors to produce Y/Cb/Cr bytes (YUV24).
-	 */
-	if (vdin->pixel_format == V4L2_PIX_FMT_YUV24)
-		t7_vdin_write(vdin, VDIN_COM_CTRL0, (1 << 8) | (2 << 6) | 0x15);
 	t7_vdin_write(vdin, VDIN_ASFIFO_CTRL1, 0xe40000);
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), BIT(26));
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), 0);
@@ -1070,24 +1066,21 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 	mutex_lock(&vdin->lock);
 	ret = vdin->faulted ? -EIO :
 		t7_hdmirx_stream_get(vdin->receiver, vdin->input_width, vdin->input_height);
-	if (!ret && ((vdin->native_hdr &&
-		      (!t7_hdmirx_stream_is_hdr(vdin->receiver) ||
-		       t7_hdmirx_stream_is_hlg(vdin->receiver) ||
-		       !t7_hdmirx_stream_is_yuv(vdin->receiver) ||
-		       t7_hdmirx_stream_is_full_range(vdin->receiver))) ||
-		     (!vdin->native_hdr && !vdin->nv12 &&
-		      vdin->pixel_format != V4L2_PIX_FMT_YUV24 &&
-		      t7_hdmirx_stream_is_yuv(vdin->receiver)))) {
-		t7_hdmirx_stream_put(vdin->receiver);
-		ret = -EOPNOTSUPP;
-	}
-	if (!ret && vdin->pixel_format == V4L2_PIX_FMT_YUV24) {
-		ret = t7_hdmirx_yuv444_format(vdin->receiver, &color);
-		if (!ret && (color.colorspace != vdin->configured_format.colorspace ||
-			     color.xfer_func != vdin->configured_format.xfer_func ||
-			     color.ycbcr_enc != vdin->configured_format.ycbcr_enc ||
-			     color.quantization != vdin->configured_format.quantization))
-			ret = -EPIPE;
+	if (!ret) {
+		if ((vdin->configured_format.pixelformat == V4L2_PIX_FMT_AMLY &&
+		     (!t7_hdmirx_stream_is_hdr(vdin->receiver) ||
+		      t7_hdmirx_stream_is_hlg(vdin->receiver) ||
+		      !t7_hdmirx_stream_is_yuv(vdin->receiver) ||
+		      t7_hdmirx_stream_is_full_range(vdin->receiver))) ||
+		    (vdin->configured_format.pixelformat == V4L2_PIX_FMT_RGB24 &&
+		     t7_hdmirx_stream_is_yuv(vdin->receiver))) {
+			ret = -EOPNOTSUPP;
+		} else if (vdin->configured_format.pixelformat == V4L2_PIX_FMT_YUV24) {
+			ret = t7_hdmirx_yuv444_format(vdin->receiver, &color);
+			if (!ret && (color.ycbcr_enc != vdin->configured_format.ycbcr_enc ||
+				     color.quantization != vdin->configured_format.quantization))
+				ret = -EPIPE;
+		}
 		if (ret)
 			t7_hdmirx_stream_put(vdin->receiver);
 	}
@@ -1365,9 +1358,8 @@ static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fm
 			vdin->frame_capacity = capacity;
 		}
 		vdin->configured_format = fmt->fmt.pix;
-		vdin->pixel_format = fmt->fmt.pix.pixelformat;
-		vdin->nv12 = vdin->pixel_format == V4L2_PIX_FMT_NV12;
-		vdin->native_hdr = vdin->pixel_format == V4L2_PIX_FMT_AMLY;
+		vdin->nv12 = vdin->configured_format.pixelformat == V4L2_PIX_FMT_NV12;
+		vdin->native_hdr = vdin->configured_format.pixelformat == V4L2_PIX_FMT_AMLY;
 		vdin->input_width = timings.bt.width;
 		vdin->input_height = timings.bt.height;
 		vdin->width = fmt->fmt.pix.width;
@@ -1902,7 +1894,6 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	vdin->nv12 = nv12;
-	vdin->pixel_format = nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24;
 	vdin->input_width = vdin->width;
 	vdin->input_height = vdin->height;
 	vdin->stride = vdin->width * (nv12 ? 1 : 3);

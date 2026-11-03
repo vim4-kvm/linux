@@ -53,7 +53,7 @@ bool t7_hdmirx_stream_needs_yuv444_swap(struct device *dev);
 bool t7_hdmirx_stream_is_full_range(struct device *dev);
 bool t7_hdmirx_stream_is_bt601(struct device *dev);
 
-/* Qualify native SDR YCbCr444/8 and optionally report its colorimetry. */
+/* Qualify native SDR YCbCr444/8 and report its colorimetry. */
 int t7_hdmirx_yuv444_format(struct device *dev, struct v4l2_pix_format *pix);
 
 #endif

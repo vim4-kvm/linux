@@ -2230,15 +2230,13 @@ int t7_hdmirx_yuv444_format(struct device *dev, struct v4l2_pix_format *pix)
 		ret = -EOPNOTSUPP;
 		goto out;
 	}
-	if (pix) {
-		pix->colorspace = color.colorimetry == 1 ?
-			V4L2_COLORSPACE_SMPTE170M : V4L2_COLORSPACE_REC709;
-		pix->xfer_func = V4L2_XFER_FUNC_709;
-		pix->ycbcr_enc = color.colorimetry == 1 ?
-			V4L2_YCBCR_ENC_601 : V4L2_YCBCR_ENC_709;
-		pix->quantization = color.full ? V4L2_QUANTIZATION_FULL_RANGE :
-			V4L2_QUANTIZATION_LIM_RANGE;
-	}
+	pix->colorspace = color.colorimetry == 1 ?
+		V4L2_COLORSPACE_SMPTE170M : V4L2_COLORSPACE_REC709;
+	pix->xfer_func = V4L2_XFER_FUNC_709;
+	pix->ycbcr_enc = color.colorimetry == 1 ?
+		V4L2_YCBCR_ENC_601 : V4L2_YCBCR_ENC_709;
+	pix->quantization = color.full ? V4L2_QUANTIZATION_FULL_RANGE :
+		V4L2_QUANTIZATION_LIM_RANGE;
 out:
 	mutex_unlock(&rx->link->lock);
 	return ret;

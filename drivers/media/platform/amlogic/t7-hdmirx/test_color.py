@@ -41,7 +41,7 @@ struct t7_hdmirx {struct link *link; bool lease_hdr, live_hdr;};
 struct device {struct t7_hdmirx *rx;};
 typedef __u32 u32;
 static bool nv12=true;
-struct t7_vdin {bool nv12; unsigned pixel_format; struct device *receiver; bool direct_dma;};
+struct t7_vdin {bool nv12; struct device *receiver; bool direct_dma;};
 static unsigned reads;
 static void mutex_lock(int *lock) {assert(!*lock); *lock=1;}
 static void mutex_unlock(int *lock) {assert(*lock); *lock=0;}
@@ -55,7 +55,7 @@ fixture += '\n' + function('t7-vdin-test.c', 'static void t7_vdin_fill_fmt(')
 fixture += r'''
 int main(void) {
  struct link link={0}; struct t7_hdmirx rx={.link=&link};
- struct device dev={&rx}; struct t7_vdin v={.nv12=true,.pixel_format=V4L2_PIX_FMT_NV12,.receiver=&dev};
+ struct device dev={&rx}; struct t7_vdin v={.nv12=true,.receiver=&dev};
  struct v4l2_format fmt={0};
  assert(!t7_hdmirx_capture_is_hdr(&dev) && reads==0);
  link.ready=true; rx.live_hdr=true;

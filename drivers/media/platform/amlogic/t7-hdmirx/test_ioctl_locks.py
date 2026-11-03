@@ -87,7 +87,7 @@ struct t7_vdin {
     struct mutex video_lock,queue_mutex,lock;
     struct video_device video; struct vb2_queue queue;
     struct device *dev,*receiver; struct v4l2_device v4l2; unsigned int ref;
-    unsigned int width,height,pixel_format,stride,allocation_size,frame_capacity,frame_size;
+    unsigned int width,height,stride,allocation_size,frame_capacity,frame_size;
     unsigned int input_width,input_height;
     unsigned int default_frame_capacity;
     struct v4l2_pix_format configured_format;
@@ -255,7 +255,7 @@ int main(void) {
     capture.frame_capacity=capture.allocation_size;
     capture.default_frame_capacity=capture.frame_capacity;
     capture.frame=malloc(1); capture.frame_dma=(uintptr_t)capture.frame;
-    capture.pixel_format=V4L2_PIX_FMT_NV12; capture.ref=1;
+    capture.configured_format.pixelformat=V4L2_PIX_FMT_NV12; capture.ref=1;
     assert(!t7_vdin_video_register(&capture));
     struct call stop={.cmd=VIDIOC_STREAMOFF},query={.cmd=VIDIOC_QUERY_DV_TIMINGS};
     struct call format={.cmd=VIDIOC_S_FMT};
@@ -322,7 +322,7 @@ int main(void) {
     fmt.fmt.pix.width=1280; fmt.fmt.pix.height=720;
     fail_allocation=true;
     assert(dispatch(VIDIOC_S_FMT,&fmt)==-ENOMEM);
-    assert(capture.frame_capacity==12441600 && capture.pixel_format==V4L2_PIX_FMT_NV12);
+    assert(capture.frame_capacity==12441600 && capture.configured_format.pixelformat==V4L2_PIX_FMT_NV12);
     assert(!allocations && !frees);
     fail_allocation=false;
     assert(!dispatch(VIDIOC_S_FMT,&fmt));
@@ -343,7 +343,7 @@ int main(void) {
     fmt.fmt.pix.pixelformat=V4L2_PIX_FMT_NV12;
     fail_allocation=true;
     assert(dispatch(VIDIOC_S_FMT,&fmt)==-ENOMEM);
-    assert(capture.frame_capacity==24883200 && capture.pixel_format==V4L2_PIX_FMT_YUV24);
+    assert(capture.frame_capacity==24883200 && capture.configured_format.pixelformat==V4L2_PIX_FMT_YUV24);
     fail_allocation=false;
     assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.nv12);
     assert(capture.frame_capacity==12441600 && allocations==2 && frees==2);
