@@ -50,7 +50,7 @@ struct t7_vdin_buffer {dma_addr_t dma; bool hardware_used; u32 generation; u64 t
 struct t7_vdin_slot {dma_addr_t dma; struct t7_vdin_buffer *buffer; int state;};
 struct t7_vdin {
     struct t7_vdin_slot slots[1]; unsigned int stride,height,active_slot;
-    bool direct_dma,nv12,dma_idle,ring_running,hdr_curve_pending,ring_discard;
+    bool direct_dma,nv12,dma_idle,ring_running,hdr_curve_pending,ring_discard,native_hdr;
     void *receiver;
     u32 generation;
     u64 ticket;
