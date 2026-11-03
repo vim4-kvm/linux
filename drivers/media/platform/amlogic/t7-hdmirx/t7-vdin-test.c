@@ -504,6 +504,11 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	 */
 	if (t7_hdmirx_stream_needs_yuv444_swap(vdin->receiver))
 		t7_vdin_write(vdin, VDIN_COM_CTRL0, 0x255);
+	/* TOP supplies Y/Cb/Cr. Packed MIF writes component 2/1/0, so
+	 * reverse the component selectors to produce Y/Cb/Cr bytes (YUV24).
+	 */
+	if (vdin->pixel_format == V4L2_PIX_FMT_YUV24)
+		t7_vdin_write(vdin, VDIN_COM_CTRL0, (1 << 8) | (2 << 6) | 0x15);
 	t7_vdin_write(vdin, VDIN_ASFIFO_CTRL1, 0xe40000);
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), BIT(26));
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), 0);
@@ -1057,7 +1062,10 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 		       t7_hdmirx_stream_is_hlg(vdin->receiver) ||
 		       !t7_hdmirx_stream_is_yuv(vdin->receiver) ||
 		       t7_hdmirx_stream_is_full_range(vdin->receiver))) ||
+		     (vdin->pixel_format == V4L2_PIX_FMT_YUV24 &&
+		      t7_hdmirx_yuv444_format(vdin->receiver, NULL)) ||
 		     (!vdin->native_hdr && !vdin->nv12 &&
+		      vdin->pixel_format != V4L2_PIX_FMT_YUV24 &&
 		      t7_hdmirx_stream_is_yuv(vdin->receiver)))) {
 		t7_hdmirx_stream_put(vdin->receiver);
 		ret = -EOPNOTSUPP;
@@ -1170,10 +1178,13 @@ static int t7_vdin_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *
 {
 	struct t7_vdin *vdin = video_drvdata(file);
 
-	if (fmt->index > 1 || (fmt->index == 1 && !vdin->direct_dma))
+	if (fmt->index > 2 || (fmt->index && !vdin->direct_dma))
 		return -EINVAL;
-	fmt->pixelformat = fmt->index == 1 ? V4L2_PIX_FMT_AMLY :
-		(nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24);
+	if (fmt->index == 2)
+		fmt->pixelformat = V4L2_PIX_FMT_YUV24;
+	else
+		fmt->pixelformat = fmt->index == 1 ? V4L2_PIX_FMT_AMLY :
+			(nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24);
 	/* Private formats must describe themselves or V4L2 emits an unknown
 	 * pixelformat WARN while completing ENUM_FMT.
 	 */
@@ -1188,8 +1199,10 @@ static void t7_vdin_fill_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 	/* VDIN needs 16-byte rows; Wave5 imports NV12 with 32-byte rows.
 	 * Preserve the visible width while sharing the same DMA allocation.
 	 */
-	u32 format = fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY && vdin->direct_dma ?
-		V4L2_PIX_FMT_AMLY : nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24;
+	u32 requested = fmt->fmt.pix.pixelformat;
+	u32 format = vdin->direct_dma &&
+		(requested == V4L2_PIX_FMT_AMLY || requested == V4L2_PIX_FMT_YUV24) ?
+		requested : nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24;
 	bool semiplanar = format == V4L2_PIX_FMT_NV12;
 	unsigned int stride = ALIGN(width * (semiplanar ? 1 : 3),
 				    semiplanar ? 32 : 16);
@@ -1224,6 +1237,8 @@ static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fm
 
 	fmt->fmt.pix.pixelformat = vdin->pixel_format;
 	t7_vdin_fill_fmt(vdin, fmt, vdin->width, vdin->height);
+	if (vdin->pixel_format == V4L2_PIX_FMT_YUV24)
+		return t7_hdmirx_yuv444_format(vdin->receiver, &fmt->fmt.pix);
 	return 0;
 }
 
@@ -1243,7 +1258,10 @@ static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 	    (!vdin->direct_dma || (timings->bt.width & 1) ||
 	     (timings->bt.height & 1)))
 		return -EINVAL;
-	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY || !nv12 || !width || !height) {
+	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_YUV24 && !vdin->direct_dma)
+		return -EOPNOTSUPP;
+	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY ||
+	    fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_YUV24 || !nv12 || !width || !height) {
 		width = timings->bt.width;
 		height = timings->bt.height;
 	} else {
@@ -1263,6 +1281,8 @@ static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 		height &= ~1U;
 	}
 	t7_vdin_fill_fmt(vdin, fmt, width, height);
+	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_YUV24)
+		return t7_hdmirx_yuv444_format(vdin->receiver, &fmt->fmt.pix);
 	return 0;
 }
 
@@ -1827,7 +1847,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	vdin->frame_capacity = vdin->frame_size;
 	if (direct_dma)
 		vdin->frame_capacity = max(vdin->frame_capacity,
-					   ALIGN(vdin->width * 5 / 2, 32) * vdin->height);
+					   ALIGN(vdin->width * 3, 32) * vdin->height);
 	/* Keep NV12 tightly packed, with tail room for aligned encoder plane views. */
 	vdin->allocation_size = nv12 ? vdin->stride * ALIGN(vdin->height, 16) * 3 / 2 :
 				       vdin->frame_size;

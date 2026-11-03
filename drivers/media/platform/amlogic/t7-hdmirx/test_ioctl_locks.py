@@ -125,6 +125,9 @@ static int __attribute__((unused)) mutex_trylock(struct mutex *lock) {
 static void mutex_unlock(struct mutex *lock) { assert(!pthread_mutex_unlock(&lock->native)); }
 static void *video_drvdata(struct file *file) { return file->data; }
 static bool vb2_is_busy(struct vb2_queue *queue) { return queue->busy; }
+static int yuv444_status;
+static int t7_hdmirx_yuv444_format(struct device *dev, struct v4l2_pix_format *pix)
+{ return yuv444_status; }
 static int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *mode,
                                   struct v4l2_fract *interval) {
     (void)dev; (void)mode; (void)interval;
@@ -284,6 +287,21 @@ int main(void) {
     input_width=3840; input_height=2160;
     fmt.fmt.pix.width=3840; fmt.fmt.pix.height=2160;
     assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.width==3840);
+    /* Native 444 retains the entire source raster and rejects a changed source. */
+    fmt.fmt.pix.pixelformat=V4L2_PIX_FMT_YUV24;
+    assert(dispatch(VIDIOC_S_FMT,&fmt)==-EOPNOTSUPP);
+    capture.direct_dma=true; capture.frame_capacity=3840*2160*3;
+    fmt.fmt.pix.width=1280; fmt.fmt.pix.height=720;
+    assert(!dispatch(VIDIOC_S_FMT,&fmt));
+    assert(capture.width==3840 && capture.height==2160 && capture.stride==11520);
+    assert(capture.frame_size==24883200 && !capture.nv12 && !capture.native_hdr);
+    capture.queue.busy=true;
+    assert(dispatch(VIDIOC_S_FMT,&fmt)==-EBUSY);
+    capture.queue.busy=false; yuv444_status=-EOPNOTSUPP;
+    assert(dispatch(VIDIOC_S_FMT,&fmt)==-EOPNOTSUPP);
+    assert(dispatch(VIDIOC_G_FMT,&fmt)==-EOPNOTSUPP);
+    fmt.fmt.pix.pixelformat=V4L2_PIX_FMT_NV12;
+    assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.nv12);
     /* A query already using RX must finish before removal clears registration. */
     pause_query=true; query_entered=query_done=false; capture.queue.owner=&capture;
     pthread_create(&b,NULL,call_worker,&query); assert(wait_for(&query_entered));

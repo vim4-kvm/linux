@@ -206,6 +206,9 @@ static void vb2_queue_error(struct vb2_queue *q) {
 static int t7_hdmirx_check_video(void *dev) { return fail_timing?-ENOLINK:0; }
 static unsigned int receiver_users;
 static bool source_hdr, source_hlg, source_yuv, source_full=true;
+static bool source_yuv444;
+static int t7_hdmirx_yuv444_format(void *dev, struct v4l2_pix_format *pix)
+{ (void)dev; (void)pix; return source_yuv444 ? 0 : -EOPNOTSUPP; }
 static bool t7_hdmirx_stream_is_hdr(void *dev) { (void)dev; return source_hdr; }
 static bool t7_hdmirx_stream_is_hlg(void *dev) { (void)dev; return source_hlg; }
 static bool t7_hdmirx_stream_is_yuv(void *dev) { (void)dev; return source_yuv; }
@@ -419,6 +422,17 @@ static void check_direct(void) {
 }
 int main(void) {
     struct t7_vdin_buffer b[4]; pthread_t stop;
+    setup_direct(b); receiver.nv12=false; receiver.pixel_format=V4L2_PIX_FMT_YUV24;
+    assert(t7_vdin_start_streaming(&receiver.queue,4)==-EOPNOTSUPP);
+    assert(!receiver_users && !receiver.thread && !receiver.streaming);
+    teardown(b);
+    setup_direct(b); receiver.nv12=false; receiver.pixel_format=V4L2_PIX_FMT_YUV24;
+    source_yuv444=source_yuv=true;
+    assert(!t7_vdin_start_streaming(&receiver.queue,4)); await(&started,1);
+    assert(!pthread_create(&stop,NULL,stop_stream,NULL)); await(&stop_waiting,1);
+    step(1,false); pthread_join(stop,NULL);
+    teardown(b); assert(!live_leases);
+    source_yuv444=source_yuv=false;
     /* Native capture admits only the validated PQ/limited YUV transport.
      * Rejection must release RX and every queued lease without starting DMA.
      */

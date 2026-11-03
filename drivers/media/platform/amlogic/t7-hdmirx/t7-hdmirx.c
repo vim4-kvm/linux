@@ -2123,6 +2123,45 @@ bool t7_hdmirx_stream_is_bt601(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(t7_hdmirx_stream_is_bt601);
 
+int t7_hdmirx_yuv444_format(struct device *dev, struct v4l2_pix_format *pix)
+{
+	struct t7_hdmirx *rx = dev_get_drvdata(dev);
+	struct t7_hdmirx_color color;
+	int ret;
+
+	if (!rx || !rx->link || !rx->dynamic_modes)
+		return -EOPNOTSUPP;
+	mutex_lock(&rx->link->lock);
+	ret = t7_hdmirx_video_status_reason(rx, NULL);
+	if (ret)
+		goto out;
+	if (rx->link->users)
+		color = rx->lease_color;
+	else
+		ret = t7_hdmirx_read_color(rx, &color);
+	if (ret)
+		goto out;
+	if (color.space != 2 || color.depth != 8 ||
+	    (color.colorimetry != 1 && color.colorimetry != 2) ||
+	    (rx->link->users ? rx->lease_hdr : t7_hdmirx_hdr_input(rx))) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+	if (pix) {
+		pix->colorspace = color.colorimetry == 1 ?
+			V4L2_COLORSPACE_SMPTE170M : V4L2_COLORSPACE_REC709;
+		pix->xfer_func = V4L2_XFER_FUNC_709;
+		pix->ycbcr_enc = color.colorimetry == 1 ?
+			V4L2_YCBCR_ENC_601 : V4L2_YCBCR_ENC_709;
+		pix->quantization = color.full ? V4L2_QUANTIZATION_FULL_RANGE :
+			V4L2_QUANTIZATION_LIM_RANGE;
+	}
+out:
+	mutex_unlock(&rx->link->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(t7_hdmirx_yuv444_format);
+
 void t7_hdmirx_stream_put(struct device *dev)
 {
 	struct t7_hdmirx *rx = dev_get_drvdata(dev);

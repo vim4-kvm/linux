@@ -33,8 +33,22 @@ static void *video_drvdata(struct file *f) {return f->driver;}
 #define strscpy(to,from) snprintf((char *)(to),sizeof(to),"%s",(from))
 struct vb2_queue {struct t7_vdin *driver; unsigned count;};
 struct device {struct t7_hdmirx *driver;};
-struct link {int lock;};
-struct t7_hdmirx {struct link *link; u8 drm_packet[30]; uint64_t drm_received_ns;};
+struct link {int lock, users;};
+struct t7_hdmirx_color {u32 space, depth, colorimetry; bool full;};
+struct t7_hdmirx {
+ struct link *link; u8 drm_packet[30]; uint64_t drm_received_ns;
+ bool dynamic_modes, lease_hdr;
+ struct t7_hdmirx_color lease_color;
+};
+static struct t7_hdmirx_color live_color;
+static bool live_hdr;
+static int live_status;
+static int t7_hdmirx_video_status_reason(struct t7_hdmirx *rx, const char **reason)
+{assert(rx->link->lock); return live_status;}
+static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *color)
+{assert(rx->link->lock); *color=live_color; return 0;}
+static bool t7_hdmirx_hdr_input(struct t7_hdmirx *rx)
+{assert(rx->link->lock); return live_hdr;}
 static void *vb2_get_drv_priv(struct vb2_queue *q) {return q->driver;}
 static unsigned vb2_get_num_buffers(struct vb2_queue *q) {return q->count;}
 static struct t7_hdmirx *dev_get_drvdata(struct device *d) {return d->driver;}
@@ -49,6 +63,7 @@ code = prefix + '\n'.join([
     function('t7-vdin-test.c', 'static int t7_vdin_queue_setup('),
     function('t7-hdmirx.c', 'static u16 t7_drm_word('),
     function('t7-hdmirx.c', 'int t7_hdmirx_get_hdr10('),
+    function('t7-hdmirx.c', 'int t7_hdmirx_yuv444_format('),
 ]) + r'''
 int main(void) {
  struct t7_vdin v={.direct_dma=true,.nv12=true};
@@ -104,6 +119,48 @@ int main(void) {
  assert(t7_hdmirx_get_hdr10(&dev,&cll,&master)==-ENODATA);
  rx.drm_received_ns=0;
  assert(t7_hdmirx_get_hdr10(&dev,&cll,&master)==-ENODATA);
+ /* Raw 444 uses a full pixel triplet, including nonaligned row padding. */
+ desc.index=2; assert(!t7_vdin_enum_fmt(&file,0,&desc));
+ assert(desc.pixelformat==V4L2_PIX_FMT_YUV24);
+ v.direct_dma=false; assert(t7_vdin_enum_fmt(&file,0,&desc)==-EINVAL);
+ v.direct_dma=true; f.fmt.pix.pixelformat=V4L2_PIX_FMT_YUV24;
+ t7_vdin_fill_fmt(&v,&f,1366,768);
+ assert(f.fmt.pix.bytesperline==4112 && f.fmt.pix.sizeimage==4112*768);
+ t7_vdin_fill_fmt(&v,&f,3840,2160);
+ assert(f.fmt.pix.bytesperline==11520 && f.fmt.pix.sizeimage==24883200);
+ v.frame_capacity=v.allocation_size=f.fmt.pix.sizeimage;
+ q.count=0; buffers=32; planes=0;
+ assert(!t7_vdin_queue_setup(&q,&buffers,&planes,sizes,0) && buffers==7);
+ assert((uint64_t)(buffers+1)*sizes[0]<=192U*1024*1024);
+ q.count=7; buffers=1; planes=0;
+ assert(t7_vdin_queue_setup(&q,&buffers,&planes,sizes,0)==-ENOBUFS);
+ assert(t7_hdmirx_yuv444_format(&dev,&f.fmt.pix)==-EOPNOTSUPP);
+ rx.dynamic_modes=true;
+ live_color=(struct t7_hdmirx_color){2,8,2,false};
+ assert(!t7_hdmirx_yuv444_format(&dev,&f.fmt.pix));
+ assert(f.fmt.pix.colorspace==V4L2_COLORSPACE_REC709);
+ assert(f.fmt.pix.quantization==V4L2_QUANTIZATION_LIM_RANGE);
+ for (unsigned space=0;space<4;space++) {
+  live_color.space=space;
+  assert(t7_hdmirx_yuv444_format(&dev,0)==(space==2?0:-EOPNOTSUPP));
+ }
+ live_color.space=2;
+ for (unsigned depth=10;depth<=12;depth+=2) {
+  live_color.depth=depth;
+  assert(t7_hdmirx_yuv444_format(&dev,0)==-EOPNOTSUPP);
+ }
+ live_color.depth=8;live_hdr=true;
+ assert(t7_hdmirx_yuv444_format(&dev,0)==-EOPNOTSUPP);
+ live_hdr=false;live_color.colorimetry=3;
+ assert(t7_hdmirx_yuv444_format(&dev,0)==-EOPNOTSUPP);
+ live_color.colorimetry=1;live_color.full=true;
+ assert(!t7_hdmirx_yuv444_format(&dev,&f.fmt.pix));
+ assert(f.fmt.pix.ycbcr_enc==V4L2_YCBCR_ENC_601);
+ assert(f.fmt.pix.quantization==V4L2_QUANTIZATION_FULL_RANGE);
+ rx.lease_color=live_color;link.users=1;live_color.space=0;
+ assert(!t7_hdmirx_yuv444_format(&dev,0));
+ live_status=-ENOLINK;
+ assert(t7_hdmirx_yuv444_format(&dev,0)==-ENOLINK);
 }
 '''
 with tempfile.TemporaryDirectory() as temp:

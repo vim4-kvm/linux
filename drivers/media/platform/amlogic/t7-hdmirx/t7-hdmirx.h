@@ -6,6 +6,7 @@ struct device;
 struct v4l2_dv_timings;
 struct v4l2_fract;
 struct v4l2_edid;
+struct v4l2_pix_format;
 struct v4l2_ctrl_hdr10_cll_info;
 struct v4l2_ctrl_hdr10_mastering_display;
 
@@ -48,5 +49,8 @@ bool t7_hdmirx_stream_is_yuv(struct device *dev);
 bool t7_hdmirx_stream_needs_yuv444_swap(struct device *dev);
 bool t7_hdmirx_stream_is_full_range(struct device *dev);
 bool t7_hdmirx_stream_is_bt601(struct device *dev);
+
+/* Qualify native SDR YCbCr444/8 and optionally report its colorimetry. */
+int t7_hdmirx_yuv444_format(struct device *dev, struct v4l2_pix_format *pix);
 
 #endif

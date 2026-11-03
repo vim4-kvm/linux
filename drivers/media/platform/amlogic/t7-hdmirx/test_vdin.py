@@ -23,6 +23,7 @@ prefix = r'''
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+#include <linux/videodev2.h>
 typedef uint32_t u32;
 typedef uint64_t dma_addr_t;
 typedef uint64_t u64;
@@ -239,6 +240,20 @@ static void scenarios(void)
     yuv_input=false;t7_vdin_configure(&receiver);
     assert(readl(registers+VDIN_HDR_CTRL*4)==BIT(16));
     assert(readl(registers+VDIN_HDR_MATRIX_OUT*4)==0);
+    receiver.nv12=false; receiver.pixel_format=V4L2_PIX_FMT_YUV24;
+    receiver.stride=11520; yuv_input=true;
+    t7_vdin_configure(&receiver);
+    unsigned mapping=readl(registers+VDIN_COM_CTRL0*4);
+    /* MIF emits 2/1/0. Check that three distinct input components survive. */
+    unsigned components[3]={17,83,219};
+    assert(components[(mapping>>10)&3]==17);
+    assert(components[(mapping>>8)&3]==83);
+    assert(components[(mapping>>6)&3]==219);
+    assert(readl(registers+VDIN_WR_STRIDE*4)==720);
+    assert(((readl(registers+VDIN_WR_CTRL*4)>>16)&3)==3);
+    assert(!readl(registers+VDIN_HDR_CTRL*4));
+    assert(!readl(registers+VDIN_SC_MISC_CTRL*4));
+    yuv_input=false;
     reset(); bad_timing = true;
     assert(t7_vdin_capture(&receiver) == -ERANGE && !requests && !receiver.armed);
     reset(); timeout = true;
