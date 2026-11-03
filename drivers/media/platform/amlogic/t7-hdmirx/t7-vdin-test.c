@@ -28,6 +28,7 @@
 #include <linux/workqueue.h>
 
 #include <media/v4l2-device.h>
+#include <media/v4l2-dv-timings.h>
 #include <media/v4l2-fh.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
@@ -163,8 +164,9 @@ struct t7_vdin {
 	struct mutex queue_mutex; /* vb2 allocation, streaming and close. */
 	struct delayed_work source_work;
 	bool source_seen, source_locked;
-	unsigned int source_width, source_height;
+	struct v4l2_dv_timings source_mode;
 	unsigned int source_period;
+	int source_vrr;
 	spinlock_t queue_lock;
 	struct list_head queued;
 	wait_queue_head_t buffer_wait;
@@ -1036,9 +1038,11 @@ static void t7_vdin_source_resumed(struct t7_vdin *vdin)
 	if (t7_hdmirx_query_timings(vdin->receiver, &timings, &interval))
 		return;
 	vdin->source_seen = true;
+	vdin->source_vrr = t7_hdmirx_vrr_rate(vdin->receiver);
 	vdin->source_locked = true;
-	vdin->source_width = timings.bt.width;
-	vdin->source_height = timings.bt.height;
+	if (vdin->source_vrr)
+		timings.bt.vfrontporch = 0;
+	vdin->source_mode = timings;
 	vdin->source_period = interval.denominator ?
 		div_u64((u64)interval.numerator * 1000000, interval.denominator) : 0;
 }
@@ -1115,6 +1119,7 @@ static void t7_vdin_source_work(struct work_struct *work)
 	struct v4l2_fract interval;
 	struct v4l2_event event = { .type = V4L2_EVENT_SOURCE_CHANGE };
 	unsigned int period = 0, delta;
+	int vrr;
 	bool locked;
 	int ret;
 
@@ -1123,14 +1128,19 @@ static void t7_vdin_source_work(struct work_struct *work)
 	/* A torn period is a retry, not evidence that the source disappeared. */
 	if (ret != -EAGAIN) {
 		locked = !ret;
+		vrr = locked ? t7_hdmirx_vrr_rate(vdin->receiver) : 0;
 		if (locked && interval.denominator)
 			period = div_u64((u64)interval.numerator * 1000000, interval.denominator);
 		delta = period > vdin->source_period ? period - vdin->source_period :
 			vdin->source_period - period;
+		if (vrr)
+			timings.bt.vfrontporch = 0;
 		if (vdin->source_seen && (locked != vdin->source_locked ||
-		    (locked && (timings.bt.width != vdin->source_width ||
-				timings.bt.height != vdin->source_height ||
-				delta > vdin->source_period / 2000)))) {
+		    (locked && (vrr != vdin->source_vrr ||
+				!v4l2_match_dv_timings(&timings, &vdin->source_mode,
+						       vdin->source_mode.bt.pixelclock / 2000,
+						       false) ||
+				(!vrr && delta > vdin->source_period / 2000))))) {
 			event.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION;
 			vdin->source_changes++;
 			t7_vdin_trace_buffer(vdin, NULL, 8);
@@ -1139,9 +1149,9 @@ static void t7_vdin_source_work(struct work_struct *work)
 		vdin->source_seen = true;
 		vdin->source_locked = locked;
 		if (locked) {
-			vdin->source_width = timings.bt.width;
-			vdin->source_height = timings.bt.height;
+			vdin->source_mode = timings;
 			vdin->source_period = period;
+			vdin->source_vrr = vrr;
 		}
 	}
 	mutex_unlock(&vdin->video_lock);
@@ -1359,8 +1369,7 @@ static int t7_vdin_get_parm(struct file *file, void *priv, struct v4l2_streampar
 	if (ret)
 		return ret;
 	/* Capture cannot change the source clock; TIMEPERFRAME capability would
-	 * incorrectly promise S_PARM support. VRR reports the base interval;
-	 * actual delivery times remain available on each completed buffer.
+	 * incorrectly promise S_PARM support. Report the actual RX period.
 	 */
 	memset(&parm->parm, 0, sizeof(parm->parm));
 	parm->parm.capture.timeperframe = interval;
@@ -1470,6 +1479,10 @@ static int t7_vdin_get_control(struct v4l2_ctrl *ctrl)
 	struct v4l2_ctrl_hdr10_mastering_display mastering;
 	int ret;
 
+	if (ctrl->id == V4L2_CID_USER_T7_VDIN_VRR_RATE) {
+		ctrl->val = t7_hdmirx_vrr_rate(vdin->receiver);
+		return 0;
+	}
 	ret = t7_hdmirx_get_hdr10(vdin->receiver, &cll, &mastering);
 	if (ret)
 		return ret;
@@ -1484,6 +1497,17 @@ static const struct v4l2_ctrl_ops t7_vdin_control_ops = {
 	.g_volatile_ctrl = t7_vdin_get_control,
 };
 
+static const struct v4l2_ctrl_config t7_vdin_vrr_control = {
+	.ops = &t7_vdin_control_ops,
+	.id = V4L2_CID_USER_T7_VDIN_VRR_RATE,
+	.name = "Gaming VRR Base Rate",
+	.type = V4L2_CTRL_TYPE_INTEGER,
+	.min = -1,
+	.max = 120,
+	.step = 1,
+	.flags = V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_VOLATILE,
+};
+
 static int t7_vdin_video_register(struct t7_vdin *vdin)
 {
 	struct vb2_queue *queue = &vdin->queue;
@@ -1494,6 +1518,7 @@ static int t7_vdin_video_register(struct t7_vdin *vdin)
 		      V4L2_CID_COLORIMETRY_HDR10_MASTERING_DISPLAY };
 	unsigned int i;
 
+	v4l2_ctrl_new_custom(&vdin->controls, &t7_vdin_vrr_control, NULL);
 	for (i = 0; i < ARRAY_SIZE(ids); i++) {
 		ctrl = v4l2_ctrl_new_std_compound(&vdin->controls, &t7_vdin_control_ops,
 						  ids[i], v4l2_ctrl_ptr_create(NULL),
@@ -1783,7 +1808,7 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	if (!vdin)
 		return -ENOMEM;
 	kref_init(&vdin->ref);
-	v4l2_ctrl_handler_init(&vdin->controls, 2);
+	v4l2_ctrl_handler_init(&vdin->controls, 3);
 	vdin->direct_dma = direct_dma;
 	ret = devm_add_action_or_reset(dev, t7_vdin_put, vdin);
 	if (ret)

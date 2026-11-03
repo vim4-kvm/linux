@@ -35,6 +35,9 @@ int t7_hdmirx_get_max_size(struct device *dev, unsigned int *width, unsigned int
 int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 			  struct v4l2_fract *interval);
 
+/* 0: fixed input, -1: Gaming VRR with unknown base, positive: base in Hz. */
+int t7_hdmirx_vrr_rate(struct device *dev);
+
 /* Hold the video PHY configuration until the consumer has stopped all DMA. */
 int t7_hdmirx_stream_get(struct device *dev, unsigned int width, unsigned int height);
 void t7_hdmirx_stream_put(struct device *dev);

@@ -50,6 +50,8 @@ static bool nv12 = true;
 struct v4l2_ctrl_handler { int error; };
 struct v4l2_ctrl { unsigned int flags; };
 static const int t7_vdin_control_ops;
+static const int t7_vdin_vrr_control;
+#define v4l2_ctrl_new_custom(handler, config, priv) ((void)(config))
 #define v4l2_ctrl_ptr_create(p) (p)
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 static struct v4l2_ctrl *v4l2_ctrl_new_std_compound(

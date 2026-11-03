@@ -20,6 +20,7 @@ prefix = r'''
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <linux/videodev2.h>
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>

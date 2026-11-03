@@ -212,6 +212,7 @@ static bool t7_hdmirx_stream_is_yuv(void *dev) { (void)dev; return source_yuv; }
 static bool t7_hdmirx_stream_needs_yuv444_swap(void *dev) { (void)dev; return false; }
 static bool t7_hdmirx_stream_is_full_range(void *dev) { (void)dev; return source_full; }
 static bool t7_hdmirx_stream_is_bt601(void *dev) { (void)dev; return false; }
+static int t7_hdmirx_vrr_rate(void *dev) { return 0; }
 static int t7_hdmirx_query_timings(void *dev, struct v4l2_dv_timings *mode,
                                  struct v4l2_fract *interval) {
     (void)dev;

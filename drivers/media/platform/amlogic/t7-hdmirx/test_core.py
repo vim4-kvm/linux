@@ -42,6 +42,7 @@ static u64 ktime_get_ns(void) { return now_ns; }
 #pragma clang diagnostic ignored "-Wunneeded-internal-declaration"
 #endif
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
 #define __iomem
 #define BIT(n) (1U << (n))
@@ -229,7 +230,7 @@ int main(void)
     word(T7_RX_COR_VSYNC_LOW,2240);word(T7_RX_COR_VSYNC_HIGH,10);
     core[T7_RX_COR_COLOR_DEPTH]=5;
     t7_hdmirx_update_vtem(&rx);
-    assert(!rx.vrr_base_hz); /* Cached bytes alone never enable VRR. */
+    assert(!rx.vrr.base_hz); /* Cached bytes alone never enable VRR. */
     assert(!t7_hdmirx_hdr_input(&rx)); /* cached DRM is insufficient */
     core[0x1134]=BIT(4);t7_hdmirx_update_drm(&rx);
     assert(t7_hdmirx_hdr_input(&rx) && !t7_hdmirx_video_status(&rx));

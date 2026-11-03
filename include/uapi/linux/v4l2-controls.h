@@ -234,6 +234,9 @@ enum v4l2_colorfx {
  */
 #define V4L2_CID_USER_MALI_C55_BASE		(V4L2_CID_USER_BASE + 0x1230)
 
+/* T7 HDMI receiver: 0 fixed, -1 VRR with unknown base, positive base in Hz. */
+#define V4L2_CID_USER_T7_VDIN_VRR_RATE		(V4L2_CID_USER_BASE + 0x1240)
+
 /* MPEG-class control IDs */
 /* The MPEG controls are applicable to all codec controls
  * and the 'MPEG' part of the define is historical */

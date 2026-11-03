@@ -27,7 +27,9 @@ struct mutex { int unused; };
 struct delayed_work { int unused; };
 #include <errno.h>
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
+typedef uint64_t u64;
 #define __iomem
 #define BIT(n) (1U << (n))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))

@@ -31,6 +31,7 @@ prefix = r'''
 #include <linux/videodev2.h>
 #include <linux/v4l2-dv-timings.h>
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 #define __iomem
@@ -39,7 +40,8 @@ typedef uint64_t u64;
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define READ_ONCE(value) (value)
 #define WRITE_ONCE(place, value) ((place) = (value))
-static u64 ktime_get_ns(void) { return 1000000000ULL; }
+static u64 now_ns = 1000000000ULL;
+static u64 ktime_get_ns(void) { return now_ns; }
 #define EXPORT_SYMBOL_GPL(name)
 #define FIELD_GET(mask,value) (((value)&(mask)) >> __builtin_ctz(mask))
 #define U32_MAX UINT32_MAX
@@ -256,25 +258,53 @@ int main(void) {
     measured_mode(&fast);
     core[T7_RX_COR_VT_EMP_IRQ]=BIT(3);
     core[T7_RX_COR_VT_EMP_DATA]=1;
-    core[T7_RX_COR_VT_EMP_DATA+3]=120;
+    core[T7_RX_COR_AUDIO_PACKET]=1;
+    u8 *vic_avi=core+T7_RX_COR_AVI_PACKET;
+    vic_avi[0]=0x82; vic_avi[1]=2; vic_avi[2]=13; vic_avi[7]=63;
+    for (unsigned j=0;j<17;j++) if (j!=3) vic_avi[3]-=vic_avi[j];
+    core[T7_RX_COR_VT_EMP_DATA+3]=0;
     t7_hdmirx_update_vtem(&rx);
-    assert(rx.vrr_base_hz==120);
+    assert(rx.vrr.base_hz==120);
     assert(!t7_hdmirx_read_measurement(&rx,&rx.lease_mode));
+    assert(!t7_hdmirx_read_color(&rx,&rx.lease_color));
     link.users=1;
-    word(T7_RX_COR_VFRONT,rx.lease_mode.vfront+1125);
-    word(T7_RX_COR_VSYNC_LOW,rx.lease_mode.vlow+1125);
-    period(rx.lease_mode.ticks*2);
+    word(T7_RX_COR_VFRONT,rx.lease_mode.vfront+1620);
+    word(T7_RX_COR_VSYNC_LOW,rx.lease_mode.vlow+1620);
+    unsigned slow_ticks=(u64)rx.lease_mode.ticks*2745/1125;
+    period(slow_ticks);
     assert(!t7_hdmirx_query_timings(&dev,&timing,&interval));
-    assert(timing.bt.vfrontporch==rx.lease_mode.vfront+1125);
-    assert(interval.numerator==1 && interval.denominator==120);
-    period(rx.lease_mode.ticks);
+    assert(timing.bt.vfrontporch==rx.lease_mode.vfront+1620);
+    assert(interval.numerator==slow_ticks && interval.denominator==166666664);
+    assert(t7_hdmirx_vrr_rate(&dev)==120);
+    period(slow_ticks+slow_ticks/100);
     assert(t7_hdmirx_video_status(&rx)==-ENOLINK); /* changed line clock */
-    period(rx.lease_mode.ticks*2);
+    period(rx.lease_mode.ticks);
+    word(T7_RX_COR_VFRONT,rx.lease_mode.vfront);
+    word(T7_RX_COR_VSYNC_LOW,rx.lease_mode.vlow);
+    assert(!t7_hdmirx_video_status(&rx)); /* Back to 120 on the original lease. */
     core[T7_RX_COR_VT_EMP_IRQ]=0;
-    t7_hdmirx_update_vtem(&rx);
-    assert(!rx.vrr_base_hz && t7_hdmirx_video_status(&rx)==-ENOLINK);
+    now_ns+=250000000; t7_hdmirx_update_vtem(&rx);
+    assert(rx.vrr.enabled && rx.vrr.base_hz==120);
+    now_ns+=250000000; t7_hdmirx_update_vtem(&rx);
+    assert(!rx.vrr.base_hz && t7_hdmirx_video_status(&rx)==-ENOLINK);
+    core[T7_RX_COR_VT_EMP_IRQ]=BIT(3); vic_avi[3]^=1;
+    t7_hdmirx_update_vtem(&rx); assert(t7_hdmirx_vrr_rate(&dev)==-1);
+    core[T7_RX_COR_VT_EMP_DATA]=0; t7_hdmirx_update_vtem(&rx);
+    assert(!t7_hdmirx_vrr_rate(&dev));
+    /* A valid but stale 4K VIC is not a base for a 1080p measurement. */
+    vic_avi[7]=97; vic_avi[3]=0;
+    for (unsigned j=0;j<17;j++) if (j!=3) vic_avi[3]-=vic_avi[j];
+    core[T7_RX_COR_VT_EMP_DATA]=1; t7_hdmirx_update_vtem(&rx);
+    assert(t7_hdmirx_vrr_rate(&dev)==-1);
+    word(T7_RX_COR_WIDTH,3840); word(T7_RX_COR_HEIGHT,2160);
+    t7_hdmirx_update_vtem(&rx); assert(t7_hdmirx_vrr_rate(&dev)==60);
+    memset(top+T7_RX_TOP_TMDS_ALIGN_STAT,0,4);
+    t7_hdmirx_update_vtem(&rx); assert(!t7_hdmirx_vrr_rate(&dev));
+    setup(false,2777778);
+    now_ns=1000000000ULL;
     link.users=0;
     measured_mode(&(struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60);
+    assert(!t7_hdmirx_read_color(&rx,&rx.lease_color));
     /* Neither changed porches nor 60 -> 59.94 is measurement noise. */
     for (unsigned int geometry=0;geometry<2;geometry++) {
         measured_mode(&(struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60);
