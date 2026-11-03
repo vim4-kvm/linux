@@ -240,7 +240,7 @@ static void scenarios(void)
     yuv_input=false;t7_vdin_configure(&receiver);
     assert(readl(registers+VDIN_HDR_CTRL*4)==BIT(16));
     assert(readl(registers+VDIN_HDR_MATRIX_OUT*4)==0);
-    receiver.nv12=false; receiver.pixel_format=V4L2_PIX_FMT_YUV24;
+    receiver.nv12=false; receiver.configured_format.pixelformat=V4L2_PIX_FMT_YUV24;
     receiver.stride=11520; yuv_input=true;
     t7_vdin_configure(&receiver);
     unsigned mapping=readl(registers+VDIN_COM_CTRL0*4);

@@ -149,25 +149,25 @@ int main(void) {
  assert(f.fmt.pix.quantization==V4L2_QUANTIZATION_LIM_RANGE);
  for (unsigned space=0;space<4;space++) {
   live_color.space=space;
-  assert(t7_hdmirx_yuv444_format(&dev,0)==(space==2?0:-EOPNOTSUPP));
+  assert(t7_hdmirx_yuv444_format(&dev,&f.fmt.pix)==(space==2?0:-EOPNOTSUPP));
  }
  live_color.space=2;
  for (unsigned depth=10;depth<=12;depth+=2) {
   live_color.depth=depth;
-  assert(t7_hdmirx_yuv444_format(&dev,0)==-EOPNOTSUPP);
+  assert(t7_hdmirx_yuv444_format(&dev,&f.fmt.pix)==-EOPNOTSUPP);
  }
  live_color.depth=8;live_hdr=true;
- assert(t7_hdmirx_yuv444_format(&dev,0)==-EOPNOTSUPP);
+ assert(t7_hdmirx_yuv444_format(&dev,&f.fmt.pix)==-EOPNOTSUPP);
  live_hdr=false;live_color.colorimetry=3;
- assert(t7_hdmirx_yuv444_format(&dev,0)==-EOPNOTSUPP);
+ assert(t7_hdmirx_yuv444_format(&dev,&f.fmt.pix)==-EOPNOTSUPP);
  live_color.colorimetry=1;live_color.full=true;
  assert(!t7_hdmirx_yuv444_format(&dev,&f.fmt.pix));
  assert(f.fmt.pix.ycbcr_enc==V4L2_YCBCR_ENC_601);
  assert(f.fmt.pix.quantization==V4L2_QUANTIZATION_FULL_RANGE);
  rx.lease_color=live_color;link.users=1;live_color.space=0;
- assert(!t7_hdmirx_yuv444_format(&dev,0));
+ assert(!t7_hdmirx_yuv444_format(&dev,&f.fmt.pix));
  live_status=-ENOLINK;
- assert(t7_hdmirx_yuv444_format(&dev,0)==-ENOLINK);
+ assert(t7_hdmirx_yuv444_format(&dev,&f.fmt.pix)==-ENOLINK);
 }
 '''
 with tempfile.TemporaryDirectory() as temp:
