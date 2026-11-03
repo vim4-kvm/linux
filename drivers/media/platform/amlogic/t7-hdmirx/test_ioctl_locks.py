@@ -262,6 +262,7 @@ int main(void) {
         assert(!t7_vdin_enum_frameintervals(&format_file,NULL,&iv));
         assert(iv.type==V4L2_FRMIVAL_TYPE_CONTINUOUS && iv.stepwise.min.numerator==1 &&
                iv.stepwise.min.denominator==(vrr==-1?120:60) && iv.stepwise.max.denominator==20);
+        assert(iv.stepwise.step.numerator==1 && iv.stepwise.step.denominator==1);
     }
     vrr=0; iv.width++;
     assert(t7_vdin_enum_frameintervals(&format_file,NULL,&iv)==-EINVAL);

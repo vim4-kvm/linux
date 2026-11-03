@@ -1333,6 +1333,7 @@ static int t7_vdin_enum_frameintervals(struct file *file, void *priv,
 		ival->type = V4L2_FRMIVAL_TYPE_CONTINUOUS;
 		ival->stepwise.min = (struct v4l2_fract) { 1, vrr > 0 ? vrr : 120 };
 		ival->stepwise.max = (struct v4l2_fract) { 1, 20 };
+		ival->stepwise.step = (struct v4l2_fract) { 1, 1 };
 	} else {
 		ival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
 		ival->discrete = interval;
