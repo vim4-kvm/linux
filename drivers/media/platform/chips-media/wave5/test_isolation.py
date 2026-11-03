@@ -11,6 +11,11 @@ import tempfile
 root = Path(__file__).resolve().parent
 source = (root / 'wave5-isolation.c').read_text()
 logic = source[source.index('bool wave5_vpu_isolated('):source.index('static ssize_t isolated_show(')]
+driver = (root / 'wave5-vpu.c').read_text()
+irq_handler = driver[driver.index('static void wave5_vpu_handle_irq('):
+                     driver.index('static irqreturn_t wave5_vpu_irq(')]
+api = (root / 'wave5-vpuapi.h').read_text()
+irq_bits = api[api.index('enum wave5_interrupt_bit {'):].split('};', 1)[0] + '};\n'
 planes = source[source.index('struct wave5_plane {'):]
 core = (root.parents[4] / 'include/media/videobuf2-core.h').read_text()
 memops = core[core.index('struct vb2_mem_ops {'):core.index('\n};', core.index('struct vb2_mem_ops {')) + 3]
@@ -22,6 +27,7 @@ prefix = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include "wave5-regdefine.h"
 typedef uint32_t u32;
 typedef uint64_t u64;
 #define READ_ONCE(v) (v)
@@ -75,7 +81,9 @@ static void list_del_init(struct list_head *n)
          &p->m!=(h); p=t,t=container_of(t->m.next,typeof(*t),m))
 struct vpu_device {
     unsigned isolated;
-    bool isolation_ready, legacy_firmware;
+    bool isolation_ready, legacy_firmware, experimental_decoder;
+    unsigned product_code;
+    int irq_spinlock, irq_sem;
     bool recovery_failed, shutting_down;
     void *recovery_owner;
     const char *isolation_reason;
@@ -96,7 +104,7 @@ struct vpu_instance {
     struct { struct v4l2_m2m_ctx *m2m_ctx; } v4l2_fh;
     struct list_head list;
     bool recovery_error, released;
-    int state, irq_status;
+    int state, irq_status, id;
     unsigned irq_done, job_wait;
 };
 static void mutex_lock(int *lock) { assert(!*lock); *lock = 1; }
@@ -142,6 +150,18 @@ static void v4l2_m2m_job_finish(struct m2m_dev *dev, struct v4l2_m2m_ctx *ctx)
 { assert(dev->current && dev->current->v4l2_fh.m2m_ctx == ctx); dev->current = NULL; finishes++; }
 static void wake_up_all(unsigned *wait) { (void)wait; wakes++; }
 static void complete_all(unsigned *completion) { *completion = 1; }
+#define BIT(n) (1U << (n))
+#define WAVE515_CODE 0x5150
+#define spin_lock_irqsave(lock, flags) do { (flags) = 0; mutex_lock(lock); } while (0)
+#define spin_unlock_irqrestore(lock, flags) do { (void)(flags); mutex_unlock(lock); } while (0)
+#define complete(c) complete_all(c)
+#define kfifo_in(fifo, value, size) (*(fifo) = *(value))
+#define up(sem) (++*(sem))
+static u32 regs[0x200 / 4];
+static u32 wave5_vdi_read_register(struct vpu_device *dev, unsigned addr)
+{ return regs[addr / 4]; }
+static void wave5_vdi_write_register(struct vpu_device *dev, unsigned addr, u32 value)
+{ regs[addr / 4] = value; }
 static void vb2_queue_error(struct vb2_queue *q) { q->error = true; }
 static void kobject_uevent_env(int *kobj, int action, char **env)
 { (void)kobj; assert(action == KOBJ_CHANGE && env[0]); events++; }
@@ -283,7 +303,18 @@ int main(void)
     struct dma_buf recovery_buf={.refs=1};
     struct wave5_plane *import=wave5_plane_attach(&vb,&device,&recovery_buf,4096);
     assert(!wave5_plane_map(import));
-    wave5_vpu_isolate(&dev, "recoverable timeout", 256);
+    /* Bit 15 is decoder input-empty as well as encoder output-full. */
+    regs[W5_VPU_VINT_REASON / 4] = BIT(INT_WAVE5_BSBUF_EMPTY);
+    dev.experimental_decoder = true;
+    wave5_vpu_handle_irq(&dev);
+    assert(!dev.isolated);
+    dev.experimental_decoder = false;
+    regs[W5_VPU_VINT_REASON / 4] |= BIT(INT_WAVE5_ENC_PIC);
+    regs[W5_RET_QUEUE_CMD_DONE_INST / 4] = BIT(a.id);
+    wave5_vpu_handle_irq(&dev);
+    assert(dev.isolated && dev.isolation_command == W5_DEC_ENC_PIC);
+    assert(regs[W5_VPU_VINT_REASON_CLR / 4] == regs[W5_VPU_VINT_REASON / 4]);
+    assert(a.irq_status == 9 && !a.released);
     mutex_lock(&dev.dev_lock);
     wave5_plane_put(m); wave5_plane_unmap(import); wave5_plane_detach(import);
     mutex_unlock(&dev.dev_lock);
@@ -314,8 +345,8 @@ int main(void)
 with tempfile.TemporaryDirectory(prefix='wave5-isolation-') as directory:
     code = Path(directory) / 'isolation.c'
     binary = Path(directory) / 'isolation'
-    code.write_text(prefix + memops + allocator + logic + planes + checks)
+    code.write_text(prefix + memops + allocator + logic + irq_bits + irq_handler + planes + checks)
     subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-unused-parameter', '-Wno-unused-function',
-                    '-fsanitize=address,undefined', str(code), '-o', str(binary)], check=True)
+                    '-fsanitize=address,undefined', '-I', str(root), str(code), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)

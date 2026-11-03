@@ -89,6 +89,16 @@ static void wave5_vpu_handle_irq(void *dev_id)
 	wave5_vdi_write_register(dev, W5_VPU_VINT_REASON_CLR, irq_reason);
 	wave5_vdi_write_register(dev, W5_VPU_VINT_CLEAR, 0x1);
 
+	/* T7 line-buffer encoding cannot return a partial AU. The VPU still
+	 * owns the buffers, so recover before reporting a completed picture.
+	 * In decoder mode the same bit means input empty.
+	 */
+	if ((irq_reason & BIT(INT_WAVE5_BSBUF_FULL)) &&
+	    dev->legacy_firmware && !dev->experimental_decoder) {
+		wave5_vpu_isolate(dev, "coded capture buffer full", W5_DEC_ENC_PIC);
+		return;
+	}
+
 	spin_lock_irqsave(&dev->irq_spinlock, flags);
 	list_for_each_entry_safe(inst, tmp, &dev->instances, list) {
 
