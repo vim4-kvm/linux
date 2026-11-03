@@ -194,12 +194,15 @@ interval = encoder[encoder.index('static int wave5_vpu_enc_s_parm('):
 # Keep only the requested function, independent of adjacent control helpers.
 interval = interval[:interval.index('\n}\n') + 3]
 interval_types = r'''
+typedef uint64_t u64;
+#define DIV_ROUND_CLOSEST_ULL(n,d) (((n)+(d)/2)/(d))
 #define V4L2_CAP_TIMEPERFRAME 0x1000
+struct v4l2_fract { unsigned numerator, denominator; };
 #define max_t(type,a,b) ((type)(a)>(type)(b)?(type)(a):(type)(b))
 struct v4l2_streamparm {
     unsigned type;
     struct { struct { unsigned capability;
-        struct { unsigned numerator, denominator; } timeperframe;
+        struct v4l2_fract timeperframe;
     } output; } parm;
 };
 '''
@@ -215,8 +218,10 @@ int main(void)
     parm.parm.output.timeperframe.numerator=1001;
     parm.parm.output.timeperframe.denominator=60000;
     assert(!wave5_vpu_enc_s_parm(&file,NULL,&parm));
-    assert(inst.frame_rate==59 && parm.parm.output.timeperframe.numerator==1);
-    assert(parm.parm.output.timeperframe.denominator==59);
+    assert(inst.frame_rate==60 && parm.parm.output.timeperframe.numerator==1);
+    assert(parm.parm.output.timeperframe.denominator==60);
+    parm.parm.output.timeperframe=(struct v4l2_fract){1001,120000};
+    assert(!wave5_vpu_enc_s_parm(&file,NULL,&parm) && inst.frame_rate==120);
     parm.parm.output.timeperframe.numerator=2;
     parm.parm.output.timeperframe.denominator=1;
     assert(!wave5_vpu_enc_s_parm(&file,NULL,&parm) && inst.frame_rate==1);

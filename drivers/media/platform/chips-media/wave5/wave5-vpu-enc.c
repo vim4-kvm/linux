@@ -836,8 +836,11 @@ static int wave5_vpu_enc_s_parm(struct file *file, void *fh, struct v4l2_streamp
 
 	a->parm.output.capability = V4L2_CAP_TIMEPERFRAME;
 	if (a->parm.output.timeperframe.denominator && a->parm.output.timeperframe.numerator) {
-		inst->frame_rate = max_t(u32, 1, a->parm.output.timeperframe.denominator /
-					a->parm.output.timeperframe.numerator);
+		struct v4l2_fract interval = a->parm.output.timeperframe;
+
+		/* Fractional HDMI timings still need the nearest whole-fps RC budget. */
+		inst->frame_rate = max_t(u32, 1, DIV_ROUND_CLOSEST_ULL((u64)interval.denominator,
+								       interval.numerator));
 	}
 	/* This command interface currently negotiates whole frames per second. */
 	a->parm.output.timeperframe.numerator = 1;
