@@ -46,18 +46,24 @@ static int drm_format_info_plane_height(const struct drm_format_info *f, unsigne
 enum {VDIN_WR_BADDR,VDIN_WR_CHROMA,VDIN_WR_CTRL,VDIN_SLOT_WRITING};
 #define VDIN_WR_REQ 1
 #define VDIN_VCP_WR 2
-struct t7_vdin_buffer {dma_addr_t dma; bool hardware_used;};
+struct t7_vdin_buffer {dma_addr_t dma; bool hardware_used; u32 generation; u64 ticket;};
 struct t7_vdin_slot {dma_addr_t dma; struct t7_vdin_buffer *buffer; int state;};
 struct t7_vdin {
     struct t7_vdin_slot slots[1]; unsigned int stride,height,active_slot;
     bool direct_dma,nv12,dma_idle,ring_running,hdr_curve_pending,ring_discard;
     void *receiver;
+    u32 generation;
+    u64 ticket;
 };
 static struct t7_vdin_buffer capture;
 static u32 written[3];
 static struct t7_vdin_buffer *t7_vdin_next_buffer(struct t7_vdin *v) {return &capture;}
 static bool t7_hdmirx_stream_is_hdr(void *receiver) {return false;}
+static bool t7_hdmirx_stream_is_hlg(void *receiver) {return false;}
 static void t7_vdin_hdr_reload(struct t7_vdin *v) {assert(false);}
+static void t7_vdin_record_hdr_luts(struct t7_vdin *v) {assert(false);}
+static void t7_vdin_trace_buffer(struct t7_vdin *v, struct t7_vdin_buffer *b, int action)
+{assert(action==0 && b->generation==v->generation && b->ticket==v->ticket);}
 static void t7_vdin_write(struct t7_vdin *v, u32 reg, u32 value) {written[reg]=value;}
 static void t7_vdin_update(struct t7_vdin *v, u32 reg, u32 mask, u32 value)
 {written[reg]=(written[reg]&~mask)|(value&mask);}
@@ -105,12 +111,17 @@ int main(void)
     for (unsigned int n=0;n<sizeof(geometry)/sizeof(geometry[0]);n++) {
         u32 width=geometry[n][0],height=geometry[n][1],stride=ALIGN(width,32);
         for (unsigned int direct=0;direct<2;direct++) {
-            struct t7_vdin v={.stride=stride,.height=height,.nv12=true,.direct_dma=direct};
+            struct t7_vdin v={.stride=stride,.height=height,.nv12=true,.direct_dma=direct,
+                .generation=7,.ticket=41};
             v.slots[0].dma=0x20000000; capture.dma=0x30000000;
             t7_vdin_ring_arm(&v,0);
             assert(v.ring_running && !v.dma_idle);
             assert(written[VDIN_WR_BADDR]==(direct ? capture.dma : v.slots[0].dma)>>4);
-            if (direct) assert(capture.hardware_used);
+            if (direct) {
+                assert(capture.hardware_used && capture.generation==7 && capture.ticket==42);
+                t7_vdin_ring_arm(&v,0);
+                assert(capture.ticket==42 && v.ticket==42);
+            }
             validate(width,height,stride,(u64)written[VDIN_WR_BADDR]<<4,
                      (u64)written[VDIN_WR_CHROMA]<<4,
                      stride*ALIGN(height,16)*3/2,0,false);
