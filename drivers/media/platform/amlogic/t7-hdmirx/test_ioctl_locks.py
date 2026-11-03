@@ -40,6 +40,10 @@ prefix = r'''
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
+#define max(a,b) ((a)>(b)?(a):(b))
+#define GFP_KERNEL 0
+typedef uintptr_t dma_addr_t;
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -83,6 +87,9 @@ struct t7_vdin {
     struct device *dev,*receiver; struct v4l2_device v4l2; unsigned int ref;
     unsigned int width,height,pixel_format,stride,allocation_size,frame_capacity,frame_size;
     unsigned int input_width,input_height;
+    unsigned int default_frame_capacity;
+    struct v4l2_pix_format configured_format;
+    void *frame; dma_addr_t frame_dma;
     bool nv12,faulted,direct_dma,native_hdr;
 };
 struct file { struct t7_vdin *data; };
@@ -127,7 +134,24 @@ static void *video_drvdata(struct file *file) { return file->data; }
 static bool vb2_is_busy(struct vb2_queue *queue) { return queue->busy; }
 static int yuv444_status;
 static int t7_hdmirx_yuv444_format(struct device *dev, struct v4l2_pix_format *pix)
-{ return yuv444_status; }
+{
+ if (!yuv444_status) {
+  pix->colorspace=V4L2_COLORSPACE_REC709;
+  pix->xfer_func=V4L2_XFER_FUNC_709;
+  pix->ycbcr_enc=V4L2_YCBCR_ENC_709;
+  pix->quantization=V4L2_QUANTIZATION_LIM_RANGE;
+ }
+ return yuv444_status;
+}
+static bool fail_allocation;
+static unsigned allocations, frees;
+static void *dma_alloc_coherent(struct device *dev, unsigned size, dma_addr_t *dma, int flags)
+{
+ if (fail_allocation) return NULL;
+ void *memory=malloc(1); assert(memory); *dma=(uintptr_t)memory; allocations++; return memory;
+}
+static void dma_free_coherent(struct device *dev, unsigned size, void *memory, dma_addr_t dma)
+{ assert(memory && (uintptr_t)memory==dma); free(memory); frees++; }
 static int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *mode,
                                   struct v4l2_fract *interval) {
     (void)dev; (void)mode; (void)interval;
@@ -227,6 +251,8 @@ int main(void) {
     capture.width=3840; capture.height=2160; capture.stride=3840;
     capture.allocation_size=3840*2160*3/2; capture.nv12=true;
     capture.frame_capacity=capture.allocation_size;
+    capture.default_frame_capacity=capture.frame_capacity;
+    capture.frame=malloc(1); capture.frame_dma=(uintptr_t)capture.frame;
     capture.pixel_format=V4L2_PIX_FMT_NV12; capture.ref=1;
     assert(!t7_vdin_video_register(&capture));
     struct call stop={.cmd=VIDIOC_STREAMOFF},query={.cmd=VIDIOC_QUERY_DV_TIMINGS};
@@ -289,19 +315,49 @@ int main(void) {
     assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.width==3840);
     /* Native 444 retains the entire source raster and rejects a changed source. */
     fmt.fmt.pix.pixelformat=V4L2_PIX_FMT_YUV24;
-    assert(dispatch(VIDIOC_S_FMT,&fmt)==-EOPNOTSUPP);
-    capture.direct_dma=true; capture.frame_capacity=3840*2160*3;
+    assert(dispatch(VIDIOC_S_FMT,&fmt)==-EINVAL);
+    capture.direct_dma=true;
     fmt.fmt.pix.width=1280; fmt.fmt.pix.height=720;
+    fail_allocation=true;
+    assert(dispatch(VIDIOC_S_FMT,&fmt)==-ENOMEM);
+    assert(capture.frame_capacity==12441600 && capture.pixel_format==V4L2_PIX_FMT_NV12);
+    assert(!allocations && !frees);
+    fail_allocation=false;
     assert(!dispatch(VIDIOC_S_FMT,&fmt));
+    assert(capture.frame_capacity==24883200 && allocations==1 && frees==1);
     assert(capture.width==3840 && capture.height==2160 && capture.stride==11520);
     assert(capture.frame_size==24883200 && !capture.nv12 && !capture.native_hdr);
     capture.queue.busy=true;
     assert(dispatch(VIDIOC_S_FMT,&fmt)==-EBUSY);
     capture.queue.busy=false; yuv444_status=-EOPNOTSUPP;
-    assert(dispatch(VIDIOC_S_FMT,&fmt)==-EOPNOTSUPP);
-    assert(dispatch(VIDIOC_G_FMT,&fmt)==-EOPNOTSUPP);
+    assert(dispatch(VIDIOC_S_FMT,&fmt)==-EINVAL);
+    struct v4l2_pix_format saved=capture.configured_format;
+    input_locked=false;
+    assert(!dispatch(VIDIOC_G_FMT,&fmt) && !memcmp(&fmt.fmt.pix,&saved,sizeof(saved)));
+    struct file reopened={.data=&capture};
+    assert(!t7_vdin_get_fmt(&reopened,NULL,&fmt));
+    assert(!memcmp(&fmt.fmt.pix,&saved,sizeof(saved)));
+    input_locked=true;
     fmt.fmt.pix.pixelformat=V4L2_PIX_FMT_NV12;
+    fail_allocation=true;
+    assert(dispatch(VIDIOC_S_FMT,&fmt)==-ENOMEM);
+    assert(capture.frame_capacity==24883200 && capture.pixel_format==V4L2_PIX_FMT_YUV24);
+    fail_allocation=false;
     assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.nv12);
+    assert(capture.frame_capacity==12441600 && allocations==2 && frees==2);
+    /* Consumers may retry RGB after an unsupported v308 probe. */
+    nv12=false; fmt.fmt.pix.pixelformat=V4L2_PIX_FMT_YUV24;
+    assert(t7_vdin_try_fmt(&format_file,NULL,&fmt)==-EINVAL);
+    fmt.fmt.pix.pixelformat=V4L2_PIX_FMT_RGB24;
+    assert(!t7_vdin_try_fmt(&format_file,NULL,&fmt));
+    assert(fmt.fmt.pix.pixelformat==V4L2_PIX_FMT_RGB24);
+    fmt.fmt.pix.pixelformat=V4L2_PIX_FMT_YUV24;
+    assert(t7_vdin_try_fmt(&format_file,NULL,&fmt)==-EINVAL);
+    yuv444_status=-EAGAIN;
+    assert(t7_vdin_try_fmt(&format_file,NULL,&fmt)==-EAGAIN);
+    yuv444_status=-ENOLINK;
+    assert(t7_vdin_try_fmt(&format_file,NULL,&fmt)==-ENOLINK);
+    nv12=true;
     /* A query already using RX must finish before removal clears registration. */
     pause_query=true; query_entered=query_done=false; capture.queue.owner=&capture;
     pthread_create(&b,NULL,call_worker,&query); assert(wait_for(&query_entered));

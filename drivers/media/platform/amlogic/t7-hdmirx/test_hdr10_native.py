@@ -26,6 +26,7 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 #define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))
+#define PAGE_ALIGN(x) ALIGN(x,4096)
 static bool nv12=true;
 struct t7_vdin {bool direct_dma,nv12,faulted; unsigned frame_capacity, allocation_size;};
 struct file {struct t7_vdin *driver;};
@@ -132,6 +133,12 @@ int main(void) {
  q.count=0; buffers=32; planes=0;
  assert(!t7_vdin_queue_setup(&q,&buffers,&planes,sizes,0) && buffers==7);
  assert((uint64_t)(buffers+1)*sizes[0]<=192U*1024*1024);
+ planes=1; buffers=7; sizes[0]=25*1024*1024;
+ assert(t7_vdin_queue_setup(&q,&buffers,&planes,sizes,0)==-EINVAL);
+ sizes[0]=v.allocation_size; buffers=7;
+ assert(!t7_vdin_queue_setup(&q,&buffers,&planes,sizes,0) && buffers==7);
+ sizes[0]=PAGE_ALIGN(v.allocation_size); q.count=6; buffers=2;
+ assert(!t7_vdin_queue_setup(&q,&buffers,&planes,sizes,0) && buffers==1);
  q.count=7; buffers=1; planes=0;
  assert(t7_vdin_queue_setup(&q,&buffers,&planes,sizes,0)==-ENOBUFS);
  assert(t7_hdmirx_yuv444_format(&dev,&f.fmt.pix)==-EOPNOTSUPP);

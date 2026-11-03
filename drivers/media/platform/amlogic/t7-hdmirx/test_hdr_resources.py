@@ -16,6 +16,7 @@ fixture = r'''
 #include <errno.h>
 typedef uint32_t u32;
 #define BIT(n) (1u << (n))
+#define PAGE_ALIGN(x) (((x)+4095)&~4095U)
 #define VDIN_DMA_SLOTS 4
 #define VDIN_HDR_MATRIX_IN 0x12bb
 #define VDIN_HDR_MATRIX_OUT 0x12bc
@@ -47,6 +48,9 @@ int main(void) {
  assert(t7_vdin_queue_setup(&q,&n,&p,s,0)==-EINVAL);
  v.faulted=true; n=64;
  assert(t7_vdin_queue_setup(&q,&n,&p,s,0)==-EIO && n==64);
+ v.faulted=false; v.direct_dma=true; v.frame_capacity=20736000;
+ v.allocation_size=2560*1440*3/2; p=0; n=64;
+ assert(!t7_vdin_queue_setup(&q,&n,&p,s,0) && n==32);
  t7_vdin_hdr_configure(&v);
  assert(regs[0x128d]==(u32)-512);
  /* T7 precise coefficients from ncl_2020_709, not the old rounded /256 table. */
