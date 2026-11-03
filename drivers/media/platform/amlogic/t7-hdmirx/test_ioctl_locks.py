@@ -117,6 +117,9 @@ static bool queue_entered, release_queue, query_done, format_done;
 static bool pause_query, query_entered, release_query, remove_has_queue;
 static unsigned int rx_reads, queue_releases;
 static bool input_locked;
+static int vrr;
+static struct v4l2_fract measured = {1001, 60000};
+static int t7_hdmirx_vrr_rate(struct device *dev) { return vrr; }
 static unsigned int input_width=3840,input_height=2160;
 static _Thread_local bool removing;
 static void (*remove_action)(void *);
@@ -163,6 +166,7 @@ static int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *m
     pthread_mutex_unlock(&gate);
     if (!input_locked) return -ENOLINK;
     mode->bt.width=input_width; mode->bt.height=input_height;
+    *interval=measured;
     return 0;
 }
 static const int t7_vdin_queue_ops, vb2_dma_contig_memops;
@@ -275,6 +279,26 @@ int main(void) {
     struct file format_file={.data=&capture};
     assert(!t7_vdin_try_fmt(&format_file,NULL,&fmt));
     assert(fmt.fmt.pix.width==1280 && fmt.fmt.pix.height==720);
+    struct v4l2_frmsizeenum size={.pixel_format=V4L2_PIX_FMT_NV12};
+    struct v4l2_frmivalenum iv={.pixel_format=V4L2_PIX_FMT_NV12,.width=1280,.height=720};
+    assert(!t7_vdin_enum_framesizes(&format_file,NULL,&size));
+    assert(size.type==V4L2_FRMSIZE_TYPE_STEPWISE && size.stepwise.min_width==320 &&
+           size.stepwise.max_width==3840 && size.stepwise.step_width==2);
+    assert(!t7_vdin_enum_frameintervals(&format_file,NULL,&iv));
+    assert(iv.type==V4L2_FRMIVAL_TYPE_DISCRETE && iv.discrete.numerator==1001 &&
+           iv.discrete.denominator==60000);
+    for (vrr=-1; vrr<=60; vrr+=61) {
+        assert(!t7_vdin_enum_frameintervals(&format_file,NULL,&iv));
+        assert(iv.type==V4L2_FRMIVAL_TYPE_CONTINUOUS && iv.stepwise.min.numerator==1 &&
+               iv.stepwise.min.denominator==(vrr==-1?120:60) && iv.stepwise.max.denominator==20);
+        assert(iv.stepwise.step.numerator==1 && iv.stepwise.step.denominator==1);
+    }
+    vrr=0; iv.width++;
+    assert(t7_vdin_enum_frameintervals(&format_file,NULL,&iv)==-EINVAL);
+    iv.width--; iv.index=1;
+    assert(t7_vdin_enum_frameintervals(&format_file,NULL,&iv)==-EINVAL);
+    size.pixel_format=V4L2_PIX_FMT_MJPEG;
+    assert(t7_vdin_enum_framesizes(&format_file,NULL,&size)==-EINVAL);
     assert(!dispatch(VIDIOC_S_FMT,&fmt) && capture.width==1280);
     assert(capture.input_width==3840 && capture.frame_size==1280*720*3/2);
     fmt.fmt.pix.width=3840; fmt.fmt.pix.height=2160;
