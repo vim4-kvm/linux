@@ -108,6 +108,8 @@
 #define T7_RX_COR_INPUT_MAP	0x1816
 #define T7_RX_COR_OUTPUT_SYNC	0x1842
 #define T7_RX_COR_FRAME_STATUS	0x1881
+#define T7_RX_COR_VT_EMP_IRQ	0x1308
+#define T7_RX_COR_VT_EMP_DATA	0x13a0
 #define T7_RX_COR_FRAME_TICKS	0x1888
 #define T7_RX_COR_WIDTH		0x188c
 #define T7_RX_COR_HEIGHT		0x188e
@@ -223,6 +225,7 @@ struct t7_hdmirx;
 struct t7_hdmirx_measurement {
 	u32 width, height, hlow, hhigh, hfront, hback;
 	u32 vlow, vhigh, vfront, vback, ticks, polarity;
+	u32 vrr_base_hz;
 };
 
 struct t7_hdmirx_color {
@@ -261,6 +264,7 @@ struct t7_hdmirx {
 	bool lease_yuv;
 	bool lease_420;
 	struct t7_hdmirx_measurement lease_mode;
+	u32 vrr_base_hz;
 	struct t7_hdmirx_color lease_color;
 	u32 phy_band, pll_band;
 	unsigned long long drm_received_ns;
@@ -684,6 +688,7 @@ static void t7_hdmirx_core_stop(void *data)
 	if (rx->hdr_capture)
 		writeb(rx->saved_packet_irq_mode, rx->cor + T7_RX_COR_PACKET_IRQ_MODE);
 	WRITE_ONCE(rx->drm_received_ns, 0);
+	WRITE_ONCE(rx->vrr_base_hz, 0);
 	rx->core_active = false;
 }
 
@@ -969,12 +974,57 @@ static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *co
 	return 0;
 }
 
+/* The depacketizer latches four VTEM metadata bytes. Its W1C receipt
+ * flag distinguishes a current Gaming VTEM from stale register contents.
+ */
+static void t7_hdmirx_update_vtem(struct t7_hdmirx *rx)
+{
+	u32 base = 0;
+	u8 md[4], again[4];
+	unsigned int i;
+
+	if (!rx->dynamic_modes || !rx->core_active)
+		return;
+	if (!(readl(rx->top + T7_RX_TOP_HPD_PWR5V) & BIT(20 + rx->port)) ||
+	    !(readl(rx->top + T7_RX_TOP_TMDS_ALIGN_STAT) & BIT(0))) {
+		writeb(BIT(3), rx->cor + T7_RX_COR_VT_EMP_IRQ);
+		WRITE_ONCE(rx->vrr_base_hz, 0);
+		return;
+	}
+	if (readb(rx->cor + T7_RX_COR_VT_EMP_IRQ) & BIT(3)) {
+		writeb(BIT(3), rx->cor + T7_RX_COR_VT_EMP_IRQ);
+		for (i = 0; i < sizeof(md); i++)
+			md[i] = readb(rx->cor + T7_RX_COR_VT_EMP_DATA + i);
+		for (i = 0; i < sizeof(again); i++)
+			again[i] = readb(rx->cor + T7_RX_COR_VT_EMP_DATA + i);
+		/* VRR_EN only: QMS, M_CONST and FVA are separate modes. */
+		if (!memcmp(md, again, sizeof(md)) && md[0] == BIT(0))
+			base = ((md[2] & 3) << 8) | md[3];
+	}
+	WRITE_ONCE(rx->vrr_base_hz, base == 60 || base == 120 ? base : 0);
+}
+
 static bool t7_hdmirx_same_measurement(const struct t7_hdmirx_measurement *a,
 				       const struct t7_hdmirx_measurement *b)
 {
 	struct t7_hdmirx_measurement left = *a, right = *b;
 	u32 delta = a->ticks > b->ticks ? a->ticks - b->ticks : b->ticks - a->ticks;
 
+	if (a->vrr_base_hz && a->vrr_base_hz == b->vrr_base_hz) {
+		u64 period_a = (u64)a->ticks * (b->vlow + b->vhigh);
+		u64 period_b = (u64)b->ticks * (a->vlow + a->vhigh);
+		u64 diff = period_a > period_b ? period_a - period_b : period_b - period_a;
+
+		/* Only the front porch grows. Line time and sync pulse stay fixed. */
+		if (!period_a || diff > div_u64(period_a, 2000))
+			return false;
+		left.vfront = right.vfront;
+		if (a->polarity & BIT(1))
+			left.vlow = right.vlow;
+		else
+			left.vhigh = right.vhigh;
+		delta = 0;
+	}
 	left.ticks = 0;
 	right.ticks = 0;
 	/* Meter quantization is a few ticks; 60 versus 59.94 remains a change. */
@@ -987,6 +1037,7 @@ static int t7_hdmirx_read_measurement(struct t7_hdmirx *rx,
 	u32 upper, low, after;
 
 	*m = (struct t7_hdmirx_measurement) {
+		.vrr_base_hz = READ_ONCE(rx->vrr_base_hz),
 		.width = t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH),
 		.height = t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT),
 		.hlow = t7_hdmirx_core_read16(rx, T7_RX_COR_HSYNC_LOW),
@@ -1025,7 +1076,8 @@ static int t7_hdmirx_validate_measurement(struct t7_hdmirx *rx, bool yuv420,
 	    m->width * scale < 320 || m->width * scale > 3840 ||
 	    m->height < 180 || m->height > 2160 || (m->height & 1) ||
 	    (m->width & 1) || !m->ticks ||
-	    m->ticks < reference / 120 || m->ticks > reference / 20 ||
+	    m->ticks + 2 < reference / (m->vrr_base_hz ?: 120) ||
+	    m->ticks > reference / 20 ||
 	    m->width + m->hfront + hsync + m->hback != m->hlow + m->hhigh ||
 	    m->height + m->vfront + vsync + m->vback != m->vlow + m->vhigh) {
 		if (rx->link && READ_ONCE(rx->link->ready))
@@ -1342,7 +1394,10 @@ int t7_hdmirx_query_timings(struct device *dev, struct v4l2_dv_timings *timings,
 		if (ret)
 			return ret;
 		*timings = mode;
-		*interval = (struct v4l2_fract) { .numerator = m.ticks, .denominator = reference };
+		if (m.vrr_base_hz)
+			*interval = (struct v4l2_fract) { 1, m.vrr_base_hz };
+		else
+			*interval = (struct v4l2_fract) { m.ticks, reference };
 		return 0;
 	}
 	selected_uhd = READ_ONCE(rx->uhd60);
@@ -2194,6 +2249,7 @@ static void t7_hdmirx_link_work(struct work_struct *work)
 
 	mutex_lock(&link->lock);
 	t7_hdmirx_update_drm(rx);
+	t7_hdmirx_update_vtem(rx);
 	if (rx->dynamic_modes && rx->core_active && !link->users)
 		writeb(readb(rx->cor + T7_RX_COR_AUDIO_PACKET) & BIT(0) ? 6 : 0,
 		       rx->cor + T7_RX_COR_PREAMBLE);
@@ -2367,6 +2423,7 @@ static int t7_hdmirx_status(struct seq_file *s, void *unused)
 		   readl(rx->top + T7_RX_TOP_EDID_GEN_STAT));
 	seq_printf(s, "phy_active: %u\n", rx->phy_active);
 	seq_printf(s, "dynamic_modes: %u\n", rx->dynamic_modes);
+	seq_printf(s, "vrr_base_hz: %u\n", READ_ONCE(rx->vrr_base_hz));
 	seq_printf(s, "hdr_probe: %u\n", rx->hdr_probe);
 	seq_printf(s, "hdr_capture: %u\n", rx->hdr_capture);
 	seq_printf(s, "hdr_input: %u\n", t7_hdmirx_hdr_input(rx));

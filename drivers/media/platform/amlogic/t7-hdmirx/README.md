@@ -60,8 +60,10 @@ an AXI-complete frame boundary and discards the following frame. SDR bypass
 does not load pending curves. This reuses vim4-hdr-curve and the existing
 manager white/peak controls without shared writable vendor globals.
 
-`VIDIOC_QUERY_DV_TIMINGS` and `VIDIOC_G_PARM` report a live measurement for the
-qualified input, including fractional frame rates. Frame period comes
+`VIDIOC_QUERY_DV_TIMINGS` reports the live input including its current blanking.
+`VIDIOC_G_PARM` reports the measured interval for fixed inputs. With fresh
+Gaming VTEM at a 60 or 120 Hz base rate it reports that nominal interval;
+DQBUF timestamps continue to follow actual frame completions. Frame period comes
 from the RX reference-clock counter, not from the capture buffer dimensions.
 The query rejects loss, unsupported sync widths and a counter changing during
 its byte reads; it never returns cached timing while unlocked. Dynamic queries

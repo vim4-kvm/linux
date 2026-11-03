@@ -119,6 +119,10 @@ static const struct v4l2_dv_timings modes[] = {
         .polarities=V4L2_DV_HSYNC_POS_POL,.pixelclock=241500000,
         .hfrontporch=48,.hsync=32,.hbackporch=80,
         .vfrontporch=3,.vsync=5,.vbackporch=33} },
+    { .type=V4L2_DV_BT_656_1120, .bt={.width=2560,.height=1440,
+        .polarities=V4L2_DV_HSYNC_POS_POL|V4L2_DV_VSYNC_POS_POL,.pixelclock=483000000,
+        .hfrontporch=48,.hsync=32,.hbackporch=80,
+        .vfrontporch=3,.vsync=5,.vbackporch=33} },
     V4L2_DV_BT_CEA_3840X2160P30, V4L2_DV_BT_CEA_3840X2160P60,
 };
 
@@ -246,6 +250,31 @@ int main(void) {
         assert(!t7_hdmirx_check_capture(&dev,&reason));
     }
     quantize_period=false; link.users=0;
+    /* Same 297 MHz pixel clock: VRR lengthens only the vertical front porch. */
+    struct v4l2_dv_timings fast=V4L2_DV_BT_CEA_1920X1080P60;
+    fast.bt.pixelclock=297000000;
+    measured_mode(&fast);
+    core[T7_RX_COR_VT_EMP_IRQ]=BIT(3);
+    core[T7_RX_COR_VT_EMP_DATA]=1;
+    core[T7_RX_COR_VT_EMP_DATA+3]=120;
+    t7_hdmirx_update_vtem(&rx);
+    assert(rx.vrr_base_hz==120);
+    assert(!t7_hdmirx_read_measurement(&rx,&rx.lease_mode));
+    link.users=1;
+    word(T7_RX_COR_VFRONT,rx.lease_mode.vfront+1125);
+    word(T7_RX_COR_VSYNC_LOW,rx.lease_mode.vlow+1125);
+    period(rx.lease_mode.ticks*2);
+    assert(!t7_hdmirx_query_timings(&dev,&timing,&interval));
+    assert(timing.bt.vfrontporch==rx.lease_mode.vfront+1125);
+    assert(interval.numerator==1 && interval.denominator==120);
+    period(rx.lease_mode.ticks);
+    assert(t7_hdmirx_video_status(&rx)==-ENOLINK); /* changed line clock */
+    period(rx.lease_mode.ticks*2);
+    core[T7_RX_COR_VT_EMP_IRQ]=0;
+    t7_hdmirx_update_vtem(&rx);
+    assert(!rx.vrr_base_hz && t7_hdmirx_video_status(&rx)==-ENOLINK);
+    link.users=0;
+    measured_mode(&(struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60);
     /* Neither changed porches nor 60 -> 59.94 is measurement noise. */
     for (unsigned int geometry=0;geometry<2;geometry++) {
         measured_mode(&(struct v4l2_dv_timings)V4L2_DV_BT_CEA_1920X1080P60);

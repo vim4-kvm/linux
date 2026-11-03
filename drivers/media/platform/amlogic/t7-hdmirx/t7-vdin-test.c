@@ -1359,7 +1359,8 @@ static int t7_vdin_get_parm(struct file *file, void *priv, struct v4l2_streampar
 	if (ret)
 		return ret;
 	/* Capture cannot change the source clock; TIMEPERFRAME capability would
-	 * incorrectly promise S_PARM support. This is a measured, read-only value.
+	 * incorrectly promise S_PARM support. VRR reports the base interval;
+	 * actual delivery times remain available on each completed buffer.
 	 */
 	memset(&parm->parm, 0, sizeof(parm->parm));
 	parm->parm.capture.timeperframe = interval;
