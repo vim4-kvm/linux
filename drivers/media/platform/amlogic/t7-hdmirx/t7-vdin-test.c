@@ -1267,13 +1267,13 @@ static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fm
 }
 
 static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
-				struct v4l2_dv_timings *timings,
-				struct v4l2_fract *interval)
+				struct v4l2_dv_timings *timings)
 {
+	struct v4l2_fract interval;
 	unsigned int width = fmt->fmt.pix.width, height = fmt->fmt.pix.height;
 	int ret;
 
-	ret = t7_hdmirx_query_timings(vdin->receiver, timings, interval);
+	ret = t7_hdmirx_query_timings(vdin->receiver, timings, &interval);
 	if (ret)
 		return ret;
 	if (timings->bt.width > 3840 || timings->bt.height > 2160)
@@ -1312,84 +1312,17 @@ static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 	return 0;
 }
 
-static int t7_vdin_enum_framesizes(struct file *file, void *priv,
-				   struct v4l2_frmsizeenum *size)
-{
-	struct v4l2_format fmt = { .fmt.pix = {
-		.pixelformat = size->pixel_format, .width = 1, .height = 1,
-	} };
-	struct v4l2_dv_timings timings;
-	struct v4l2_fract interval;
-	int ret;
-
-	if (size->index)
-		return -EINVAL;
-	ret = t7_vdin_negotiate_fmt(video_drvdata(file), &fmt, &timings, &interval);
-	if (ret)
-		return ret;
-	if (fmt.fmt.pix.pixelformat != size->pixel_format)
-		return -EINVAL;
-	if (fmt.fmt.pix.width == timings.bt.width && fmt.fmt.pix.height == timings.bt.height) {
-		size->type = V4L2_FRMSIZE_TYPE_DISCRETE;
-		size->discrete.width = timings.bt.width;
-		size->discrete.height = timings.bt.height;
-	} else {
-		size->type = V4L2_FRMSIZE_TYPE_STEPWISE;
-		size->stepwise = (struct v4l2_frmsize_stepwise) {
-			.min_width = fmt.fmt.pix.width, .max_width = timings.bt.width,
-			.min_height = fmt.fmt.pix.height, .max_height = timings.bt.height,
-			.step_width = 2, .step_height = 2,
-		};
-	}
-	return 0;
-}
-
-static int t7_vdin_enum_frameintervals(struct file *file, void *priv,
-				       struct v4l2_frmivalenum *ival)
-{
-	struct t7_vdin *vdin = video_drvdata(file);
-	struct v4l2_format fmt = { .fmt.pix = {
-		.pixelformat = ival->pixel_format, .width = ival->width, .height = ival->height,
-	} };
-	struct v4l2_dv_timings timings;
-	struct v4l2_fract interval;
-	int ret, vrr;
-
-	if (ival->index)
-		return -EINVAL;
-	ret = t7_vdin_negotiate_fmt(vdin, &fmt, &timings, &interval);
-	if (ret)
-		return ret;
-	if (fmt.fmt.pix.pixelformat != ival->pixel_format ||
-	    fmt.fmt.pix.width != ival->width || fmt.fmt.pix.height != ival->height)
-		return -EINVAL;
-	vrr = t7_hdmirx_vrr_rate(vdin->receiver);
-	if (vrr) {
-		/* The receiver admits 20..120 Hz when no base was signalled. */
-		ival->type = V4L2_FRMIVAL_TYPE_CONTINUOUS;
-		ival->stepwise.min = (struct v4l2_fract) { 1, vrr > 0 ? vrr : 120 };
-		ival->stepwise.max = (struct v4l2_fract) { 1, 20 };
-		ival->stepwise.step = (struct v4l2_fract) { 1, 1 };
-	} else {
-		ival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
-		ival->discrete = interval;
-	}
-	return 0;
-}
-
 static int t7_vdin_try_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
 {
 	struct v4l2_dv_timings timings;
-	struct v4l2_fract interval;
 
-	return t7_vdin_negotiate_fmt(video_drvdata(file), fmt, &timings, &interval);
+	return t7_vdin_negotiate_fmt(video_drvdata(file), fmt, &timings);
 }
 
 static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
 {
 	struct t7_vdin *vdin = video_drvdata(file);
 	struct v4l2_dv_timings timings;
-	struct v4l2_fract interval;
 	int ret;
 
 	/* The core holds video_lock here. Disconnect takes queue_mutex first;
@@ -1400,7 +1333,7 @@ static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fm
 	ret = -EBUSY;
 	if (vb2_is_busy(&vdin->queue) || !mutex_trylock(&vdin->lock))
 		goto unlock_queue;
-	ret = vdin->faulted ? -EIO : t7_vdin_negotiate_fmt(vdin, fmt, &timings, &interval);
+	ret = vdin->faulted ? -EIO : t7_vdin_negotiate_fmt(vdin, fmt, &timings);
 	if (!ret) {
 		unsigned int frame_size = fmt->fmt.pix.bytesperline * fmt->fmt.pix.height;
 		unsigned int capacity = vdin->default_frame_capacity;
@@ -1526,8 +1459,6 @@ static const struct v4l2_ioctl_ops t7_vdin_ioctl_ops = {
 	.vidioc_s_edid = t7_vdin_set_edid,
 	.vidioc_querycap = t7_vdin_querycap,
 	.vidioc_enum_fmt_vid_cap = t7_vdin_enum_fmt,
-	.vidioc_enum_framesizes = t7_vdin_enum_framesizes,
-	.vidioc_enum_frameintervals = t7_vdin_enum_frameintervals,
 	.vidioc_g_fmt_vid_cap = t7_vdin_get_fmt,
 	.vidioc_try_fmt_vid_cap = t7_vdin_try_fmt,
 	.vidioc_s_fmt_vid_cap = t7_vdin_set_fmt,

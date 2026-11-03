@@ -981,44 +981,6 @@ static int t7_hdmirx_read_color(struct t7_hdmirx *rx, struct t7_hdmirx_color *co
 	return 0;
 }
 
-/* Only a current HDMI AVI may identify the base when VTEM omits it. */
-static int t7_hdmirx_vic_base(struct t7_hdmirx *rx)
-{
-	static const struct {
-		u8 vic, alternate_vic;
-		u16 width, height;
-		u8 hz;
-	} modes[] = {
-		{ 4, 69, 1280, 720, 60 },
-		{ 16, 76, 1920, 1080, 60 },
-		{ 97, 107, 3840, 2160, 60 },
-		{ 47, 71, 1280, 720, 120 },
-		{ 63, 78, 1920, 1080, 120 },
-	};
-	u8 avi[17], again[17];
-	unsigned int i, width, height;
-
-	if (!(readb(rx->cor + T7_RX_COR_AUDIO_PACKET) & BIT(0)))
-		return -1;
-	for (i = 0; i < sizeof(avi); i++)
-		avi[i] = readb(rx->cor + T7_RX_COR_AVI_PACKET + i);
-	for (i = 0; i < sizeof(again); i++)
-		again[i] = readb(rx->cor + T7_RX_COR_AVI_PACKET + i);
-	if (memcmp(avi, again, sizeof(avi)) ||
-	    !t7_hdmirx_packet_valid(avi, 0x82, 2, 13))
-		return -1;
-
-	width = t7_hdmirx_core_read16(rx, T7_RX_COR_WIDTH);
-	height = t7_hdmirx_core_read16(rx, T7_RX_COR_HEIGHT);
-	if ((avi[4] >> 5) == 3)
-		width *= 2;
-	for (i = 0; i < ARRAY_SIZE(modes); i++)
-		if ((avi[7] == modes[i].vic || avi[7] == modes[i].alternate_vic) &&
-		    width == modes[i].width && height == modes[i].height)
-			return modes[i].hz;
-	return -1;
-}
-
 /* The depacketizer latches four VTEM metadata bytes. Its W1C receipt
  * flag distinguishes a current Gaming VTEM from stale register contents.
  */
@@ -1026,7 +988,6 @@ static void t7_hdmirx_update_vtem(struct t7_hdmirx *rx)
 {
 	u64 now = ktime_get_ns();
 	struct t7_hdmirx_vrr state = {};
-	int base;
 	u8 md[4], again[4];
 	unsigned int i;
 
@@ -1047,9 +1008,8 @@ static void t7_hdmirx_update_vtem(struct t7_hdmirx *rx)
 		if (!memcmp(md, again, sizeof(md))) {
 			/* This register bank exposes the four VT payload bytes only. */
 			if (md[0] == BIT(0)) {
-				base = ((md[2] & 3) << 8) | md[3];
-				if (!base)
-					base = t7_hdmirx_vic_base(rx);
+				u16 base = ((md[2] & 3) << 8) | md[3];
+
 				state.enabled = true;
 				if (base == 60 || base == 120)
 					state.base_hz = base;

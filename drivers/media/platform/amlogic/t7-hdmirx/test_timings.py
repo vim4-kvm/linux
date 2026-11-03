@@ -258,11 +258,7 @@ int main(void) {
     measured_mode(&fast);
     core[T7_RX_COR_VT_EMP_IRQ]=BIT(3);
     core[T7_RX_COR_VT_EMP_DATA]=1;
-    core[T7_RX_COR_AUDIO_PACKET]=1;
-    u8 *vic_avi=core+T7_RX_COR_AVI_PACKET;
-    vic_avi[0]=0x82; vic_avi[1]=2; vic_avi[2]=13; vic_avi[7]=63;
-    for (unsigned j=0;j<17;j++) if (j!=3) vic_avi[3]-=vic_avi[j];
-    core[T7_RX_COR_VT_EMP_DATA+3]=0;
+    core[T7_RX_COR_VT_EMP_DATA+3]=120;
     t7_hdmirx_update_vtem(&rx);
     assert(rx.vrr.base_hz==120);
     assert(!t7_hdmirx_read_measurement(&rx,&rx.lease_mode));
@@ -287,16 +283,11 @@ int main(void) {
     assert(rx.vrr.enabled && rx.vrr.base_hz==120);
     now_ns+=250000000; t7_hdmirx_update_vtem(&rx);
     assert(!rx.vrr.base_hz && t7_hdmirx_video_status(&rx)==-ENOLINK);
-    core[T7_RX_COR_VT_EMP_IRQ]=BIT(3); vic_avi[3]^=1;
+    core[T7_RX_COR_VT_EMP_IRQ]=BIT(3); core[T7_RX_COR_VT_EMP_DATA+3]=0;
     t7_hdmirx_update_vtem(&rx); assert(t7_hdmirx_vrr_rate(&dev)==-1);
     core[T7_RX_COR_VT_EMP_DATA]=0; t7_hdmirx_update_vtem(&rx);
     assert(!t7_hdmirx_vrr_rate(&dev));
-    /* A valid but stale 4K VIC is not a base for a 1080p measurement. */
-    vic_avi[7]=97; vic_avi[3]=0;
-    for (unsigned j=0;j<17;j++) if (j!=3) vic_avi[3]-=vic_avi[j];
-    core[T7_RX_COR_VT_EMP_DATA]=1; t7_hdmirx_update_vtem(&rx);
-    assert(t7_hdmirx_vrr_rate(&dev)==-1);
-    word(T7_RX_COR_WIDTH,3840); word(T7_RX_COR_HEIGHT,2160);
+    core[T7_RX_COR_VT_EMP_DATA]=1; core[T7_RX_COR_VT_EMP_DATA+3]=60;
     t7_hdmirx_update_vtem(&rx); assert(t7_hdmirx_vrr_rate(&dev)==60);
     memset(top+T7_RX_TOP_TMDS_ALIGN_STAT,0,4);
     t7_hdmirx_update_vtem(&rx); assert(!t7_hdmirx_vrr_rate(&dev));
