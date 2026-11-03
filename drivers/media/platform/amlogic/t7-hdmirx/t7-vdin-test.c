@@ -127,6 +127,8 @@ struct t7_vdin {
 	struct v4l2_ctrl_handler controls;
 	u64 generation, ticket;
 	unsigned int width, height, stride, frame_size, allocation_size, frame_capacity;
+	unsigned int default_frame_capacity;
+	struct v4l2_pix_format configured_format;
 	/* Source lease geometry is independent of the downscaled DMA image. */
 	unsigned int input_width, input_height;
 	u32 pixel_format;
@@ -506,6 +508,11 @@ static void t7_vdin_configure(struct t7_vdin *vdin)
 	 */
 	if (t7_hdmirx_stream_needs_yuv444_swap(vdin->receiver))
 		t7_vdin_write(vdin, VDIN_COM_CTRL0, 0x255);
+	/* TOP supplies Y/Cb/Cr. Packed MIF writes component 2/1/0, so
+	 * reverse the component selectors to produce Y/Cb/Cr bytes (YUV24).
+	 */
+	if (vdin->pixel_format == V4L2_PIX_FMT_YUV24)
+		t7_vdin_write(vdin, VDIN_COM_CTRL0, (1 << 8) | (2 << 6) | 0x15);
 	t7_vdin_write(vdin, VDIN_ASFIFO_CTRL1, 0xe40000);
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), BIT(26));
 	t7_vdin_update(vdin, VPU_SW_RESET, BIT(26), 0);
@@ -947,19 +954,25 @@ static int t7_vdin_queue_setup(struct vb2_queue *queue, unsigned int *buffers,
 
 	/* Direct capture still owns a discard/snapshot DMA allocation. */
 	if (vdin->direct_dma)
-		budget -= vdin->frame_capacity;
-	limit = budget / vdin->allocation_size;
+		budget -= PAGE_ALIGN(vdin->frame_capacity);
+	limit = budget / PAGE_ALIGN(vdin->allocation_size);
 
 	/* Reject retries before vb2 can allocate a new CMA-backed buffer pool. */
 	if (vdin->faulted)
 		return -EIO;
+	/* CREATE_BUFS may supply sizeimage. Keep every buffer in the negotiated
+	 * allocation class so the count limit also bounds actual DMA pages.
+	 */
+	if (*planes && (*planes != 1 || sizes[0] < vdin->allocation_size ||
+			PAGE_ALIGN(sizes[0]) != PAGE_ALIGN(vdin->allocation_size)))
+		return -EINVAL;
 	/* Leave CMA for codec reference/work buffers; account for CREATE_BUFS. */
 	if (vb2_get_num_buffers(queue) >= limit)
 		return -ENOBUFS;
 	if (*buffers > limit - vb2_get_num_buffers(queue))
 		*buffers = limit - vb2_get_num_buffers(queue);
 	if (*planes)
-		return *planes == 1 && sizes[0] >= vdin->allocation_size ? 0 : -EINVAL;
+		return 0;
 	*planes = 1;
 	sizes[0] = vdin->allocation_size;
 	return 0;
@@ -1050,6 +1063,7 @@ static void t7_vdin_source_resumed(struct t7_vdin *vdin)
 static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 {
 	struct t7_vdin *vdin = vb2_get_drv_priv(queue);
+	struct v4l2_pix_format color = { 0 };
 	int ret;
 
 	mutex_lock(&vdin->video_lock);
@@ -1062,9 +1076,20 @@ static int t7_vdin_start_streaming(struct vb2_queue *queue, unsigned int count)
 		       !t7_hdmirx_stream_is_yuv(vdin->receiver) ||
 		       t7_hdmirx_stream_is_full_range(vdin->receiver))) ||
 		     (!vdin->native_hdr && !vdin->nv12 &&
+		      vdin->pixel_format != V4L2_PIX_FMT_YUV24 &&
 		      t7_hdmirx_stream_is_yuv(vdin->receiver)))) {
 		t7_hdmirx_stream_put(vdin->receiver);
 		ret = -EOPNOTSUPP;
+	}
+	if (!ret && vdin->pixel_format == V4L2_PIX_FMT_YUV24) {
+		ret = t7_hdmirx_yuv444_format(vdin->receiver, &color);
+		if (!ret && (color.colorspace != vdin->configured_format.colorspace ||
+			     color.xfer_func != vdin->configured_format.xfer_func ||
+			     color.ycbcr_enc != vdin->configured_format.ycbcr_enc ||
+			     color.quantization != vdin->configured_format.quantization))
+			ret = -EPIPE;
+		if (ret)
+			t7_hdmirx_stream_put(vdin->receiver);
 	}
 	if (!ret) {
 		vdin->receiver_lease = true;
@@ -1180,10 +1205,13 @@ static int t7_vdin_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *
 {
 	struct t7_vdin *vdin = video_drvdata(file);
 
-	if (fmt->index > 1 || (fmt->index == 1 && !vdin->direct_dma))
+	if (fmt->index > 2 || (fmt->index && !vdin->direct_dma))
 		return -EINVAL;
-	fmt->pixelformat = fmt->index == 1 ? V4L2_PIX_FMT_AMLY :
-		(nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24);
+	if (fmt->index == 2)
+		fmt->pixelformat = V4L2_PIX_FMT_YUV24;
+	else
+		fmt->pixelformat = fmt->index == 1 ? V4L2_PIX_FMT_AMLY :
+			(nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24);
 	/* Private formats must describe themselves or V4L2 emits an unknown
 	 * pixelformat WARN while completing ENUM_FMT.
 	 */
@@ -1198,8 +1226,10 @@ static void t7_vdin_fill_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 	/* VDIN needs 16-byte rows; Wave5 imports NV12 with 32-byte rows.
 	 * Preserve the visible width while sharing the same DMA allocation.
 	 */
-	u32 format = fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY && vdin->direct_dma ?
-		V4L2_PIX_FMT_AMLY : nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24;
+	u32 requested = fmt->fmt.pix.pixelformat;
+	u32 format = vdin->direct_dma &&
+		(requested == V4L2_PIX_FMT_AMLY || requested == V4L2_PIX_FMT_YUV24) ?
+		requested : nv12 ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_RGB24;
 	bool semiplanar = format == V4L2_PIX_FMT_NV12;
 	unsigned int stride = ALIGN(width * (semiplanar ? 1 : 3),
 				    semiplanar ? 32 : 16);
@@ -1232,8 +1262,7 @@ static int t7_vdin_get_fmt(struct file *file, void *priv, struct v4l2_format *fm
 {
 	struct t7_vdin *vdin = video_drvdata(file);
 
-	fmt->fmt.pix.pixelformat = vdin->pixel_format;
-	t7_vdin_fill_fmt(vdin, fmt, vdin->width, vdin->height);
+	fmt->fmt.pix = vdin->configured_format;
 	return 0;
 }
 
@@ -1253,7 +1282,10 @@ static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 	    (!vdin->direct_dma || (timings->bt.width & 1) ||
 	     (timings->bt.height & 1)))
 		return -EINVAL;
-	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY || !nv12 || !width || !height) {
+	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_YUV24 && !vdin->direct_dma)
+		return -EINVAL;
+	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_AMLY ||
+	    fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_YUV24 || !nv12 || !width || !height) {
 		width = timings->bt.width;
 		height = timings->bt.height;
 	} else {
@@ -1273,6 +1305,10 @@ static int t7_vdin_negotiate_fmt(struct t7_vdin *vdin, struct v4l2_format *fmt,
 		height &= ~1U;
 	}
 	t7_vdin_fill_fmt(vdin, fmt, width, height);
+	if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_YUV24) {
+		ret = t7_hdmirx_yuv444_format(vdin->receiver, &fmt->fmt.pix);
+		return ret == -EOPNOTSUPP ? -EINVAL : ret;
+	}
 	return 0;
 }
 
@@ -1300,24 +1336,47 @@ static int t7_vdin_set_fmt(struct file *file, void *priv, struct v4l2_format *fm
 	ret = vdin->faulted ? -EIO : t7_vdin_negotiate_fmt(vdin, fmt, &timings);
 	if (!ret) {
 		unsigned int frame_size = fmt->fmt.pix.bytesperline * fmt->fmt.pix.height;
+		unsigned int capacity = vdin->default_frame_capacity;
 
 		if (fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_NV12)
 			frame_size += frame_size / 2;
-		if (frame_size > vdin->frame_capacity) {
+		if (vdin->direct_dma && fmt->fmt.pix.pixelformat == V4L2_PIX_FMT_YUV24)
+			capacity = max(capacity, frame_size);
+		if (frame_size > capacity) {
 			ret = -ERANGE;
-		} else {
-			vdin->pixel_format = fmt->fmt.pix.pixelformat;
-			vdin->nv12 = vdin->pixel_format == V4L2_PIX_FMT_NV12;
-			vdin->native_hdr = vdin->pixel_format == V4L2_PIX_FMT_AMLY;
-			vdin->input_width = timings.bt.width;
-			vdin->input_height = timings.bt.height;
-			vdin->width = fmt->fmt.pix.width;
-			vdin->height = fmt->fmt.pix.height;
-			vdin->stride = fmt->fmt.pix.bytesperline;
-			vdin->allocation_size = fmt->fmt.pix.sizeimage;
-			vdin->frame_size = frame_size;
+			goto unlock;
 		}
+		if (capacity != vdin->frame_capacity) {
+			dma_addr_t dma;
+			void *frame;
+
+			/* Allocate before retiring the idle discard. Failure leaves the
+			 * previous format and its backing storage usable.
+			 */
+			frame = dma_alloc_coherent(vdin->dev, capacity, &dma, GFP_KERNEL);
+			if (!frame) {
+				ret = -ENOMEM;
+				goto unlock;
+			}
+			dma_free_coherent(vdin->dev, vdin->frame_capacity,
+					  vdin->frame, vdin->frame_dma);
+			vdin->frame = frame;
+			vdin->frame_dma = dma;
+			vdin->frame_capacity = capacity;
+		}
+		vdin->configured_format = fmt->fmt.pix;
+		vdin->pixel_format = fmt->fmt.pix.pixelformat;
+		vdin->nv12 = vdin->pixel_format == V4L2_PIX_FMT_NV12;
+		vdin->native_hdr = vdin->pixel_format == V4L2_PIX_FMT_AMLY;
+		vdin->input_width = timings.bt.width;
+		vdin->input_height = timings.bt.height;
+		vdin->width = fmt->fmt.pix.width;
+		vdin->height = fmt->fmt.pix.height;
+		vdin->stride = fmt->fmt.pix.bytesperline;
+		vdin->allocation_size = fmt->fmt.pix.sizeimage;
+		vdin->frame_size = frame_size;
 	}
+unlock:
 	mutex_unlock(&vdin->lock);
 unlock_queue:
 	mutex_unlock(&vdin->queue_mutex);
@@ -1854,6 +1913,13 @@ static int t7_vdin_probe(struct platform_device *pdev)
 	if (direct_dma)
 		vdin->frame_capacity = max(vdin->frame_capacity,
 					   ALIGN(vdin->width * 5 / 2, 32) * vdin->height);
+	vdin->default_frame_capacity = vdin->frame_capacity;
+	{
+		struct v4l2_format format = { 0 };
+
+		t7_vdin_fill_fmt(vdin, &format, vdin->width, vdin->height);
+		vdin->configured_format = format.fmt.pix;
+	}
 	/* Keep NV12 tightly packed, with tail room for aligned encoder plane views. */
 	vdin->allocation_size = nv12 ? vdin->stride * ALIGN(vdin->height, 16) * 3 / 2 :
 				       vdin->frame_size;
