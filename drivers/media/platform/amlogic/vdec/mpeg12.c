@@ -66,9 +66,6 @@ struct aml_mpeg12_ctx {
 	u64 fld_ts;
 	bool fld_pending;
 	struct v4l2_ctrl_mpeg2_picture fld_pic;
-	/* the newest decoded I/P frame, for a field that predicts from its pair */
-	u64 anchor_ts;
-	bool anchor_valid;
 };
 
 struct bitw {
@@ -416,6 +413,35 @@ static void mpeg12_job_done(struct aml_vdec_ctx *ctx, int result)
 	wake_up_interruptible(&ctx->queue);
 }
 
+static int mpeg12_reference_canvases(struct aml_vdec_ctx *ctx,
+				     const struct v4l2_ctrl_mpeg2_picture *pic,
+				     bool pair, u32 *ref0, u32 *ref1)
+{
+	struct aml_mpeg12_ctx *m = ctx->codec_priv;
+	const struct v4l2_ctrl_mpeg2_picture *first = pair ? &m->fld_pic : pic;
+
+	/*
+	 * The microcode decodes both fields in one run. An I/P pair predicts
+	 * its second field from its first field, without an external anchor.
+	 * Selecting the second field here rejects the initial I/P pair before
+	 * any picture exists in the DPB.
+	 */
+	*ref0 = ~0u;
+	*ref1 = ~0u;
+	if (first->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_P) {
+		*ref1 = mpeg12_ref_spec(ctx, &m->canvas[2], first->forward_ref_ts);
+		*ref0 = *ref1;
+		if (*ref1 == ~0u)
+			return -EINVAL;
+	} else if (first->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_B) {
+		*ref0 = mpeg12_ref_spec(ctx, &m->canvas[1], first->forward_ref_ts);
+		*ref1 = mpeg12_ref_spec(ctx, &m->canvas[2], first->backward_ref_ts);
+		if (*ref0 == ~0u || *ref1 == ~0u)
+			return -EINVAL;
+	}
+	return 0;
+}
+
 static irqreturn_t mpeg12_isr(int irq, void *priv)
 {
 	struct aml_vdec_dev *dev = priv;
@@ -634,10 +660,8 @@ int aml_mpeg12_dec_run(void *priv)
 	const struct v4l2_ctrl_mpeg2_sequence *seq;
 	const struct v4l2_ctrl_mpeg2_picture *pic;
 	const struct v4l2_ctrl_mpeg2_quantisation *quant;
-	const struct v4l2_ctrl_mpeg2_picture *rpic;
 	struct vb2_v4l2_buffer *src, *dst;
 	u32 rec, ref0 = 0xffffffff, ref1 = 0xffffffff;
-	u64 fwd;
 	bool field, pair;
 	long ret;
 
@@ -694,31 +718,9 @@ int aml_mpeg12_dec_run(void *priv)
 	if (rec == ~0u)
 		return -ENOMEM;
 
-	/*
-	 * REF0 is the older anchor, REF1 the newer one.  A pair takes its
-	 * references from the first field unless that is an I field; the
-	 * second field of an I/P pair predicts from its own first field, which
-	 * the microcode knows, and from the previous anchor frame.
-	 */
-	rpic = pic;
-	if (pair && m->fld_pic.picture_coding_type !=
-		    V4L2_MPEG2_PIC_CODING_TYPE_I)
-		rpic = &m->fld_pic;
-	fwd = rpic->forward_ref_ts;
-	if (fwd == dst->vb2_buf.timestamp && m->anchor_valid)
-		fwd = m->anchor_ts;
-	if (rpic->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_P) {
-		ref1 = mpeg12_ref_spec(ctx, &m->canvas[2], fwd);
-		ref0 = ref1;
-	} else if (rpic->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_B) {
-		ref0 = mpeg12_ref_spec(ctx, &m->canvas[1], fwd);
-		ref1 = mpeg12_ref_spec(ctx, &m->canvas[2],
-				       rpic->backward_ref_ts);
-	}
-	if ((rpic->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_P && ref1 == ~0u) ||
-	    (rpic->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_B &&
-	     (ref0 == ~0u || ref1 == ~0u)))
-		return -EINVAL;
+	ret = mpeg12_reference_canvases(ctx, pic, pair, &ref0, &ref1);
+	if (ret)
+		return ret;
 	regmap_write(hw->map[DOS_BUS], MREG_REF0, ref0);
 	regmap_write(hw->map[DOS_BUS], MREG_REF1, ref1);
 	regmap_write(hw->map[DOS_BUS], REC_CANVAS_ADDR, rec);
@@ -758,9 +760,5 @@ int aml_mpeg12_dec_run(void *priv)
 	}
 	if (ret < 0)
 		return ret;
-	if (!ctx->decode_result && rpic->picture_coding_type != V4L2_MPEG2_PIC_CODING_TYPE_B) {
-		m->anchor_ts = dst->vb2_buf.timestamp;
-		m->anchor_valid = true;
-	}
 	return ctx->decode_result;
 }

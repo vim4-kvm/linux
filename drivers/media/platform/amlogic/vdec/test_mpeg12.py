@@ -28,6 +28,55 @@ class Bits:
 
 
 class MPEG12Tests(unittest.TestCase):
+    def test_initial_ip_field_pair_needs_no_previous_frame(self):
+        code = function(HERE / 'mpeg12.c', 'mpeg12_reference_canvases')
+        run_c(COMMON + """
+#include <linux/v4l2-controls.h>
+typedef uint64_t u64;
+struct mpeg12_canvas { int unused; };
+struct aml_mpeg12_ctx {
+    struct v4l2_ctrl_mpeg2_picture fld_pic;
+    struct mpeg12_canvas canvas[3];
+};
+struct aml_vdec_ctx { struct aml_mpeg12_ctx *codec_priv; };
+static bool dpb_ready;
+static unsigned int lookups;
+static u32 mpeg12_ref_spec(struct aml_vdec_ctx *ctx, struct mpeg12_canvas *c, u64 ts)
+{
+    lookups++;
+    if (!dpb_ready) return ~0u;
+    return ts == 100 ? 0x030302 : ts == 200 ? 0x050504 : ~0u;
+}
+""" + code + """
+int main(void)
+{
+    struct aml_mpeg12_ctx m = { .fld_pic = {
+        .picture_coding_type = V4L2_MPEG2_PIC_CODING_TYPE_I } };
+    struct aml_vdec_ctx ctx = { .codec_priv = &m };
+    struct v4l2_ctrl_mpeg2_picture second = {
+        .picture_coding_type = V4L2_MPEG2_PIC_CODING_TYPE_P, .forward_ref_ts = UINT64_MAX };
+    u32 ref0, ref1;
+    assert(!mpeg12_reference_canvases(&ctx, &second, true, &ref0, &ref1));
+    assert(!lookups && ref0 == ~0u && ref1 == ~0u);
+    /* Once an anchor exists, the first P field selects it for the pair. */
+    dpb_ready = true;
+    m.fld_pic.picture_coding_type = V4L2_MPEG2_PIC_CODING_TYPE_P;
+    m.fld_pic.forward_ref_ts = 100;
+    assert(!mpeg12_reference_canvases(&ctx, &second, true, &ref0, &ref1));
+    assert(lookups == 1 && ref0 == 0x030302 && ref1 == ref0);
+    m.fld_pic.picture_coding_type = V4L2_MPEG2_PIC_CODING_TYPE_B;
+    m.fld_pic.backward_ref_ts = 200;
+    assert(!mpeg12_reference_canvases(&ctx, &second, true, &ref0, &ref1));
+    assert(ref0 == 0x030302 && ref1 == 0x050504);
+    /* Frame requests must use their own controls and reject a missing anchor. */
+    assert(mpeg12_reference_canvases(&ctx, &second, false, &ref0, &ref1) == -EINVAL);
+    second.forward_ref_ts = 200;
+    assert(!mpeg12_reference_canvases(&ctx, &second, false, &ref0, &ref1));
+    assert(ref0 == 0x050504 && ref1 == ref0);
+    return 0;
+}
+""")
+
     def test_codec_switch_discards_previous_picture_and_iq_mode(self):
         code = function(HERE / 'mpeg12.c', 'mpeg12_restore_hw')
         registers = sorted(set(re.findall(
