@@ -11,6 +11,12 @@
 
 #define INVALID_POC 0xffffffff
 
+/* The firmware applies the se(v) mapping when reading PPS table fields. */
+static u16 h264_signed_code(int value)
+{
+	return value > 0 ? 2 * value - 1 : -2 * value;
+}
+
 #define H264_SLICE_HEADER_DONE		0x1
 #define H264_SLICE_DATA_DONE		0x2
 
@@ -458,11 +464,11 @@ static void config_pps_params(struct aml_h264_ctx *h264_ctx,
 		GET_PPS_NUM_IDX_REF_L1_MINUS1(pps->num_ref_idx_l1_default_active_minus1) |
 		GET_PPS_NUM_IDX_REF_L0_MINUS1(pps->num_ref_idx_l0_default_active_minus1);
 
-	data_tmp[offset++] = GET_PPS_INIT_QS_MINUS26(pps->pic_init_qs_minus26) |
-	    GET_PPS_INIT_QP_MINUS26(pps->pic_init_qp_minus26);
+	data_tmp[offset++] = GET_PPS_INIT_QS_MINUS26(h264_signed_code(pps->pic_init_qs_minus26)) |
+	    GET_PPS_INIT_QP_MINUS26(h264_signed_code(pps->pic_init_qp_minus26));
 
 	data_tmp[offset] =
-	    GET_PPS_CHROMA_QP_INDEX_OFFSET(pps->chroma_qp_index_offset) |
+	    GET_PPS_CHROMA_QP_INDEX_OFFSET(h264_signed_code(pps->chroma_qp_index_offset)) |
 	    GET_PPS_DEBLOCK_FILTER_CTRL_PRESENT_FLAG
 				(get_flag(pps->flags,
 					  V4L2_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT)) |
@@ -484,8 +490,7 @@ static void config_pps_params(struct aml_h264_ctx *h264_ctx,
 		GET_PPS_TRANSFORM_8X8_FLAG(get_flag(pps->flags,
 						    V4L2_H264_PPS_FLAG_TRANSFORM_8X8_MODE));
 
-	data_tmp[offset++] =
-		GET_PPS_GET_SECOND_CHROMA_QP_OFFSET(pps->second_chroma_qp_index_offset);
+	data_tmp[offset++] = h264_signed_code(pps->second_chroma_qp_index_offset);
 
 	max_list_size = (pps->num_ref_idx_l1_default_active_minus1 + 1) +
 	    (pps->num_ref_idx_l0_default_active_minus1 + 1);
