@@ -54,6 +54,69 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_mpeg2_full_reset_preserves_power_and_keeps_bus_isolated_on_error(self):
+        code = function(HERE / 'aml_vdec_hw.c', 'aml_vdec_reset_core')
+        run_c(COMMON + """
+#define GENMASK(h, l) ((~0U << (l)) & (~0U >> (31 - (h))))
+#define DOS_BUS 0
+#define DMC_BUS 1
+#define CODEC_TYPE_MPEG2 1
+enum { VDEC_ASSIST_DBUS_DISABLE, DOS_SW_RESET0, VDEC_ASSIST_MMC_CTRL1,
+       MDEC_PIC_DC_MUX_CTRL, MDEC_EXTIF_CFG1, POWER_CTL_VLD };
+struct aml_vdec_hw { bool has_dbus_ctrl; unsigned int *map[2]; };
+static unsigned int calls, fail_at, seen_reset;
+static unsigned int registers[6];
+static int regmap_write(unsigned int *map, unsigned int reg, unsigned int value)
+{
+    if (++calls == fail_at) return -EIO;
+    if (reg == DOS_SW_RESET0) {
+        assert(map[VDEC_ASSIST_DBUS_DISABLE] == 0xffff);
+        if (value) {
+            seen_reset = value;
+            if (value & BIT(6)) map[POWER_CTL_VLD] = 0;
+        }
+    }
+    if (reg == VDEC_ASSIST_DBUS_DISABLE && !value)
+        assert(map[POWER_CTL_VLD] == 0x1234);
+    map[reg] = value;
+    return 0;
+}
+static int regmap_read(unsigned int *map, unsigned int reg, unsigned int *value)
+{
+    if (++calls == fail_at) return -EIO;
+    *value = map[reg]; return 0;
+}
+static int regmap_update_bits(unsigned int *map, unsigned int reg,
+                             unsigned int mask, unsigned int value)
+{ return regmap_write(map, reg, (map[reg] & ~mask) | (value & mask)); }
+#define regmap_read_poll_timeout(map, reg, value, cond, delay, limit) \
+    (regmap_read(map, reg, &value) ?: ((cond) ? 0 : -ETIMEDOUT))
+#define cpu_relax() ((void)0)
+#define usleep_range(a, b) ((void)0)
+""" + code + """
+int main(void)
+{
+    struct aml_vdec_hw hw = { .has_dbus_ctrl = true, .map = { registers } };
+    registers[POWER_CTL_VLD] = 0x1234;
+    assert(!aml_vdec_reset_core(&hw, 0));
+    assert(!(seen_reset & BIT(6)) && !registers[VDEC_ASSIST_DBUS_DISABLE]);
+    calls = 0;
+    assert(!aml_vdec_reset_core(&hw, CODEC_TYPE_MPEG2));
+    assert((seen_reset & BIT(6)) && !(seen_reset & 7));
+    assert(!registers[VDEC_ASSIST_DBUS_DISABLE]);
+    unsigned int total = calls;
+    for (fail_at = 1; fail_at <= total; fail_at++) {
+        calls = 0;
+        registers[VDEC_ASSIST_DBUS_DISABLE] = 0;
+        registers[POWER_CTL_VLD] = 0x1234;
+        assert(aml_vdec_reset_core(&hw, CODEC_TYPE_MPEG2) == -EIO);
+        assert(calls == fail_at);
+        if (fail_at > 1) assert(registers[VDEC_ASSIST_DBUS_DISABLE] == 0xffff);
+    }
+    return 0;
+}
+""")
+
     def test_format_probe_selects_codec_and_capture_keeps_real_plane_count(self):
         names = ('set_pic_info', 'vdec_try_fmt_mp', 'vdec_s_fmt_output', 'vdec_s_fmt_capture')
         code = '\n'.join(function(HERE / 'aml_vdec.c', name) for name in names)
@@ -778,7 +841,7 @@ static int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx)
 { assert(!pins_held); pins_held = !pin_error; return pin_error; }
 static void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx)
 { assert(ctx->dev->dec_hw->faulted || !ctx->dos_clk_en); pins_held = false; }
-static int aml_vdec_reset_core(struct hw *h) { return 0; }
+static int aml_vdec_reset_core(struct hw *h, unsigned int codec) { return 0; }
 static int load_firmware(struct hw *h, const char *path, unsigned int codec)
 { assert(h->curr_ctx == owner->codec_priv && callback_owner == owner); return firmware_error; }
 static void aml_vdec_fault(struct aml_vdec_ctx *ctx) { ctx->dev->dec_hw->faulted = true; }

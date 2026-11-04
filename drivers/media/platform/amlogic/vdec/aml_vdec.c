@@ -205,7 +205,7 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 	dos_enable(dev->dec_hw);
 	/* incase of bus hang in stop_streaming */
 	ctx->dos_clk_en = 1;
-	ret = aml_vdec_reset_core(dev->dec_hw);
+	ret = aml_vdec_reset_core(dev->dec_hw, ctx->curr_dec_type);
 	if (ret) {
 		/* Isolation/reset failed: do not retry MMIO or return DMA ownership. */
 		aml_vdec_fault(ctx);
