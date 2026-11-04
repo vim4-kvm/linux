@@ -54,6 +54,52 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_native_configuration_requires_dpb_handshake_before_slice(self):
+        code = "\n".join(function(HERE / "h264.c", name) for name in
+                         ("h264_publish_dpb", "h264_ack_config"))
+        run_c(COMMON + """
+#include "reg_defines.h"
+#define DOS_BUS 0
+#define DPB_STATUS_REG AV_SCRATCH_J
+#define H264_ACTION_CONFIG_DONE 0xf2
+#define V4L2_H264_NUM_DPB_ENTRIES 16
+struct aml_vdec_hw { void *map[1]; };
+struct aml_vdec_ctx { struct aml_vdec_hw *dev; };
+struct aml_h264_ctx {
+    struct aml_vdec_ctx *v4l2_ctx;
+    bool staged_input;
+    unsigned int max_num_ref_frames;
+};
+static unsigned int writes, status = 0x11, scratch0 = 1;
+static bool firmware_ready;
+static struct aml_vdec_hw *vdec_get_hw(struct aml_vdec_hw *hw) { return hw; }
+static void save_reg_status(struct aml_h264_ctx *ctx) {}
+static void regmap_write(void *map, unsigned int reg, unsigned int value)
+{
+    writes++;
+    if (reg == DPB_STATUS_REG) status = value;
+    else {
+        assert(reg == AV_SCRATCH_0);
+        scratch0 = value;
+        firmware_ready = status == H264_ACTION_CONFIG_DONE && !(value & 255) &&
+                         ((value >> 8) & 255) >= 4;
+    }
+}
+""" + code + """
+int main(void)
+{
+    struct aml_vdec_hw hw = {};
+    struct aml_vdec_ctx ctx = { &hw };
+    struct aml_h264_ctx h264 = { .v4l2_ctx = &ctx, .max_num_ref_frames = 4 };
+    assert(h264_ack_config(&h264) == -EINVAL && !writes);
+    h264.staged_input = true;
+    assert(!h264_ack_config(&h264));
+    assert(firmware_ready && !(scratch0 & 255));
+    assert((scratch0 >> 24) == 5);
+    return 0;
+}
+""")
+
     def test_native_headers_stage_payload_and_propagate_failures(self):
         code = "\n".join(function(HERE / "h264.c", name) for name in
                          ("h264_needs_headers", "h264_stage_input"))
@@ -321,7 +367,8 @@ int main(void)
 
     def test_parameter_tables_initialize_slots_and_encode_signed_fields(self):
         functions = "\n".join(function(HERE / "h264.c", name) for name in (
-            "h264_signed_code", "get_flag", "config_sps_params", "config_pps_params"))
+            "h264_signed_code", "get_flag", "config_sps_params",
+            "h264_publish_dpb", "config_pps_params"))
         run_c(COMMON + """
 #include <string.h>
 #include <linux/v4l2-controls.h>

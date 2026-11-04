@@ -501,15 +501,22 @@ static void config_sps_params(struct aml_h264_ctx *h264_ctx,
 	h264_ctx->max_num_ref_frames = sps->max_num_ref_frames;
 }
 
+static void h264_publish_dpb(struct aml_h264_ctx *h264_ctx)
+{
+	struct aml_vdec_hw *hw = vdec_get_hw(h264_ctx->v4l2_ctx->dev);
+	u32 size = V4L2_H264_NUM_DPB_ENTRIES;
+
+	regmap_write(hw->map[DOS_BUS], AV_SCRATCH_0,
+		     ((h264_ctx->max_num_ref_frames + 1) << 24) |
+		     (size << 16) | (size << 8));
+}
+
 static void config_pps_params(struct aml_h264_ctx *h264_ctx,
 			      unsigned short *pps_base,
 			      const struct v4l2_ctrl_h264_pps *pps)
 {
-	struct aml_vdec_ctx *ctx = h264_ctx->v4l2_ctx;
-	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
 	u32 offset = 0;
 	unsigned short data_tmp[0x100] = {};
-	u32 max_reference_size = V4L2_H264_NUM_DPB_ENTRIES;
 	u32 max_list_size;
 	int i, ii;
 
@@ -566,9 +573,7 @@ static void config_pps_params(struct aml_h264_ctx *h264_ctx,
 	h264_ctx->max_num_ref_frames = max_list_size > h264_ctx->max_num_ref_frames ?
 						max_list_size : h264_ctx->max_num_ref_frames;
 
-	regmap_write(hw->map[DOS_BUS], AV_SCRATCH_0,
-		     ((h264_ctx->max_num_ref_frames + 1) << 24) |
-		     (max_reference_size << 16) | (max_reference_size << 8));
+	h264_publish_dpb(h264_ctx);
 
 	for (i = 0; i < 0x100; i += 4) {
 		for (ii = 0; ii < 4; ii++)
@@ -1871,6 +1876,22 @@ static irqreturn_t h264_isr(int irq, void *priv)
 	return IRQ_WAKE_THREAD;
 }
 
+static int h264_ack_config(struct aml_h264_ctx *h264_ctx)
+{
+	struct aml_vdec_hw *hw = vdec_get_hw(h264_ctx->v4l2_ctx->dev);
+
+	if (!h264_ctx->staged_input)
+		return -EINVAL;
+	save_reg_status(h264_ctx);
+	regmap_write(hw->map[DOS_BUS], DPB_STATUS_REG, H264_ACTION_CONFIG_DONE);
+	/*
+	 * Parsing SPS replaces scratch 0 with the buffer-configuration request.
+	 * CONFIG_DONE alone leaves firmware waiting for this second handshake.
+	 */
+	h264_publish_dpb(h264_ctx);
+	return 0;
+}
+
 static irqreturn_t h264_threaded_isr_func(int irq, void *priv)
 {
 	u32 dec_status;
@@ -1893,11 +1914,9 @@ static irqreturn_t h264_threaded_isr_func(int irq, void *priv)
 
 	switch (dec_status) {
 	case H264_CONFIG_REQUEST:
-		if (!h264_ctx->staged_input)
+		if (h264_ack_config(h264_ctx))
 			goto header_error;
 		/* Native SPS/PPS parsing precedes the slice; no frame is done yet. */
-		save_reg_status(h264_ctx);
-		regmap_write(hw->map[DOS_BUS], DPB_STATUS_REG, H264_ACTION_CONFIG_DONE);
 		break;
 	case H264_SLICE_HEADER_DONE:
 		for (i = 0; i < 0x400; i += 4)
