@@ -531,9 +531,12 @@ static void h264_config_params(struct aml_vdec_ctx *ctx)
 static int h264_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
 				      dma_addr_t addr, u32 stride, u32 height)
 {
-	/* T7's MDEC consumes its private LUT, not the DMC canvas provider. */
+	/*
+	 * T7 revision C needs the byte-switch remap as well as the LUT endian
+	 * field. Otherwise each output 64-bit word is reversed, including UV.
+	 */
 	const struct reg_sequence regs[] = {
-		{ MDEC_CAV_CFG0, 0 },
+		{ MDEC_CAV_CFG0, hw->canvas_endian_remap ? GENMASK(25, 17) : 0 },
 		{ MDEC_CAV_LUT_DATAL, (u32)(addr >> 3) | ((stride >> 3) << 29) },
 		{ MDEC_CAV_LUT_DATAH, (stride >> 6) | (height << 9) |
 				    (MESON_CANVAS_ENDIAN_SWAP64 << 26) },

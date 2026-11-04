@@ -147,6 +147,7 @@ struct aml_vdec_hw {
 	void *curr_ctx;
 	bool has_dbus_ctrl;
 	bool has_internal_canvas;
+	bool canvas_endian_remap;
 	bool faulted;
 	bool powered;
 	bool power_test_passed;
