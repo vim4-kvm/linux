@@ -15,6 +15,7 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
+#include <linux/overflow.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <media/v4l2-ctrls.h>
@@ -111,9 +112,7 @@ static void *mpeg12_ctrl(struct aml_vdec_ctx *ctx, u32 id)
 
 /*
  * Rebuild sequence header + sequence extension + picture header + picture
- * coding extension.  The quantiser matrices go in the sequence header
- * (both are in zigzag order there and in the control); for 4:2:0 the chroma
- * matrices are never used.
+ * coding extension. Matrix controls already use bitstream zigzag order.
  */
 static u32 mpeg12_write_headers(u8 *buf,
 				const struct v4l2_ctrl_mpeg2_sequence *seq,
@@ -122,11 +121,8 @@ static u32 mpeg12_write_headers(u8 *buf,
 				bool with_seq)
 {
 	struct bitw bw = { .buf = buf };
-	u32 vbv = seq->vbv_buffer_size / 2048;
+	u32 vbv = seq->vbv_buffer_size;
 	int i;
-
-	if (!vbv)
-		vbv = 112;
 
 	if (!with_seq)
 		goto picture;
@@ -193,9 +189,25 @@ picture:
 	put_bits(&bw, 1, !!(pic->flags & V4L2_MPEG2_PIC_FLAG_INTRA_VLC));
 	put_bits(&bw, 1, !!(pic->flags & V4L2_MPEG2_PIC_FLAG_ALT_SCAN));
 	put_bits(&bw, 1, !!(pic->flags & V4L2_MPEG2_PIC_FLAG_REPEAT_FIRST));
-	put_bits(&bw, 1, 1);		/* chroma_420_type */
+	put_bits(&bw, 1, !!(pic->flags & V4L2_MPEG2_PIC_FLAG_PROGRESSIVE));
 	put_bits(&bw, 1, !!(pic->flags & V4L2_MPEG2_PIC_FLAG_PROGRESSIVE));
 	put_bits(&bw, 1, 0);		/* composite_display_flag */
+	put_align(&bw);
+	/* Preserve picture-level matrix changes, including the second field. */
+	put_start(&bw, 0xb5);
+	put_bits(&bw, 4, 3);
+	put_bits(&bw, 1, 1);
+	for (i = 0; i < 64; i++)
+		put_bits(&bw, 8, quant->intra_quantiser_matrix[i]);
+	put_bits(&bw, 1, 1);
+	for (i = 0; i < 64; i++)
+		put_bits(&bw, 8, quant->non_intra_quantiser_matrix[i]);
+	put_bits(&bw, 1, 1);
+	for (i = 0; i < 64; i++)
+		put_bits(&bw, 8, quant->chroma_intra_quantiser_matrix[i]);
+	put_bits(&bw, 1, 1);
+	for (i = 0; i < 64; i++)
+		put_bits(&bw, 8, quant->chroma_non_intra_quantiser_matrix[i]);
 	put_align(&bw);
 
 	return bw.bits >> 3;
@@ -210,9 +222,11 @@ static int mpeg12_stash_field(struct aml_vdec_ctx *ctx,
 {
 	struct aml_mpeg12_ctx *m = ctx->codec_priv;
 	u32 payload = vb2_get_plane_payload(&src->vb2_buf, 0);
-	u32 need = MPEG12_HDR_MAX + payload;
+	u32 need;
 	u32 hdr;
 
+	if (check_add_overflow(payload, MPEG12_HDR_MAX, &need))
+		return -EOVERFLOW;
 	if (need > m->fld_cap) {
 		kvfree(m->fld_buf);
 		m->fld_cap = 0;
@@ -249,14 +263,17 @@ static int mpeg12_prepare_input(struct aml_vdec_ctx *ctx,
 	vb = &src->vb2_buf;
 	payload = vb2_get_plane_payload(vb, 0);
 
-	need = MPEG12_HDR_MAX + payload + MPEG12_TAIL + VLD_PADDING_SIZE + 64;
-	if (pair)
-		need += m->fld_len;
+	if (check_add_overflow(payload, MPEG12_HDR_MAX + MPEG12_TAIL +
+			       VLD_PADDING_SIZE + VDEC_FIFO_ALIGN, &need) ||
+	    (pair && check_add_overflow(need, m->fld_len, &need)) ||
+	    need > U32_MAX - VDEC_FIFO_ALIGN)
+		return -EOVERFLOW;
+	need = round_up(need, VDEC_FIFO_ALIGN);
 	if (need > m->stage_size) {
 		if (m->stage_vaddr)
 			dma_free_coherent(hw->dev, m->stage_size,
 					  m->stage_vaddr, m->stage_paddr);
-		m->stage_size = PAGE_ALIGN(need + SZ_64K);
+		m->stage_size = need;
 		m->stage_vaddr = dma_alloc_coherent(hw->dev, m->stage_size,
 						    &m->stage_paddr, GFP_KERNEL);
 		if (!m->stage_vaddr) {
@@ -314,9 +331,9 @@ static void mpeg12_canvas_free(struct aml_vdec_hw *hw, struct aml_mpeg12_ctx *m)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(m->canvas); i++) {
-		if (m->canvas[i].y >= 0)
+		if (!hw->has_internal_canvas && m->canvas[i].y >= 0)
 			meson_canvas_free(hw->canvas, m->canvas[i].y);
-		if (m->canvas[i].uv >= 0)
+		if (!hw->has_internal_canvas && m->canvas[i].uv >= 0)
 			meson_canvas_free(hw->canvas, m->canvas[i].uv);
 		m->canvas[i].y = -1;
 		m->canvas[i].uv = -1;
@@ -338,6 +355,16 @@ static u32 mpeg12_canvas_setup(struct aml_vdec_ctx *ctx,
 		uv = vb2_dma_contig_plane_dma_addr(vb, 1);
 	else
 		uv = y + ctx->pic_info.fb_size[0];
+	if (hw->has_internal_canvas) {
+		struct aml_mpeg12_ctx *m = ctx->codec_priv;
+
+		yi = (c - m->canvas) * 2;
+		ci = yi + 1;
+		if (aml_vdec_write_internal_canvas(hw, yi, y, w, h) ||
+		    aml_vdec_write_internal_canvas(hw, ci, uv, w, h / 2))
+			return ~0u;
+		goto configure;
+	}
 
 	/* a slot reused within one job must not leak its old canvases */
 	if (c->y >= 0)
@@ -358,10 +385,11 @@ static u32 mpeg12_canvas_setup(struct aml_vdec_ctx *ctx,
 
 	meson_canvas_config(hw->canvas, yi, y, w, h, MESON_CANVAS_WRAP_NONE,
 			    MESON_CANVAS_BLKMODE_LINEAR, MESON_CANVAS_ENDIAN_SWAP64);
-	regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_CANVAS_BLK32,
-		     (1 << 11) | (1 << 8) | yi);
 	meson_canvas_config(hw->canvas, ci, uv, w, h / 2, MESON_CANVAS_WRAP_NONE,
 			    MESON_CANVAS_BLKMODE_LINEAR, MESON_CANVAS_ENDIAN_SWAP64);
+configure:
+	regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_CANVAS_BLK32,
+		     (1 << 11) | (1 << 8) | yi);
 	regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_CANVAS_BLK32,
 		     (1 << 11) | (1 << 8) | ci);
 
@@ -379,15 +407,11 @@ static u32 mpeg12_ref_spec(struct aml_vdec_ctx *ctx, struct mpeg12_canvas *c,
 	return mpeg12_canvas_setup(ctx, c, vb);
 }
 
-static void mpeg12_job_done(struct aml_vdec_ctx *ctx, enum vb2_buffer_state st)
+static void mpeg12_job_done(struct aml_vdec_ctx *ctx, int result)
 {
-	struct aml_vdec_dev *dev = ctx->dev;
-
-	mpeg12_canvas_free(dev->dec_hw, ctx->codec_priv);
+	ctx->decode_result = result;
 	ctx->int_cond = 1;
-	ctx->job_finished = true;
-	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx, st);
-	wake_up(&ctx->queue);
+	wake_up_interruptible(&ctx->queue);
 }
 
 static irqreturn_t mpeg12_isr(int irq, void *priv)
@@ -410,7 +434,7 @@ static irqreturn_t mpeg12_threaded_isr(int irq, void *priv)
 	if (!m)
 		return IRQ_HANDLED;
 	ctx = m->v4l2_ctx;
-	if (ctx->job_finished)
+	if (ctx->int_cond)
 		return IRQ_HANDLED;
 
 	if (read_dos_reg(hw, MREG_DEBUG)) {
@@ -446,11 +470,11 @@ static irqreturn_t mpeg12_threaded_isr(int irq, void *priv)
 	case MPEG12_SEQ_END:
 		m->decoded++;
 		mpeg12_job_done(ctx, (m->pic_info & MPEG12_PICINFO_ERROR) ?
-				VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
+				-EIO : 0);
 		break;
 	case MPEG12_DATA_EMPTY:
 	case MPEG12_DATA_REQUEST:
-		mpeg12_job_done(ctx, VB2_BUF_STATE_ERROR);
+		mpeg12_job_done(ctx, -EIO);
 		break;
 	default:
 		/* Not ours; leave the microcode waiting for the timeout. */
@@ -518,7 +542,7 @@ int aml_mpeg12_init(void *priv)
 	if (!hw)
 		return -ENODEV;
 
-	m = kzalloc_obj(*m);
+	m = kzalloc_obj(*m, GFP_KERNEL);
 	if (!m)
 		return -ENOMEM;
 	m->v4l2_ctx = ctx;
@@ -546,6 +570,23 @@ int aml_mpeg12_init(void *priv)
 	return 0;
 }
 
+void aml_mpeg12_prepare(void *priv)
+{
+	struct aml_vdec_ctx *ctx = priv;
+	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
+
+	hw->hw_ops.irq_handler = mpeg12_isr;
+	hw->hw_ops.irq_threaded_func = mpeg12_threaded_isr;
+	hw->hw_ops.load_firmware_ex = NULL;
+}
+
+void aml_mpeg12_finish(void *priv)
+{
+	struct aml_vdec_ctx *ctx = priv;
+
+	mpeg12_canvas_free(vdec_get_hw(ctx->dev), ctx->codec_priv);
+}
+
 void aml_mpeg12_exit(void *priv)
 {
 	struct aml_vdec_ctx *ctx = priv;
@@ -555,10 +596,15 @@ void aml_mpeg12_exit(void *priv)
 	if (!m)
 		return;
 	hw = vdec_get_hw(ctx->dev);
+	if (hw->faulted)
+		return;
 
-	if (ctx->dos_clk_en)
-		aml_stop_vdec_hw(hw);
-	mpeg12_canvas_free(hw, m);
+	if (ctx->dos_clk_en && aml_stop_vdec_hw(hw)) {
+		aml_vdec_fault(ctx);
+		return;
+	}
+	ctx->dos_clk_en = false;
+	aml_mpeg12_finish(ctx);
 
 	if (m->stage_vaddr)
 		dma_free_coherent(hw->dev, m->stage_size,
@@ -569,8 +615,6 @@ void aml_mpeg12_exit(void *priv)
 			  m->cc_vaddr, m->cc_paddr);
 	kvfree(m->fld_buf);
 
-	if (hw->curr_ctx == m)
-		hw->curr_ctx = NULL;
 	kfree(m);
 	ctx->codec_priv = NULL;
 }
@@ -596,13 +640,19 @@ int aml_mpeg12_dec_run(void *priv)
 	if (!seq || !pic || !quant)
 		return -EINVAL;
 
-	hw->curr_ctx = m;
-	hw->hw_ops.irq_handler = mpeg12_isr;
-	hw->hw_ops.irq_threaded_func = mpeg12_threaded_isr;
-
 	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
 	if (!src || !dst)
+		return -EINVAL;
+	if (!vb2_get_plane_payload(&src->vb2_buf, 0) ||
+	    vb2_get_plane_payload(&src->vb2_buf, 0) > vb2_plane_size(&src->vb2_buf, 0) ||
+	    !vb2_plane_vaddr(&src->vb2_buf, 0))
+		return -EINVAL;
+	if (seq->chroma_format != 1 || !seq->horizontal_size || !seq->vertical_size ||
+	    seq->horizontal_size > AML_VDEC_1080P_MAX_W ||
+	    seq->vertical_size > AML_VDEC_1080P_MAX_H ||
+	    seq->horizontal_size > ctx->pic_info.coded_width ||
+	    seq->vertical_size > ctx->pic_info.coded_height)
 		return -EINVAL;
 
 	field = pic->picture_structure != V4L2_MPEG2_PIC_FRAME;
@@ -614,29 +664,28 @@ int aml_mpeg12_dec_run(void *priv)
 
 	if (field && !pair &&
 	    (src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF)) {
-		if (mpeg12_stash_field(ctx, seq, pic, quant, src) < 0)
-			return -ENOMEM;
+		ret = mpeg12_stash_field(ctx, seq, pic, quant, src);
+		if (ret)
+			return ret;
 		dev_dbg(hw->dev, "mpeg12 stash field %u type %u\n",
 			pic->picture_structure,
 			 pic->picture_coding_type);
 		/* the capture buffer stays held for the second field */
-		ctx->int_cond = 1;
-		ctx->job_finished = true;
-		v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev_dec,
-						 ctx->m2m_ctx,
-						 VB2_BUF_STATE_DONE);
 		return 0;
 	}
 	m->fld_pending = false;
+	if (field && !pair)
+		return -EINVAL;
 
-	if (mpeg12_prepare_input(ctx, seq, pic, quant, pair) < 0)
-		return -ENOMEM;
+	ret = mpeg12_prepare_input(ctx, seq, pic, quant, pair);
+	if (ret)
+		return ret;
 
 	mpeg12_restore_hw(ctx);
 
 	rec = mpeg12_canvas_setup(ctx, &m->canvas[0], &dst->vb2_buf);
 	if (rec == ~0u)
-		goto fail;
+		return -ENOMEM;
 
 	/*
 	 * REF0 is the older anchor, REF1 the newer one.  A pair takes its
@@ -659,10 +708,10 @@ int aml_mpeg12_dec_run(void *priv)
 		ref1 = mpeg12_ref_spec(ctx, &m->canvas[2],
 				       rpic->backward_ref_ts);
 	}
-	if (rpic->picture_coding_type != V4L2_MPEG2_PIC_CODING_TYPE_B) {
-		m->anchor_ts = dst->vb2_buf.timestamp;
-		m->anchor_valid = true;
-	}
+	if ((rpic->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_P && ref1 == ~0u) ||
+	    (rpic->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_B &&
+	     (ref0 == ~0u || ref1 == ~0u)))
+		return -EINVAL;
 	regmap_write(hw->map[DOS_BUS], MREG_REF0, ref0);
 	regmap_write(hw->map[DOS_BUS], MREG_REF1, ref1);
 	regmap_write(hw->map[DOS_BUS], REC_CANVAS_ADDR, rec);
@@ -676,12 +725,12 @@ int aml_mpeg12_dec_run(void *priv)
 		 rec, ref0, ref1);
 
 	ctx->int_cond = 0;
+	ctx->decode_result = -EIO;
 	regmap_update_bits(hw->map[DOS_BUS], VLD_MEM_VIFIFO_CONTROL, 0x6, 0x6);
 	aml_start_vdec_hw(hw);
 
-	/* Uninterruptible: see the note in vp9.c. */
-	ret = wait_event_timeout(ctx->queue, ctx->int_cond,
-				 msecs_to_jiffies(MPEG12_TIMEOUT_MS));
+	ret = wait_event_interruptible_timeout(ctx->queue, ctx->int_cond,
+					       msecs_to_jiffies(MPEG12_TIMEOUT_MS));
 	ctx->int_cond = 0;
 	if (!ret) {
 		dev_err(hw->dev,
@@ -694,15 +743,14 @@ int aml_mpeg12_dec_run(void *priv)
 			read_dos_reg(hw, VLD_MEM_VIFIFO_WP),
 			read_dos_reg(hw, VIFF_BIT_CNT),
 			read_dos_reg(hw, MREG_ERROR_COUNT));
-		aml_stop_vdec_hw(hw);
-		mpeg12_canvas_free(hw, m);
+		ctx->decode_failed = true;
 		return -ETIMEDOUT;
 	}
-
-	aml_stop_vdec_hw(hw);
-	return 0;
-
-fail:
-	mpeg12_canvas_free(hw, m);
-	return -ENOMEM;
+	if (ret < 0)
+		return ret;
+	if (!ctx->decode_result && rpic->picture_coding_type != V4L2_MPEG2_PIC_CODING_TYPE_B) {
+		m->anchor_ts = dst->vb2_buf.timestamp;
+		m->anchor_valid = true;
+	}
+	return ctx->decode_result;
 }

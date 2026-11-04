@@ -202,7 +202,9 @@ int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
 int aml_stop_vdec_hw(struct aml_vdec_hw *hw);
-int load_firmware(struct aml_vdec_hw *hw, const char *path);
+int load_firmware(struct aml_vdec_hw *hw, const char *path, unsigned int codec);
+int aml_vdec_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
+				   dma_addr_t addr, u32 stride, u32 height);
 int aml_vdec_reset_core(struct aml_vdec_hw *hw);
 
 #endif

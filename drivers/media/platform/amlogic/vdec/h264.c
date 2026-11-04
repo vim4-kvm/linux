@@ -601,24 +601,6 @@ static void h264_config_params(struct aml_vdec_ctx *ctx)
 	config_pps_params(h264_ctx, p_pps_base, pps);
 }
 
-static int h264_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
-				      dma_addr_t addr, u32 stride, u32 height)
-{
-	/*
-	 * T7 revision C needs the byte-switch remap as well as the LUT endian
-	 * field. Otherwise each output 64-bit word is reversed, including UV.
-	 */
-	const struct reg_sequence regs[] = {
-		{ MDEC_CAV_CFG0, hw->canvas_endian_remap ? GENMASK(25, 17) : 0 },
-		{ MDEC_CAV_LUT_DATAL, (u32)(addr >> 3) | ((stride >> 3) << 29) },
-		{ MDEC_CAV_LUT_DATAH, (stride >> 6) | (height << 9) |
-				    (MESON_CANVAS_ENDIAN_SWAP64 << 26) },
-		{ MDEC_CAV_LUT_ADDR, index },
-	};
-
-	return regmap_multi_reg_write(hw->map[DOS_BUS], regs, ARRAY_SIZE(regs));
-}
-
 static int h264_config_internal_canvas(struct aml_vdec_hw *hw,
 				       struct h264_decode_buf_spec *buf_spec,
 				       u32 mb_width, u32 mb_height)
@@ -638,12 +620,12 @@ static int h264_config_internal_canvas(struct aml_vdec_hw *hw,
 	 */
 	y_index = buf_spec->canvas_pos * 2;
 	uv_index = y_index + 1;
-	ret = h264_write_internal_canvas(hw, y_index, buf_spec->y_dma_addr,
-					 mb_width << 4, mb_height << 4);
+	ret = aml_vdec_write_internal_canvas(hw, y_index, buf_spec->y_dma_addr,
+					     mb_width << 4, mb_height << 4);
 	if (ret)
 		return ret;
-	ret = h264_write_internal_canvas(hw, uv_index, buf_spec->c_dma_addr,
-					 mb_width << 4, mb_height << 3);
+	ret = aml_vdec_write_internal_canvas(hw, uv_index, buf_spec->c_dma_addr,
+					     mb_width << 4, mb_height << 3);
 	if (ret)
 		return ret;
 	buf_spec->y_canvas_index = y_index;
@@ -2173,10 +2155,6 @@ int aml_h264_init(void *priv)
 		return -1;
 
 	h264_ctx->mc_cpu_loaded = false;
-	dec_hw->hw_ops.irq_handler = h264_isr;
-	dec_hw->hw_ops.irq_threaded_func = h264_threaded_isr_func;
-	dec_hw->hw_ops.load_firmware_ex =
-		dec_hw->has_dbus_ctrl ? NULL : aml_h264_load_fw_ext;
 	h264_ctx->curr_spec.y_canvas_index = -1;
 	h264_ctx->curr_spec.u_canvas_index = -1;
 	h264_ctx->curr_spec.v_canvas_index = -1;
@@ -2229,6 +2207,16 @@ err_alloc_lmem:
 	kfree(h264_ctx);
 
 	return ret;
+}
+
+void aml_h264_prepare(void *priv)
+{
+	struct aml_vdec_ctx *ctx = priv;
+	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
+
+	hw->hw_ops.irq_handler = h264_isr;
+	hw->hw_ops.irq_threaded_func = h264_threaded_isr_func;
+	hw->hw_ops.load_firmware_ex = hw->has_dbus_ctrl ? NULL : aml_h264_load_fw_ext;
 }
 
 void aml_h264_exit(void *priv)

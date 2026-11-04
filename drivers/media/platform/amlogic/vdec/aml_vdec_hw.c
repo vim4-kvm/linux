@@ -193,7 +193,22 @@ int aml_stop_vdec_hw(struct aml_vdec_hw *hw)
 	return 0;
 }
 
-int load_firmware(struct aml_vdec_hw *hw, const char *path)
+int aml_vdec_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
+				   dma_addr_t addr, u32 stride, u32 height)
+{
+	/* Revision C needs both the LUT endian field and byte-switch remap. */
+	const struct reg_sequence regs[] = {
+		{ MDEC_CAV_CFG0, hw->canvas_endian_remap ? GENMASK(25, 17) : 0 },
+		{ MDEC_CAV_LUT_DATAL, (u32)(addr >> 3) | ((stride >> 3) << 29) },
+		{ MDEC_CAV_LUT_DATAH, (stride >> 6) | (height << 9) |
+				    (MESON_CANVAS_ENDIAN_SWAP64 << 26) },
+		{ MDEC_CAV_LUT_ADDR, index },
+	};
+
+	return regmap_multi_reg_write(hw->map[DOS_BUS], regs, ARRAY_SIZE(regs));
+}
+
+int load_firmware(struct aml_vdec_hw *hw, const char *path, unsigned int codec)
 {
 	const struct firmware *fw;
 	struct device *dev = hw->dev;
@@ -205,13 +220,25 @@ int load_firmware(struct aml_vdec_hw *hw, const char *path)
 
 	if (hw->has_dbus_ctrl) {
 		struct arm_smccc_res result;
+		u32 format;
 
-		/* Vendor tee_load_video_fw(H264_MULTI=15, VDEC_LEGENCY=0). */
-		arm_smccc_smc(0xb200000f, 15, 0, 0, 0, 0, 0, 0, &result);
+		switch (codec) {
+		case CODEC_TYPE_H264:
+			format = 15;
+			break;
+		case CODEC_TYPE_MPEG2:
+			format = 0x4d31324d; /* MPEG12_MULTI: tag M12M. */
+			break;
+		default:
+			return -EINVAL;
+		}
+		arm_smccc_smc(0xb200000f, format, 0, 0, 0, 0, 0, 0, &result);
 		if ((s32)result.a0) {
-			dev_err(dev, "secure H264 load failed: %#lx\n", result.a0);
+			dev_err(dev, "secure firmware %#x load failed: %#lx\n", format, result.a0);
 			return -EIO;
 		}
+		if (codec != CODEC_TYPE_H264)
+			return 0;
 		ret = regmap_read(hw->map[DOS_BUS], AV_SCRATCH_G, &hw->secure_swap);
 		if (ret)
 			return ret;

@@ -54,6 +54,80 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_format_probe_selects_codec_and_capture_keeps_real_plane_count(self):
+        names = ('set_pic_info', 'vdec_try_fmt_mp', 'vdec_s_fmt_output', 'vdec_s_fmt_capture')
+        code = '\n'.join(function(HERE / 'aml_vdec.c', name) for name in names)
+        run_c(COMMON + """
+#include <string.h>
+#include <linux/videodev2.h>
+#define AML_FMT_SRC 0
+#define AML_FMT_DST 1
+#define AML_FMT_DEC 0
+#define AML_FMT_FRAME 1
+#define ALIGN(v, a) (((v) + (a) - 1) / (a) * (a))
+#define dev_dbg(...) ((void)0)
+struct aml_video_fmt {
+    unsigned int fourcc, num_planes, type, align;
+    struct v4l2_frmsize_stepwise stepwise;
+};
+struct platform { struct aml_video_fmt *dec_fmt; };
+struct aml_vdec_dev { struct platform *pvdec_data; };
+struct vb2_queue { bool busy; };
+struct aml_vdec_ctx {
+    struct aml_vdec_dev *dev;
+    void *m2m_ctx;
+    struct aml_video_fmt dec_fmt[2];
+    struct v4l2_pix_format_mplane pix_fmt[2];
+    struct { unsigned int output_pix_fmt, cap_pix_fmt, coded_width, coded_height,
+             fb_size[2], plane_num; } pic_info;
+};
+static struct aml_video_fmt formats[] = {
+    { .fourcc = V4L2_PIX_FMT_H264_SLICE, .num_planes = 1, .type = AML_FMT_DEC, .align = 64 },
+    { .fourcc = V4L2_PIX_FMT_MPEG2_SLICE, .num_planes = 1, .type = AML_FMT_DEC, .align = 64 },
+    { .fourcc = V4L2_PIX_FMT_NV12, .num_planes = 1, .type = AML_FMT_FRAME, .align = 64 },
+    { .fourcc = V4L2_PIX_FMT_NV12M, .num_planes = 2, .type = AML_FMT_FRAME, .align = 64 },
+};
+static const struct aml_video_fmt *aml_vdec_get_video_fmt(struct aml_vdec_dev *d, unsigned int f)
+{ for (int i = 0; i < 4; i++) if (formats[i].fourcc == f) return &formats[i]; return NULL; }
+static void v4l2_apply_frmsize_constraints(unsigned int *w, unsigned int *h, const void *s) {}
+static void v4l2_fill_pixfmt_mp(struct v4l2_pix_format_mplane *p, unsigned int f,
+                              unsigned int w, unsigned int h)
+{ p->pixelformat = f; p->num_planes = f == V4L2_PIX_FMT_NV12M ? 2 : 1; }
+static struct vb2_queue queues[2];
+static struct vb2_queue *v4l2_m2m_get_vq(void *p, unsigned int type)
+{ return &queues[V4L2_TYPE_IS_OUTPUT(type) ? 0 : 1]; }
+static bool vb2_is_busy(struct vb2_queue *q) { return q->busy; }
+""" + code + """
+int main(void)
+{
+    struct platform p = { formats };
+    struct aml_vdec_dev dev = { &p };
+    struct aml_vdec_ctx ctx = { .dev = &dev, .dec_fmt = { formats[0], formats[2] } };
+    struct v4l2_format f = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
+    f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_MPEG2_SLICE;
+    f.fmt.pix_mp.width = 640; f.fmt.pix_mp.height = 368;
+    assert(!vdec_try_fmt_mp(&ctx, f.type, &f.fmt.pix_mp));
+    assert(f.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_MPEG2_SLICE);
+    assert(ctx.dec_fmt[0].fourcc == V4L2_PIX_FMT_H264_SLICE);
+    assert(!vdec_s_fmt_output(&ctx, &f));
+    assert(ctx.dec_fmt[0].fourcc == V4L2_PIX_FMT_MPEG2_SLICE);
+    assert(ctx.pix_fmt[1].pixelformat == V4L2_PIX_FMT_NV12);
+    queues[1].busy = true;
+    assert(vdec_s_fmt_output(&ctx, &f) == -EBUSY);
+    queues[1].busy = false;
+    f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
+    f.fmt.pix_mp.width = 64; f.fmt.pix_mp.height = 64;
+    assert(!vdec_s_fmt_capture(&ctx, &f));
+    assert(ctx.pic_info.plane_num == 2 && f.fmt.pix_mp.width == 640 && f.fmt.pix_mp.height == 384);
+    assert(ctx.pic_info.fb_size[0] == 640 * 384);
+    f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+    assert(!vdec_s_fmt_capture(&ctx, &f));
+    assert(ctx.pic_info.plane_num == 1);
+    return 0;
+}
+""", flags=("-Wno-address-of-packed-member",))
+
     def test_native_configuration_requires_dpb_handshake_before_slice(self):
         code = "\n".join(function(HERE / "h264.c", name) for name in
                          ("h264_publish_dpb", "h264_ack_config"))
@@ -247,8 +321,9 @@ int main(void)
         source = (HERE / "h264.c").read_text()
         start = source.index("struct h264_decode_buf_spec {")
         spec = source[start:source.index("};", start) + 2]
-        functions = "\n".join(function(HERE / "h264.c", name) for name in (
-            "spec2canvas", "h264_write_internal_canvas",
+        functions = function(HERE / "aml_vdec_hw.c", "aml_vdec_write_internal_canvas") + "\n"
+        functions += "\n".join(function(HERE / "h264.c", name) for name in (
+            "spec2canvas",
             "h264_config_internal_canvas", "config_decode_canvas", "release_canvas_index"))
         run_c(COMMON + """
 #include <string.h>
@@ -672,7 +747,10 @@ int main(void)
 struct media_request {};
 struct vb2_v4l2_buffer { struct { int index; struct { struct media_request *req; } req_obj; } vb2_buf; };
 struct aml_vdec_ctx;
-struct codec_ops { int (*run)(struct aml_vdec_ctx *); };
+struct codec_ops {
+    int (*run)(struct aml_vdec_ctx *);
+    void (*prepare)(struct aml_vdec_ctx *);
+};
 struct hw { bool faulted; void *curr_ctx; };
 struct platform_data { const char *fw_path[1]; };
 struct aml_vdec_dev { struct hw *dec_hw; struct platform_data *pvdec_data; int m2m_dev_dec; };
@@ -688,6 +766,9 @@ static struct vb2_v4l2_buffer buffer;
 static int jobs, stops, firmware_error, pin_error;
 static bool stop_error, pins_held;
 static struct aml_vdec_ctx *owner;
+static struct aml_vdec_ctx *callback_owner;
+static void prepare_codec(struct aml_vdec_ctx *ctx)
+{ assert(pins_held && ctx->dev->dec_hw->curr_ctx == ctx->codec_priv); callback_owner = ctx; }
 static struct vb2_v4l2_buffer *v4l2_m2m_next_src_buf(void *p) { return &buffer; }
 static struct vb2_v4l2_buffer *v4l2_m2m_next_dst_buf(void *p) { return &buffer; }
 static int v4l2_ctrl_request_setup(void *p, int *h) { return 0; }
@@ -698,8 +779,8 @@ static int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx)
 static void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx)
 { assert(ctx->dev->dec_hw->faulted || !ctx->dos_clk_en); pins_held = false; }
 static int aml_vdec_reset_core(struct hw *h) { return 0; }
-static int load_firmware(struct hw *h, const char *path)
-{ assert(h->curr_ctx == owner->codec_priv); return firmware_error; }
+static int load_firmware(struct hw *h, const char *path, unsigned int codec)
+{ assert(h->curr_ctx == owner->codec_priv && callback_owner == owner); return firmware_error; }
 static void aml_vdec_fault(struct aml_vdec_ctx *ctx) { ctx->dev->dec_hw->faulted = true; }
 static void aml_vdec_stop_job(struct aml_vdec_ctx *ctx)
 {
@@ -726,7 +807,7 @@ int main(void)
     struct hw hw = {};
     struct platform_data data = { { "h264" } };
     struct aml_vdec_dev dev = { &hw, &data };
-    struct codec_ops ops = { decode };
+    struct codec_ops ops = { decode, prepare_codec };
     struct aml_vdec_ctx a = { .dev = &dev, .codec_ops = &ops, .codec_priv = &a, .m2m_ctx = &a };
     struct aml_vdec_ctx b = { .dev = &dev, .codec_ops = &ops, .codec_priv = &b, .m2m_ctx = &b };
     owner = &a; m2mops_vdec_device_run(&a);
