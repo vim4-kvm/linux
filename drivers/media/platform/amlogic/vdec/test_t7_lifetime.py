@@ -65,6 +65,7 @@ class LifetimeTests(unittest.TestCase):
 #include <string.h>
 #include "reg_defines.h"
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define GENMASK(h, l) ((~0U << (l)) & (~0U >> (31 - (h))))
 #define V4L2_H264_NUM_DPB_ENTRIES 16
 #define DOS_BUS 0
 #define MESON_CANVAS_WRAP_NONE 0
@@ -73,9 +74,12 @@ class LifetimeTests(unittest.TestCase):
 #define dev_dbg(...) ((void)0)
 typedef uint8_t u8;
 typedef uintptr_t dma_addr_t;
-struct aml_vdec_hw { void *dev, *canvas, *map[1]; bool has_internal_canvas; };
+struct aml_vdec_hw {
+    void *dev, *canvas, *map[1];
+    bool has_internal_canvas, canvas_endian_remap;
+};
 struct reg_sequence { unsigned int reg, def; };
-static unsigned int lut[128][2], anc[32], low, high, writes, fail_at;
+static unsigned int lut[128][2], anc[32], low, high, writes, fail_at, config;
 static int meson_canvas_alloc(void *p, u8 *index) { assert(0); return -ENOSPC; }
 static void meson_canvas_free(void *p, int index) { assert(0); }
 #define meson_canvas_config(...) assert(0)
@@ -83,7 +87,7 @@ static int regmap_write(void *map, unsigned int reg, unsigned int value)
 {
     if (++writes == fail_at) return -EIO;
     switch (reg) {
-    case MDEC_CAV_CFG0: assert(value == 0); break;
+    case MDEC_CAV_CFG0: config = value; break;
     case MDEC_CAV_LUT_DATAL: low = value; break;
     case MDEC_CAV_LUT_DATAH: high = value; break;
     case MDEC_CAV_LUT_ADDR:
@@ -117,6 +121,7 @@ int main(void)
     struct aml_vdec_hw hw = { .has_internal_canvas = true };
     struct h264_decode_buf_spec spec = {};
     for (int job = 0; job < 2; job++) {
+        hw.canvas_endian_remap = job;
         /* A new context must replace every entry lost across power-off. */
         memset(lut, 0xa5, sizeof(lut));
         for (int pos = 0; pos <= V4L2_H264_NUM_DPB_ENTRIES; pos++) {
@@ -124,6 +129,7 @@ int main(void)
             spec.y_dma_addr = 0xc0000000 + job * 0x1000000 + pos * 0x80000;
             spec.c_dma_addr = spec.y_dma_addr + 640 * 384;
             assert(!config_decode_canvas(&hw, &spec, 40, 24));
+            assert(config == (job ? 0x3fe0000U : 0));
             unsigned int packed = anc[pos];
             expect_plane(packed & 255, spec.y_dma_addr, 640, 384);
             expect_plane((packed >> 8) & 255, spec.c_dma_addr, 640, 192);

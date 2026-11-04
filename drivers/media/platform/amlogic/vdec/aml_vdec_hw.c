@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/firmware.h>
 #include <linux/iopoll.h>
+#include <linux/sys_soc.h>
 #include <media/meson-t7-dos.h>
 #include <dt-bindings/power/amlogic,t7-pwrc.h>
 
@@ -22,6 +23,11 @@
 
 #define MHz     (1000000)
 #define MC_SIZE (4096 * 16)
+
+static const struct soc_device_attribute canvas_endian_quirks[] = {
+	{ .family = "Amlogic Meson", .revision = "36:c - *" },
+	{ /* sentinel */ }
+};
 
 static struct pm_pd_s vdec_domain_data[] = {
 	[VDEC_1] = {.name = "vdec", },
@@ -1089,6 +1095,8 @@ int dev_request_hw_resources(void *priv)
 	hw->dev = &pdev->dev;
 	hw->has_dbus_ctrl = dev->pvdec_data->has_dbus_ctrl;
 	hw->has_internal_canvas = dev->pvdec_data->has_internal_canvas;
+	hw->canvas_endian_remap = hw->has_internal_canvas &&
+				 soc_device_match(canvas_endian_quirks);
 
 	hw->dec_irq = platform_get_irq(pdev, hw->has_dbus_ctrl ? 0 : VDEC_IRQ_1);
 	if (hw->dec_irq < 0) {
