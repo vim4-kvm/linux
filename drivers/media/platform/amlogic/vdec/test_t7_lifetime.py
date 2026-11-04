@@ -54,6 +54,85 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_native_headers_stage_payload_and_propagate_failures(self):
+        code = "\n".join(function(HERE / "h264.c", name) for name in
+                         ("h264_needs_headers", "h264_stage_input"))
+        run_c(COMMON + """
+#include <stdlib.h>
+#include <string.h>
+#include <linux/v4l2-controls.h>
+#define H264_HEADER_RESERVE 8192
+#define VLD_PADDING_SIZE 1024
+#define VDEC_FIFO_ALIGN 8
+#define GFP_KERNEL 0
+#define U32_MAX UINT32_MAX
+#define round_up(v, a) (((v) + (a) - 1) / (a) * (a))
+typedef unsigned long dma_addr_t;
+struct vdec_h264_stateless_ctrl_ref {
+    struct v4l2_ctrl_h264_sps *sps;
+    struct v4l2_ctrl_h264_pps *pps;
+    struct v4l2_ctrl_h264_scaling_matrix *scaling;
+};
+struct aml_h264_ctx {
+    struct vdec_h264_stateless_ctrl_ref ctrl_ref;
+    void *input_vaddr;
+    dma_addr_t input_dma;
+    u32 input_size;
+    bool staged_input;
+};
+struct aml_vdec_hw { void *dev; };
+struct aml_vdec_ctx { struct aml_vdec_hw *dev; struct aml_h264_ctx *codec_priv; };
+static struct aml_vdec_hw *vdec_get_hw(struct aml_vdec_hw *hw) { return hw; }
+static void *memchr_inv(const void *p, int c, size_t n)
+{ for (size_t i = 0; i < n; i++) if (((unsigned char *)p)[i] != c) return (void *)p + i; return NULL; }
+static int allocations, frees, allocation_error, header_error;
+static void *dma_alloc_coherent(void *dev, size_t size, dma_addr_t *dma, int flags)
+{ if (allocation_error) return NULL; allocations++; *dma = 0x20000000; return malloc(size); }
+static void dma_free_coherent(void *dev, size_t size, void *p, dma_addr_t dma)
+{ frees++; free(p); }
+static int aml_h264_build_headers(void *p, size_t cap, const void *s, const void *q, const void *m)
+{ if (header_error) return header_error; memset(p, 0x67, 99); return 99; }
+""" + code + """
+int main(void)
+{
+    struct v4l2_ctrl_h264_sps sps = { .profile_idc = 100 };
+    struct v4l2_ctrl_h264_pps pps = {};
+    struct v4l2_ctrl_h264_scaling_matrix matrix;
+    struct aml_h264_ctx h264 = { .ctrl_ref = { &sps, &pps, &matrix } };
+    struct aml_vdec_hw hw = {};
+    struct aml_vdec_ctx ctx = { &hw, &h264 };
+    unsigned char source[2048];
+    dma_addr_t dma = 0x10000000;
+    u32 size = sizeof(source), cap = 4096;
+    memset(&matrix, 16, sizeof(matrix)); memset(source, 0xa5, sizeof(source));
+    assert(!h264_stage_input(&ctx, source, &dma, &size, &cap));
+    assert(!h264.staged_input && !allocations && dma == 0x10000000);
+    matrix.scaling_list_8x8[0][1] = 23;
+    assert(!h264_needs_headers(&h264));
+    pps.flags = V4L2_H264_PPS_FLAG_TRANSFORM_8X8_MODE;
+    assert(h264_needs_headers(&h264));
+    allocation_error = 1;
+    assert(h264_stage_input(&ctx, source, &dma, &size, &cap) == -ENOMEM);
+    assert(!h264.staged_input && size == sizeof(source) && dma == 0x10000000);
+    allocation_error = 0; header_error = -EINVAL;
+    assert(h264_stage_input(&ctx, source, &dma, &size, &cap) == -EINVAL);
+    assert(!h264.staged_input && allocations == 1 && !frees);
+    header_error = 0;
+    assert(!h264_stage_input(&ctx, source, &dma, &size, &cap));
+    assert(h264.staged_input && allocations == 1 && dma == 0x20000000);
+    assert(size == 99 + sizeof(source) && cap >= size + 1024 + 8 && !(cap % 8));
+    assert(!memcmp(h264.input_vaddr + 99, source, sizeof(source)));
+    for (unsigned int i = 0; i < 1024; i++) assert(!((unsigned char *)h264.input_vaddr)[size + i]);
+    size = UINT32_MAX;
+    assert(h264_stage_input(&ctx, source, &dma, &size, &cap) == -EOVERFLOW);
+    assert(!h264.staged_input && allocations == 1);
+    size = sizeof(source) + 100; allocation_error = 1;
+    assert(h264_stage_input(&ctx, source, &dma, &size, &cap) == -ENOMEM);
+    assert(!h264.staged_input && !h264.input_vaddr && !h264.input_size && frees == 1);
+    return 0;
+}
+""")
+
     def test_weighted_duplicate_references_use_parsed_slice_counts(self):
         functions = "\n".join(function(HERE / "h264.c", name) for name in (
             "get_ref_list_size", "get_refidx_by_picnum", "get_st_refpic_by_num",
@@ -339,6 +418,8 @@ static unsigned int vb2_get_plane_payload(struct vb2_buffer *b, int p) { return 
 static unsigned int vb2_plane_size(struct vb2_buffer *b, int p) { return b->size; }
 static void *vb2_plane_vaddr(struct vb2_buffer *b, int p) { return b->data; }
 static dma_addr_t vb2_dma_contig_plane_dma_addr(struct vb2_buffer *b, int p) { return 0x10000000; }
+static int h264_stage_input(struct aml_vdec_ctx *c, const void *p, dma_addr_t *d,
+                            u32 *size, u32 *capacity) { return 0; }
 static void regmap_write(void *map, unsigned int reg, unsigned int value)
 { writes++; registers[reg / 4] = value; }
 """ + prepare + """

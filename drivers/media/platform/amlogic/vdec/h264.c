@@ -8,6 +8,7 @@
 #include "aml_vdec.h"
 #include "aml_vdec_hw.h"
 #include "h264.h"
+#include "h264_headers.h"
 
 #define INVALID_POC 0xffffffff
 
@@ -19,6 +20,9 @@ static u16 h264_signed_code(int value)
 
 #define H264_SLICE_HEADER_DONE		0x1
 #define H264_SLICE_DATA_DONE		0x2
+#define H264_CONFIG_REQUEST		0x11
+
+#define H264_HEADER_RESERVE		8192
 
 #define H264_MAX_COL_BUF			32
 #define H264_MAX_CANVAS_POS			26
@@ -226,6 +230,10 @@ struct aml_h264_ctx {
 	u32 mb_height;
 	u32 mb_total;
 	u32 max_num_ref_frames;
+	void *input_vaddr;
+	dma_addr_t input_dma;
+	u32 input_size;
+	bool staged_input;
 
 	struct vdec_h264_stateless_ctrl_ref ctrl_ref;
 };
@@ -268,6 +276,61 @@ static struct h264_decode_buf_spec *find_spec_by_dpb_index(struct aml_h264_ctx
 	return NULL;
 }
 
+static bool h264_needs_headers(struct aml_h264_ctx *h264)
+{
+	const struct vdec_h264_stateless_ctrl_ref *ctrl = &h264->ctrl_ref;
+
+	if (ctrl->sps->profile_idc < 100)
+		return false;
+	if (memchr_inv(ctrl->scaling->scaling_list_4x4, 16,
+		       sizeof(ctrl->scaling->scaling_list_4x4)))
+		return true;
+	return (ctrl->pps->flags & V4L2_H264_PPS_FLAG_TRANSFORM_8X8_MODE) &&
+		memchr_inv(ctrl->scaling->scaling_list_8x8, 16, 2 * 64);
+}
+
+static int h264_stage_input(struct aml_vdec_ctx *ctx, const void *input,
+			    dma_addr_t *dma, u32 *payload, u32 *capacity)
+{
+	struct aml_h264_ctx *h264 = ctx->codec_priv;
+	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
+	u32 size;
+	int headers;
+
+	h264->staged_input = false;
+	if (!h264_needs_headers(h264))
+		return 0;
+	if (*payload > U32_MAX - H264_HEADER_RESERVE - VLD_PADDING_SIZE -
+	    2 * VDEC_FIFO_ALIGN)
+		return -EOVERFLOW;
+	size = round_up(*payload + H264_HEADER_RESERVE + VLD_PADDING_SIZE +
+			VDEC_FIFO_ALIGN, VDEC_FIFO_ALIGN);
+	if (h264->input_size < size) {
+		/* The worker confirmed DMA stop before starting this request. */
+		if (h264->input_vaddr)
+			dma_free_coherent(hw->dev, h264->input_size,
+					  h264->input_vaddr, h264->input_dma);
+		h264->input_size = 0;
+		h264->input_vaddr =
+			dma_alloc_coherent(hw->dev, size, &h264->input_dma, GFP_KERNEL);
+		if (!h264->input_vaddr)
+			return -ENOMEM;
+		h264->input_size = size;
+	}
+	headers = aml_h264_build_headers(h264->input_vaddr, H264_HEADER_RESERVE,
+					 h264->ctrl_ref.sps, h264->ctrl_ref.pps,
+					 h264->ctrl_ref.scaling);
+	if (headers < 0)
+		return headers;
+	memcpy(h264->input_vaddr + headers, input, *payload);
+	*payload += headers;
+	memset(h264->input_vaddr + *payload, 0, VLD_PADDING_SIZE);
+	*dma = h264->input_dma;
+	*capacity = h264->input_size;
+	h264->staged_input = true;
+	return 0;
+}
+
 static int h264_prepare_input(struct aml_vdec_ctx *ctx)
 {
 	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
@@ -278,6 +341,7 @@ static int h264_prepare_input(struct aml_vdec_ctx *ctx)
 	u32 buffer_size;
 	void *input;
 	int dummy;
+	int ret;
 
 	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	if (!src) {
@@ -296,6 +360,9 @@ static int h264_prepare_input(struct aml_vdec_ctx *ctx)
 		return -EINVAL;
 	memset(input + payload_size, 0, VLD_PADDING_SIZE);
 	src_dma = vb2_dma_contig_plane_dma_addr(vb, 0);
+	ret = h264_stage_input(ctx, input, &src_dma, &payload_size, &buffer_size);
+	if (ret)
+		return ret;
 
 	regmap_write(hw->map[DOS_BUS], VLD_MEM_VIFIFO_CONTROL, 0);
 	/* reset VLD fifo for all vdec */
@@ -1825,6 +1892,13 @@ static irqreturn_t h264_threaded_isr_func(int irq, void *priv)
 	regmap_read(hw->map[DOS_BUS], AV_SCRATCH_F, &h264_ctx->save_avscratch_f);
 
 	switch (dec_status) {
+	case H264_CONFIG_REQUEST:
+		if (!h264_ctx->staged_input)
+			goto header_error;
+		/* Native SPS/PPS parsing precedes the slice; no frame is done yet. */
+		save_reg_status(h264_ctx);
+		regmap_write(hw->map[DOS_BUS], DPB_STATUS_REG, H264_ACTION_CONFIG_DONE);
+		break;
 	case H264_SLICE_HEADER_DONE:
 		for (i = 0; i < 0x400; i += 4)
 			for (ii = 0; ii < 4; ii++)
@@ -2160,6 +2234,9 @@ void aml_h264_exit(void *priv)
 	}
 	ctx->dos_clk_en = false;
 	aml_h264_finish(ctx);
+	if (h264_ctx->input_vaddr)
+		dma_free_coherent(dec_hw->dev, h264_ctx->input_size,
+				  h264_ctx->input_vaddr, h264_ctx->input_dma);
 
 	if (h264_ctx->collated_cma_vaddr) {
 		dma_free_coherent(dec_hw->dev, h264_ctx->col_buf_alloc_size,
