@@ -170,15 +170,16 @@ int main(void)
 }
 """)
 
-    def test_parameter_tables_do_not_expose_uninitialized_stack_to_firmware(self):
+    def test_parameter_tables_initialize_slots_and_encode_signed_fields(self):
         functions = "\n".join(function(HERE / "h264.c", name) for name in (
-            "get_flag", "config_sps_params", "config_pps_params"))
+            "h264_signed_code", "get_flag", "config_sps_params", "config_pps_params"))
         run_c(COMMON + """
 #include <string.h>
 #include <linux/v4l2-controls.h>
 #include "reg_defines.h"
 #include "h264.h"
 #define DOS_BUS 0
+typedef uint16_t u16;
 struct aml_vdec_hw { void *map[1]; };
 struct aml_vdec_ctx { struct aml_vdec_hw *dev; };
 struct aml_h264_ctx {
@@ -189,6 +190,8 @@ struct aml_h264_ctx {
 static struct aml_vdec_hw *vdec_get_hw(struct aml_vdec_hw *p) { return p; }
 static unsigned int read_dos_reg(struct aml_vdec_hw *p, unsigned int reg) { return 0; }
 static void regmap_write(void *map, unsigned int reg, unsigned int value) {}
+static int firmware_signed_field(unsigned int code)
+{ return code & 1 ? (int)(code + 1) / 2 : -(int)code / 2; }
 """ + functions + """
 int main(void)
 {
@@ -217,6 +220,16 @@ int main(void)
     assert(table[0] == 0xa5a5 && table[257] == 0xa5a5);
     assert(table[4] == PARAM_BASE_VAL);
     for (unsigned int i = 9; i < 257; i++) assert(!table[i]);
+    for (int qp = -26; qp <= 25; qp++) {
+        pps.pic_init_qp_minus26 = pps.pic_init_qs_minus26 = qp;
+        pps.chroma_qp_index_offset = qp % 13;
+        pps.second_chroma_qp_index_offset = -(qp % 13);
+        config_pps_params(&h264, table + 1, &pps);
+        assert(firmware_signed_field(table[1] & 255) == qp);
+        assert(firmware_signed_field(table[1] >> 8) == qp);
+        assert(firmware_signed_field(table[8] & 255) == pps.chroma_qp_index_offset);
+        assert(firmware_signed_field(table[6] & 255) == pps.second_chroma_qp_index_offset);
+    }
     return 0;
 }
 """, flags=("-ftrivial-auto-var-init=pattern",))
