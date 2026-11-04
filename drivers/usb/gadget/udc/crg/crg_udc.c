@@ -357,7 +357,7 @@ struct crg_gadget_dev {
 	u8    ctrl_req_enq_idx;
 
 	u8 device_state;
-	u8 resume_state;
+	bool bus_suspended;
 	u16 dev_addr;
 	u8 setup_tag;
 	u8 set_tm;
@@ -2543,6 +2543,7 @@ static int prepare_for_setup(struct crg_gadget_dev *crg_udc, unsigned long flags
 		return -EBUSY;
 
 	udc_ep0_ptr = &crg_udc->udc_ep[0];
+	crg_udc->bus_suspended = false;
 /* If we reinit ep0 on bus reset, we just make ep0 dequeue pointer align
  * with enqueue pointer, all remaining xfer trbs became dumb ones which
  * will not produce xfer event anymore.
@@ -3120,6 +3121,8 @@ static void crg_gadget_async_callbacks(struct usb_gadget *gadget, bool enable)
 	pr_debug("%s get state %d\n", __func__, enable);
 	spin_lock_irqsave(&crg_udc->udc_lock, flags);
 	crg_udc->async_cb_flag = enable;
+	if (!enable)
+		crg_udc->bus_suspended = false;
 	spin_unlock_irqrestore(&crg_udc->udc_lock, flags);
 }
 
@@ -4046,6 +4049,33 @@ static int g_dnl_board_usb_cable_connected(void)
 	return 0;
 }
 
+static void crg_handle_bus_suspend(struct crg_gadget_dev *udc, bool suspended,
+				   unsigned long flags)
+{
+	void (*callback)(struct usb_gadget *gadget);
+
+	if (!udc->async_cb_flag || !udc->gadget_driver || eltest_flag ||
+	    udc->device_state < USB_STATE_DEFAULT ||
+	    udc->bus_suspended == suspended)
+		return;
+
+	/* Bus suspend preserves the configuration and all queued requests. */
+	udc->bus_suspended = suspended;
+	if (udc->crg_gadget_lock.wakesrc) {
+		if (suspended)
+			crg_gadget_drop(&udc->crg_gadget_lock);
+		else
+			crg_gadget_hold(&udc->crg_gadget_lock);
+	}
+	callback = suspended ? udc->gadget_driver->suspend :
+			       udc->gadget_driver->resume;
+	if (callback) {
+		spin_unlock_irqrestore(&udc->udc_lock, flags);
+		callback(&udc->gadget);
+		spin_lock_irqsave(&udc->udc_lock, flags);
+	}
+}
+
 static int crg_handle_port_status(struct crg_gadget_dev *crg_udc, unsigned long flags)
 {
 	struct crg_uccr *uccr = crg_udc->uccr;
@@ -4243,17 +4273,11 @@ static int crg_handle_port_status(struct crg_gadget_dev *crg_udc, unsigned long 
 			tmp = SETF_VAR(CRG_U3DC_PORTSC_PLS, tmp, 0x0);
 			reg_write(&uccr->portsc, tmp);
 			CRG_DEBUG("pls to 0, write portsc 0x%x\n", tmp);
-		}  else if (CRG_U3DC_PORTSC_PLS_GET(tmp) == 0x3) {
-			if (crg_udc->async_cb_flag && crg_udc->gadget_driver &&
-			    crg_udc->gadget_driver->disconnect) {
-				spin_unlock_irqrestore(&crg_udc->udc_lock, flags);
-				if (eltest_flag == 0) {
-					if (crg_udc->crg_gadget_lock.wakesrc)
-						crg_gadget_drop(&crg_udc->crg_gadget_lock);
-					crg_udc->gadget_driver->disconnect(&crg_udc->gadget);
-				}
-				spin_lock_irqsave(&crg_udc->udc_lock, flags);
-			}
+			crg_handle_bus_suspend(crg_udc, false, flags);
+		} else if (CRG_U3DC_PORTSC_PLS_GET(tmp) == 0x0) {
+			crg_handle_bus_suspend(crg_udc, false, flags);
+		} else if (CRG_U3DC_PORTSC_PLS_GET(tmp) == 0x3) {
+			crg_handle_bus_suspend(crg_udc, true, flags);
 		}
 	}
 
