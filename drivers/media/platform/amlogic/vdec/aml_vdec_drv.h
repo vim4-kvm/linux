@@ -152,6 +152,7 @@ struct aml_vdec_ctx {
 	int int_cond;
 	wait_queue_head_t queue;
 	struct v4l2_pix_format_mplane pix_fmt[2];
+	struct v4l2_rect compose;
 	struct aml_video_fmt dec_fmt[2];
 
 	bool is_cap_streamon;
