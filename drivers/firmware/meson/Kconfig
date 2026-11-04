@@ -15,4 +15,5 @@ config MESON_T7_TEE
 	depends on ARM64 && OPTEE && ARCH_MESON
 	help
 	  The tee_info/sys_boot_complete interface required by the T7 firmware
-	  supplicant. Only the boot completion handshake is exposed.
+	  supplicant. Read-only HDCP key readiness diagnostics are available
+	  through debugfs; these do not start authentication or load keys.
