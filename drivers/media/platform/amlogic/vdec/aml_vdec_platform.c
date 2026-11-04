@@ -97,4 +97,5 @@ const struct aml_dev_platform_data aml_vdec_t7_pdata = {
 	.req_hw_resource = dev_request_hw_resources,
 	.destroy_hw_resource = dev_destroy_hw_resources,
 	.has_dbus_ctrl = true,
+	.has_internal_canvas = true,
 };

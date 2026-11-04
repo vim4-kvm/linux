@@ -523,6 +523,61 @@ static void h264_config_params(struct aml_vdec_ctx *ctx)
 	config_pps_params(h264_ctx, p_pps_base, pps);
 }
 
+static int h264_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
+				      dma_addr_t addr, u32 stride, u32 height)
+{
+	/* T7's MDEC consumes its private LUT, not the DMC canvas provider. */
+	const struct reg_sequence regs[] = {
+		{ MDEC_CAV_CFG0, 0 },
+		{ MDEC_CAV_LUT_DATAL, (u32)(addr >> 3) | ((stride >> 3) << 29) },
+		{ MDEC_CAV_LUT_DATAH, (stride >> 6) | (height << 9) |
+				    (MESON_CANVAS_ENDIAN_SWAP64 << 26) },
+		{ MDEC_CAV_LUT_ADDR, index },
+	};
+
+	return regmap_multi_reg_write(hw->map[DOS_BUS], regs, ARRAY_SIZE(regs));
+}
+
+static int h264_config_internal_canvas(struct aml_vdec_hw *hw,
+				       struct h264_decode_buf_spec *buf_spec,
+				       u32 mb_width, u32 mb_height)
+{
+	u8 y_index, uv_index;
+	int ret;
+
+	if (buf_spec->canvas_pos < 0 ||
+	    buf_spec->canvas_pos > V4L2_H264_NUM_DPB_ENTRIES)
+		return -EINVAL;
+
+	/*
+	 * Each DPB slot owns two entries for the current hardware job. Both
+	 * reference lists may name the same slot. Reprogram every job because
+	 * runtime power-off and a different file context may replace the LUT.
+	 * These indices never enter the external canvas allocator.
+	 */
+	y_index = buf_spec->canvas_pos * 2;
+	uv_index = y_index + 1;
+	ret = h264_write_internal_canvas(hw, y_index, buf_spec->y_dma_addr,
+					 mb_width << 4, mb_height << 4);
+	if (ret)
+		return ret;
+	ret = h264_write_internal_canvas(hw, uv_index, buf_spec->c_dma_addr,
+					 mb_width << 4, mb_height << 3);
+	if (ret)
+		return ret;
+	buf_spec->y_canvas_index = y_index;
+	buf_spec->u_canvas_index = uv_index;
+	buf_spec->v_canvas_index = uv_index;
+
+	regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_CANVAS_BLK32,
+		     BIT(11) | BIT(8) | y_index);
+	regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_CANVAS_BLK32,
+		     BIT(11) | BIT(8) | uv_index);
+	return regmap_write(hw->map[DOS_BUS],
+			    ANC0_CANVAS_ADDR + (buf_spec->canvas_pos << 2),
+			    spec2canvas(buf_spec));
+}
+
 static int config_decode_canvas(struct aml_vdec_hw *hw,
 				struct h264_decode_buf_spec *buf_spec,
 				u32 mb_width, u32 mb_height)
@@ -530,6 +585,9 @@ static int config_decode_canvas(struct aml_vdec_hw *hw,
 	int canvas_alloc_result = 0;
 	int blkmode = 0x0;
 	u8 index;
+
+	if (hw->has_internal_canvas)
+		return h264_config_internal_canvas(hw, buf_spec, mb_width, mb_height);
 
 	canvas_alloc_result = meson_canvas_alloc(hw->canvas, &index);
 	if (canvas_alloc_result)
@@ -1638,6 +1696,14 @@ static int get_canvas_index(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
 static void release_canvas_index(struct aml_vdec_hw *hw,
 				 struct h264_decode_buf_spec *buf)
 {
+	/* Internal LUT ownership ends only after the worker has stopped DMA. */
+	if (hw->has_internal_canvas) {
+		buf->y_canvas_index = -1;
+		buf->u_canvas_index = -1;
+		buf->v_canvas_index = -1;
+		return;
+	}
+
 	if (buf->y_canvas_index >= 0) {
 		dev_dbg(hw->dev, "free y_canvas %d\n", buf->y_canvas_index);
 		meson_canvas_free(hw->canvas, buf->y_canvas_index);
