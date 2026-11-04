@@ -468,6 +468,10 @@ static int vdec_s_fmt_output(struct aml_vdec_ctx *ctx, struct v4l2_format *f)
 			"%s fmt %d not supported, use default\n", __func__,
 			pix_mp->pixelformat);
 
+	/* Preserve visible dimensions before rounding storage to canvas alignment. */
+	v4l2_apply_frmsize_constraints(&pix_mp->width, &pix_mp->height,
+				       &ctx->dec_fmt[AML_FMT_SRC].stepwise);
+	ctx->compose = (struct v4l2_rect) { .width = pix_mp->width, .height = pix_mp->height };
 	ret = vdec_try_fmt_mp(ctx, f->type, pix_mp);
 	set_pic_info(ctx, pix_mp, f->type);
 
@@ -643,6 +647,29 @@ static int vidioc_vdec_enum_fmt_cap_mplane(struct file *file,
 	return vidioc_vdec_enum_fmt(ctx, f, 0);
 }
 
+static int vdec_g_selection(struct file *file, void *priv, struct v4l2_selection *s)
+{
+	struct aml_vdec_ctx *ctx = fh_to_dec_ctx(file);
+
+	if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE ||
+	    ctx->dec_fmt[AML_FMT_SRC].codec_type != CODEC_TYPE_MJPEG)
+		return -EINVAL;
+	switch (s->target) {
+	case V4L2_SEL_TGT_COMPOSE:
+	case V4L2_SEL_TGT_COMPOSE_DEFAULT:
+		s->r = ctx->compose;
+		return 0;
+	case V4L2_SEL_TGT_COMPOSE_BOUNDS:
+		s->r = (struct v4l2_rect) {
+			.width = ctx->pix_fmt[AML_FMT_DST].width,
+			.height = ctx->pix_fmt[AML_FMT_DST].height,
+		};
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
 static int vdec_try_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd *dc)
 {
 	struct aml_vdec_ctx *ctx = fh_to_dec_ctx(file);
@@ -674,6 +701,7 @@ static int vdec_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_c
 
 const struct v4l2_ioctl_ops aml_vdec_ioctl_ops = {
 	.vidioc_querycap = vidioc_vdec_querycap,
+	.vidioc_g_selection = vdec_g_selection,
 	.vidioc_enum_framesizes = vidioc_vdec_enum_framesizes,
 
 	.vidioc_enum_fmt_vid_cap = vidioc_vdec_enum_fmt_cap_mplane,

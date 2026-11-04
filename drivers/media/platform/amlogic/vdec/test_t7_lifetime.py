@@ -119,7 +119,7 @@ int main(void)
 
     def test_format_probe_selects_codec_and_capture_keeps_real_plane_count(self):
         names = ('vdec_capture_supported', 'vidioc_vdec_enum_fmt', 'set_pic_info',
-                 'vdec_try_fmt_mp', 'vdec_s_fmt_output', 'vdec_s_fmt_capture')
+                 'vdec_try_fmt_mp', 'vdec_s_fmt_output', 'vdec_s_fmt_capture', 'vdec_g_selection')
         code = '\n'.join(function(HERE / 'aml_vdec.c', name) for name in names)
         run_c(COMMON + """
 #include <string.h>
@@ -144,6 +144,7 @@ struct aml_vdec_ctx {
     struct aml_vdec_dev *dev;
     void *m2m_ctx;
     bool output_fmt_set;
+    struct v4l2_rect compose;
     struct aml_video_fmt dec_fmt[2];
     struct v4l2_pix_format_mplane pix_fmt[2];
     struct { unsigned int output_pix_fmt, cap_pix_fmt, coded_width, coded_height,
@@ -168,6 +169,8 @@ static struct vb2_queue queues[2];
 static struct vb2_queue *v4l2_m2m_get_vq(void *p, unsigned int type)
 { return &queues[V4L2_TYPE_IS_OUTPUT(type) ? 0 : 1]; }
 static bool vb2_is_busy(struct vb2_queue *q) { return q->busy; }
+struct file { struct aml_vdec_ctx *ctx; };
+static struct aml_vdec_ctx *fh_to_dec_ctx(struct file *f) { return f->ctx; }
 """ + code + """
 int main(void)
 {
@@ -203,7 +206,16 @@ int main(void)
     /* Switching codec changes both the negotiated format and queue layout. */
     f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
     f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_MJPEG;
+    f.fmt.pix_mp.width = 1920; f.fmt.pix_mp.height = 1080;
     assert(!vdec_s_fmt_output(&ctx, &f));
+    struct file file = { &ctx };
+    struct v4l2_selection selection = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                                       .target = V4L2_SEL_TGT_COMPOSE };
+    assert(!vdec_g_selection(&file, NULL, &selection));
+    assert(selection.r.width == 1920 && selection.r.height == 1080);
+    selection.target = V4L2_SEL_TGT_COMPOSE_BOUNDS;
+    assert(!vdec_g_selection(&file, NULL, &selection));
+    assert(selection.r.width == 1920 && selection.r.height == 1088);
     assert(ctx.pix_fmt[1].pixelformat == V4L2_PIX_FMT_YUV420);
     assert(ctx.dec_fmt[1].fourcc == V4L2_PIX_FMT_YUV420);
     desc.index = 0;
