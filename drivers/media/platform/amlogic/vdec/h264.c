@@ -509,6 +509,17 @@ static void config_pps_params(struct aml_h264_ctx *h264_ctx,
 	}
 }
 
+static void h264_write_scaling_matrix(void *slot,
+				      const struct v4l2_ctrl_h264_scaling_matrix *matrix)
+{
+	u8 *data = (u8 *)slot + 0x100;
+
+	/* The supported 4:2:0 format has six 4x4 and two 8x8 matrices. */
+	memcpy(data, matrix->scaling_list_4x4, sizeof(matrix->scaling_list_4x4));
+	memcpy(data + sizeof(matrix->scaling_list_4x4), matrix->scaling_list_8x8,
+	       2 * sizeof(matrix->scaling_list_8x8[0]));
+}
+
 static void h264_config_params(struct aml_vdec_ctx *ctx)
 {
 	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)ctx->codec_priv;
@@ -527,6 +538,8 @@ static void h264_config_params(struct aml_vdec_ctx *ctx)
 
 	config_sps_params(h264_ctx, p_sps_base, sps);
 	config_pps_params(h264_ctx, p_pps_base, pps);
+	h264_write_scaling_matrix(p_sps_base, ctrls->scaling);
+	h264_write_scaling_matrix(p_pps_base, ctrls->scaling);
 }
 
 static int h264_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
