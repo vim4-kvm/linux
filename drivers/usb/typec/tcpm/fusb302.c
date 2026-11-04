@@ -762,6 +762,9 @@ static int tcpm_set_vbus(struct tcpc_dev *dev, bool on, bool charge)
 						 tcpc_dev);
 	int ret = 0;
 
+	if (on && !chip->vbus)
+		return -EOPNOTSUPP;
+
 	mutex_lock(&chip->lock);
 	if (chip->vbus_on == on) {
 		fusb302_log(chip, "vbus is already %s", str_on_off(on));
@@ -1686,6 +1689,31 @@ static struct fwnode_handle *fusb302_fwnode_get(struct device *dev)
 	return fwnode;
 }
 
+static int fusb302_get_vbus(struct fusb302_chip *chip)
+{
+	struct fwnode_handle *connector;
+	const char *role;
+	bool sink_only;
+
+	connector = device_get_named_child_node(chip->dev, "connector");
+	sink_only = !fwnode_property_read_string(connector, "power-role", &role) &&
+		    !strcmp(role, "sink");
+	fwnode_handle_put(connector);
+
+	/* A dedicated sink has no regulator for sourcing VBUS. */
+	if (sink_only) {
+		chip->vbus = devm_regulator_get_optional(chip->dev, "vbus");
+		if (PTR_ERR_OR_ZERO(chip->vbus) == -ENODEV) {
+			chip->vbus = NULL;
+			return 0;
+		}
+	} else {
+		chip->vbus = devm_regulator_get(chip->dev, "vbus");
+	}
+
+	return PTR_ERR_OR_ZERO(chip->vbus);
+}
+
 static int fusb302_probe(struct i2c_client *client)
 {
 	struct fusb302_chip *chip;
@@ -1721,9 +1749,9 @@ static int fusb302_probe(struct i2c_client *client)
 			return PTR_ERR(chip->extcon);
 	}
 
-	chip->vbus = devm_regulator_get(chip->dev, "vbus");
-	if (IS_ERR(chip->vbus))
-		return PTR_ERR(chip->vbus);
+	ret = fusb302_get_vbus(chip);
+	if (ret)
+		return ret;
 
 	chip->wq = create_singlethread_workqueue(dev_name(chip->dev));
 	if (!chip->wq)
