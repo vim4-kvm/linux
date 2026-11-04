@@ -31,13 +31,13 @@ def function(path, name):
     return source[start:end]
 
 
-def run_c(source):
+def run_c(source, flags=()):
     with tempfile.TemporaryDirectory(prefix="t7-vdec-test-") as directory:
         path = Path(directory) / "test.c"
         path.write_text(source)
         output = Path(directory) / "test"
         subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror",
-                        "-Wno-unused-function", "-I", str(HERE),
+                        "-Wno-unused-function", *flags, "-I", str(HERE),
                         str(path), "-o", str(output)], check=True)
         subprocess.run([str(output)], check=True, timeout=5)
 
@@ -54,6 +54,81 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_b_picture_reordering_preserves_each_reference_list(self):
+        copy = function(HERE / "h264.c", "copy_ref_list")
+        run_c(COMMON + """
+#include <string.h>
+struct aml_h264_ctx {
+    unsigned int ref_list0[17], ref_list1[17];
+    unsigned int ref_list0_unreordered[17], ref_list1_unreordered[17];
+};
+""" + copy + """
+int main(void)
+{
+    struct aml_h264_ctx ctx = {};
+    for (unsigned int i = 0; i < 17; i++) {
+        ctx.ref_list0[i] = i + 1;
+        ctx.ref_list1[i] = 17 - i;
+    }
+    copy_ref_list(&ctx, 0);
+    copy_ref_list(&ctx, 1);
+    assert(!memcmp(ctx.ref_list0_unreordered, ctx.ref_list0, sizeof(ctx.ref_list0)));
+    assert(!memcmp(ctx.ref_list1_unreordered, ctx.ref_list1, sizeof(ctx.ref_list1)));
+    return 0;
+}
+""")
+
+    def test_parameter_tables_do_not_expose_uninitialized_stack_to_firmware(self):
+        functions = "\n".join(function(HERE / "h264.c", name) for name in (
+            "get_flag", "config_sps_params", "config_pps_params"))
+        run_c(COMMON + """
+#include <string.h>
+#include <linux/v4l2-controls.h>
+#include "reg_defines.h"
+#include "h264.h"
+#define DOS_BUS 0
+struct aml_vdec_hw { void *map[1]; };
+struct aml_vdec_ctx { struct aml_vdec_hw *dev; };
+struct aml_h264_ctx {
+    struct aml_vdec_ctx *v4l2_ctx;
+    unsigned int frame_width, frame_height, seq_info;
+    unsigned int mb_width, mb_height, mb_total, max_num_ref_frames;
+};
+static struct aml_vdec_hw *vdec_get_hw(struct aml_vdec_hw *p) { return p; }
+static unsigned int read_dos_reg(struct aml_vdec_hw *p, unsigned int reg) { return 0; }
+static void regmap_write(void *map, unsigned int reg, unsigned int value) {}
+""" + functions + """
+int main(void)
+{
+    struct aml_vdec_hw hw = {};
+    struct aml_vdec_ctx ctx = { .dev = &hw };
+    struct aml_h264_ctx h264 = { .v4l2_ctx = &ctx };
+    struct v4l2_ctrl_h264_sps sps = {
+        .profile_idc = 100, .level_idc = 31, .chroma_format_idc = 1,
+        .max_num_ref_frames = 4, .pic_width_in_mbs_minus1 = 39,
+        .pic_height_in_map_units_minus1 = 22,
+        .flags = V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY,
+    };
+    struct v4l2_ctrl_h264_pps pps = {};
+    unsigned short table[258];
+    for (unsigned int poc = 0; poc <= 2; poc++) {
+        sps.pic_order_cnt_type = poc;
+        memset(table, 0xa5, sizeof(table));
+        config_sps_params(&h264, table + 1, &sps);
+        assert(table[0] == 0xa5a5 && table[257] == 0xa5a5);
+        assert(table[4] == PARAM_BASE_VAL);
+        /* Firmware slots after the fields must be deterministic zero. */
+        for (unsigned int i = 33; i < 257; i++) assert(!table[i]);
+    }
+    memset(table, 0xa5, sizeof(table));
+    config_pps_params(&h264, table + 1, &pps);
+    assert(table[0] == 0xa5a5 && table[257] == 0xa5a5);
+    assert(table[4] == PARAM_BASE_VAL);
+    for (unsigned int i = 9; i < 257; i++) assert(!table[i]);
+    return 0;
+}
+""", flags=("-ftrivial-auto-var-init=pattern",))
+
     def test_fifo_ring_includes_padding_without_exposing_unallocated_memory(self):
         prepare = function(HERE / "h264.c", "h264_prepare_input")
         run_c(COMMON + """

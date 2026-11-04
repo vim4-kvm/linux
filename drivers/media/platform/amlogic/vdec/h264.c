@@ -337,10 +337,8 @@ static void config_sps_params(struct aml_h264_ctx *h264_ctx,
 	u32 cfg_tmp = 0;
 	u32 frame_size;
 	u32 offset = 0;
-	unsigned short data_tmp[0x100];
+	unsigned short data_tmp[0x100] = {};
 	int i, ii;
-
-	memset(sps_base, 0, 0x100);
 
 	h264_ctx->frame_width = (sps->pic_width_in_mbs_minus1 + 1) << 4;
 	h264_ctx->frame_height = (sps->pic_height_in_map_units_minus1 + 1) << 4;
@@ -436,12 +434,10 @@ static void config_pps_params(struct aml_h264_ctx *h264_ctx,
 	struct aml_vdec_ctx *ctx = h264_ctx->v4l2_ctx;
 	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
 	u32 offset = 0;
-	unsigned short data_tmp[0x100];
+	unsigned short data_tmp[0x100] = {};
 	u32 max_reference_size = V4L2_H264_NUM_DPB_ENTRIES;
 	u32 max_list_size;
 	int i, ii;
-
-	memset(pps_base, 0, 0x100);
 
 	data_tmp[offset++] = PARAM_BASE_VAL;
 
@@ -1036,7 +1032,7 @@ static void copy_ref_list(struct aml_h264_ctx *h264_ctx, int curr_list)
 		memcpy(h264_ctx->ref_list0_unreordered, h264_ctx->ref_list0,
 		       sizeof(h264_ctx->ref_list0));
 	else
-		memcpy(h264_ctx->ref_list1_unreordered, h264_ctx->ref_list0,
+		memcpy(h264_ctx->ref_list1_unreordered, h264_ctx->ref_list1,
 		       sizeof(h264_ctx->ref_list1));
 }
 
