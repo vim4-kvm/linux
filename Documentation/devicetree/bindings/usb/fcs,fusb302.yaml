@@ -20,7 +20,7 @@ properties:
     maxItems: 1
 
   vbus-supply:
-    description: VBUS power supply
+    description: Regulator for sourcing VBUS, optional for sink-only ports.
 
   connector:
     type: object
@@ -31,8 +31,23 @@ required:
   - compatible
   - reg
   - interrupts
-  - vbus-supply
   - connector
+
+allOf:
+  - if:
+      properties:
+        connector:
+          properties:
+            power-role:
+              const: sink
+          required:
+            - power-role
+      required:
+        - connector
+    then: {}
+    else:
+      required:
+        - vbus-supply
 
 additionalProperties: false
 
