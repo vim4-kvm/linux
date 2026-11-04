@@ -5,13 +5,14 @@
  * Ported from the reference's vmjpeg_multi.c.  The microcode parses the whole
  * JPEG itself - markers, tables, scan - so every OUTPUT buffer is simply one
  * complete JPEG picture and needs no controls.  It writes planar 4:2:0 into
- * three canvases (Y, U, V), so the only CAPTURE format is YUV420 (I420); a
- * 4:2:2 or 4:4:4 source comes out downsampled to 4:2:0 by the microcode.
+ * three canvases (Y, U, V), so the only CAPTURE format is YUV420 (I420).
+ * Only 8-bit sequential 4:2:0 pictures are currently supported.
  */
 
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
+#include <linux/overflow.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <media/v4l2-ctrls.h>
@@ -32,13 +33,14 @@ struct aml_mjpeg_ctx {
 	u32 stage_size;
 
 	int canvas[3];
-	u32 decoded;
 };
 
 static void mjpeg_canvas_free(struct aml_vdec_hw *hw, struct aml_mjpeg_ctx *m)
 {
 	int i;
 
+	if (hw->has_internal_canvas)
+		return;
 	for (i = 0; i < ARRAY_SIZE(m->canvas); i++) {
 		if (m->canvas[i] >= 0)
 			meson_canvas_free(hw->canvas, m->canvas[i]);
@@ -66,6 +68,12 @@ static u32 mjpeg_canvas_setup(struct aml_vdec_ctx *ctx, struct vb2_buffer *vb)
 	for (i = 0; i < 3; i++) {
 		u8 idx;
 
+		if (hw->has_internal_canvas) {
+			if (aml_vdec_write_internal_canvas(hw, i, addr[i], cw[i], ch[i]))
+				return ~0u;
+			m->canvas[i] = i;
+			continue;
+		}
 		if (meson_canvas_alloc(hw->canvas, &idx)) {
 			mjpeg_canvas_free(hw, m);
 			return ~0u;
@@ -87,20 +95,18 @@ static u32 mjpeg_canvas_setup(struct aml_vdec_ctx *ctx, struct vb2_buffer *vb)
  * 4:4:4 or progressive picture decodes "successfully" into garbage, and a
  * grey one fails.  Check the frame header and refuse the rest up front.
  */
-static bool mjpeg_supported(struct device *dev, const u8 *p, u32 len)
+static bool mjpeg_supported(const u8 *p, u32 len, u32 max_width, u32 max_height)
 {
 	u32 i = 2;
 
-	if (len < 4 || p[0] != 0xff || p[1] != 0xd8)
+	if (!p || len < 4 || p[0] != 0xff || p[1] != 0xd8)
 		return false;
 	while (i + 4 <= len) {
 		u8 marker;
-		u32 seg;
+		u32 seg, width, height;
 
-		if (p[i] != 0xff) {
-			i++;
-			continue;
-		}
+		if (p[i] != 0xff)
+			return false;
 		marker = p[i + 1];
 		if (marker == 0xff || marker == 0x01 ||
 		    (marker >= 0xd0 && marker <= 0xd7)) {
@@ -108,22 +114,25 @@ static bool mjpeg_supported(struct device *dev, const u8 *p, u32 len)
 			continue;
 		}
 		seg = (p[i + 2] << 8) | p[i + 3];
+		if (seg < 2 || seg > len - i - 2)
+			return false;
 		if (marker == 0xc0 || marker == 0xc1) {
-			if (i + 2 + seg > len || seg < 17 || p[i + 4] != 8 ||
+			if (seg != 17 || p[i + 4] != 8 ||
 			    p[i + 9] != 3)
 				break;
 			/* Y 2x2, Cb 1x1, Cr 1x1 */
 			if (p[i + 11] != 0x22 || p[i + 14] != 0x11 ||
 			    p[i + 17] != 0x11)
 				break;
-			return true;
+			height = (p[i + 5] << 8) | p[i + 6];
+			width = (p[i + 7] << 8) | p[i + 8];
+			return width && height && width <= max_width && height <= max_height;
 		}
 		if ((marker >= 0xc2 && marker <= 0xcf && marker != 0xc4 &&
 		     marker != 0xc8 && marker != 0xcc) || marker == 0xda)
 			break;
 		i += 2 + seg;
 	}
-	dev_dbg(dev, "mjpeg: not a baseline 4:2:0 JPEG\n");
 	return false;
 }
 
@@ -135,9 +144,17 @@ static int mjpeg_prepare_input(struct aml_vdec_ctx *ctx,
 	struct vb2_buffer *vb = &src->vb2_buf;
 	const u8 *in = vb2_plane_vaddr(vb, 0);
 	u32 len = vb2_get_plane_payload(vb, 0);
-	u32 need = len + VLD_PADDING_SIZE + 64 + 8;
+	u32 need;
 	bool pad;
 	u8 *p;
+
+	if (!in || len < 4 || len > vb2_plane_size(vb, 0) ||
+	    check_add_overflow(len, VLD_PADDING_SIZE + 64u + 8u, &need) ||
+	    need > U32_MAX - SZ_64K - PAGE_SIZE || len > U32_MAX / 8 - 6)
+		return -EINVAL;
+	if (!mjpeg_supported(in, len, ctx->pix_fmt[AML_FMT_DST].width,
+			     ctx->pix_fmt[AML_FMT_DST].height))
+		return -EINVAL;
 
 	/*
 	 * The microcode skips whatever segment follows SOI without looking at
@@ -243,29 +260,12 @@ static void mjpeg_init_scaler(struct aml_vdec_hw *hw)
 	regmap_write(map, PSCALE_RST, 0x0);
 }
 
-static void mjpeg_job_done(struct aml_vdec_ctx *ctx, enum vb2_buffer_state st)
+static void mjpeg_signal_done(struct aml_vdec_ctx *ctx, int result)
 {
-	struct aml_vdec_dev *dev = ctx->dev;
-	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
-	struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
-
-	/*
-	 * A JPEG request carries no controls, so the buffer is its only
-	 * object: once that is done the request is complete, and completing
-	 * the control side afterwards (as device_run does for the other
-	 * legacy codecs) binds to a finished request and WARNs.  Do it first.
-	 */
-	if (src && src->vb2_buf.req_obj.req)
-		v4l2_ctrl_request_complete(src->vb2_buf.req_obj.req,
-					   &ctx->ctrl_handler);
-	mjpeg_canvas_free(dev->dec_hw, ctx->codec_priv);
-	if (dst)
-		vb2_set_plane_payload(&dst->vb2_buf, 0,
-				      ctx->pix_fmt[AML_FMT_DST].plane_fmt[0].sizeimage);
+	/* The worker stops DMA before returning either buffer to userspace. */
+	ctx->decode_result = result;
 	ctx->int_cond = 1;
-	ctx->job_finished = true;
-	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx, st);
-	wake_up(&ctx->queue);
+	wake_up_interruptible(&ctx->queue);
 }
 
 static irqreturn_t mjpeg_isr(int irq, void *priv)
@@ -288,7 +288,7 @@ static irqreturn_t mjpeg_threaded_isr(int irq, void *priv)
 	if (!m)
 		return IRQ_HANDLED;
 	ctx = m->v4l2_ctx;
-	if (ctx->job_finished)
+	if (ctx->int_cond)
 		return IRQ_HANDLED;
 
 	if (read_dos_reg(hw, AV_SCRATCH_D)) {
@@ -308,10 +308,10 @@ static irqreturn_t mjpeg_threaded_isr(int irq, void *priv)
 		u32 h = read_dos_reg(hw, MJPEG_PIC_HEIGHT);
 		struct v4l2_pix_format_mplane *pf = &ctx->pix_fmt[AML_FMT_DST];
 
-		if (w > pf->plane_fmt[0].bytesperline || h > pf->height) {
+		if (!w || !h || w > pf->width || h > pf->height) {
 			dev_err(hw->dev, "mjpeg %ux%u does not fit %ux%u\n",
 				w, h, pf->plane_fmt[0].bytesperline, pf->height);
-			mjpeg_job_done(ctx, VB2_BUF_STATE_ERROR);
+			mjpeg_signal_done(ctx, -EINVAL);
 			return IRQ_HANDLED;
 		}
 		regmap_write(hw->map[DOS_BUS], MJPEG_DECODE_PARAM,
@@ -319,18 +319,18 @@ static irqreturn_t mjpeg_threaded_isr(int irq, void *priv)
 		regmap_write(hw->map[DOS_BUS], MJPEG_DEC_STATUS, 0);
 		return IRQ_HANDLED;
 	}
-	if (status == MJPEG_STATUS_TIMEOUT) {
-		mjpeg_job_done(ctx, VB2_BUF_STATE_ERROR);
+	if (status == MJPEG_STATUS_EMPTY || status == MJPEG_STATUS_TIMEOUT) {
+		mjpeg_signal_done(ctx, -EIO);
 		return IRQ_HANDLED;
 	}
 
-	/*
-	 * Anything else is the end of the picture - the reference does not
-	 * look at what FROM_AMRISC holds either (it is often 0).
-	 */
-	m->decoded++;
+	/* A completed frame leaves status clear and reports buffer index zero. */
+	if (status || (read_dos_reg(hw, AV_SCRATCH_5) & 0xffffff)) {
+		mjpeg_signal_done(ctx, -EIO);
+		return IRQ_HANDLED;
+	}
 	regmap_write(hw->map[DOS_BUS], MJPEG_FROM_AMRISC, 0);
-	mjpeg_job_done(ctx, VB2_BUF_STATE_DONE);
+	mjpeg_signal_done(ctx, 0);
 
 	return IRQ_HANDLED;
 }
@@ -372,7 +372,7 @@ int aml_mjpeg_init(void *priv)
 	if (!vdec_get_hw(ctx->dev))
 		return -ENODEV;
 
-	m = kzalloc_obj(*m);
+	m = kzalloc_obj(*m, GFP_KERNEL);
 	if (!m)
 		return -ENOMEM;
 	m->v4l2_ctx = ctx;
@@ -381,6 +381,23 @@ int aml_mjpeg_init(void *priv)
 
 	ctx->codec_priv = m;
 	return 0;
+}
+
+void aml_mjpeg_prepare(void *priv)
+{
+	struct aml_vdec_ctx *ctx = priv;
+	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
+
+	hw->hw_ops.irq_handler = mjpeg_isr;
+	hw->hw_ops.irq_threaded_func = mjpeg_threaded_isr;
+	hw->hw_ops.load_firmware_ex = NULL;
+}
+
+void aml_mjpeg_finish(void *priv)
+{
+	struct aml_vdec_ctx *ctx = priv;
+
+	mjpeg_canvas_free(vdec_get_hw(ctx->dev), ctx->codec_priv);
 }
 
 void aml_mjpeg_exit(void *priv)
@@ -392,16 +409,19 @@ void aml_mjpeg_exit(void *priv)
 	if (!m)
 		return;
 	hw = vdec_get_hw(ctx->dev);
+	if (hw->faulted)
+		return;
 
-	if (ctx->dos_clk_en)
-		aml_stop_vdec_hw(hw);
-	mjpeg_canvas_free(hw, m);
+	if (ctx->dos_clk_en && aml_stop_vdec_hw(hw)) {
+		aml_vdec_fault(ctx);
+		return;
+	}
+	ctx->dos_clk_en = false;
+	aml_mjpeg_finish(ctx);
 	if (m->stage_vaddr)
 		dma_free_coherent(hw->dev, m->stage_size,
 				  m->stage_vaddr, m->stage_paddr);
 
-	if (hw->curr_ctx == m)
-		hw->curr_ctx = NULL;
 	kfree(m);
 	ctx->codec_priv = NULL;
 }
@@ -409,7 +429,6 @@ void aml_mjpeg_exit(void *priv)
 int aml_mjpeg_dec_run(void *priv)
 {
 	struct aml_vdec_ctx *ctx = priv;
-	struct aml_mjpeg_ctx *m = ctx->codec_priv;
 	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
 	struct vb2_v4l2_buffer *src, *dst;
 	u32 spec;
@@ -425,16 +444,9 @@ int aml_mjpeg_dec_run(void *priv)
 	if (!src || !dst)
 		return -EINVAL;
 
-	if (!mjpeg_supported(hw->dev, vb2_plane_vaddr(&src->vb2_buf, 0),
-			     vb2_get_plane_payload(&src->vb2_buf, 0)))
-		return -EINVAL;
-
-	hw->curr_ctx = m;
-	hw->hw_ops.irq_handler = mjpeg_isr;
-	hw->hw_ops.irq_threaded_func = mjpeg_threaded_isr;
-
-	if (mjpeg_prepare_input(ctx, src) < 0)
-		return -ENOMEM;
+	ret = mjpeg_prepare_input(ctx, src);
+	if (ret)
+		return ret;
 
 	spec = mjpeg_canvas_setup(ctx, &dst->vb2_buf);
 	if (spec == ~0u)
@@ -445,11 +457,12 @@ int aml_mjpeg_dec_run(void *priv)
 		vb2_get_plane_payload(&src->vb2_buf, 0), spec);
 
 	ctx->int_cond = 0;
+	ctx->decode_result = -EIO;
 	regmap_update_bits(hw->map[DOS_BUS], VLD_MEM_VIFIFO_CONTROL, 0x6, 0x6);
 	aml_start_vdec_hw(hw);
 
-	ret = wait_event_timeout(ctx->queue, ctx->int_cond,
-				 msecs_to_jiffies(MJPEG_TIMEOUT_MS));
+	ret = wait_event_interruptible_timeout(ctx->queue, ctx->int_cond,
+					       msecs_to_jiffies(MJPEG_TIMEOUT_MS));
 	ctx->int_cond = 0;
 	if (!ret) {
 		dev_err(hw->dev,
@@ -461,11 +474,14 @@ int aml_mjpeg_dec_run(void *priv)
 			read_dos_reg(hw, VLD_MEM_VIFIFO_RP),
 			read_dos_reg(hw, VLD_MEM_VIFIFO_WP),
 			read_dos_reg(hw, VIFF_BIT_CNT));
-		aml_stop_vdec_hw(hw);
-		mjpeg_canvas_free(hw, m);
+		ctx->decode_failed = true;
 		return -ETIMEDOUT;
 	}
 
-	aml_stop_vdec_hw(hw);
-	return 0;
+	if (ret < 0)
+		return ret;
+	if (!ctx->decode_result)
+		vb2_set_plane_payload(&dst->vb2_buf, 0,
+				      ctx->pix_fmt[AML_FMT_DST].plane_fmt[0].sizeimage);
+	return ctx->decode_result;
 }
