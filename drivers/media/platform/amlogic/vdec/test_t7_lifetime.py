@@ -54,6 +54,98 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_internal_canvas_targets_dma_planes_without_external_allocations(self):
+        source = (HERE / "h264.c").read_text()
+        start = source.index("struct h264_decode_buf_spec {")
+        spec = source[start:source.index("};", start) + 2]
+        functions = "\n".join(function(HERE / "h264.c", name) for name in (
+            "spec2canvas", "h264_write_internal_canvas",
+            "h264_config_internal_canvas", "config_decode_canvas", "release_canvas_index"))
+        run_c(COMMON + """
+#include <string.h>
+#include "reg_defines.h"
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define V4L2_H264_NUM_DPB_ENTRIES 16
+#define DOS_BUS 0
+#define MESON_CANVAS_WRAP_NONE 0
+#define MESON_CANVAS_BLKMODE_LINEAR 0
+#define MESON_CANVAS_ENDIAN_SWAP64 7
+#define dev_dbg(...) ((void)0)
+typedef uint8_t u8;
+typedef uintptr_t dma_addr_t;
+struct aml_vdec_hw { void *dev, *canvas, *map[1]; bool has_internal_canvas; };
+struct reg_sequence { unsigned int reg, def; };
+static unsigned int lut[128][2], anc[32], low, high, writes, fail_at;
+static int meson_canvas_alloc(void *p, u8 *index) { assert(0); return -ENOSPC; }
+static void meson_canvas_free(void *p, int index) { assert(0); }
+#define meson_canvas_config(...) assert(0)
+static int regmap_write(void *map, unsigned int reg, unsigned int value)
+{
+    if (++writes == fail_at) return -EIO;
+    switch (reg) {
+    case MDEC_CAV_CFG0: assert(value == 0); break;
+    case MDEC_CAV_LUT_DATAL: low = value; break;
+    case MDEC_CAV_LUT_DATAH: high = value; break;
+    case MDEC_CAV_LUT_ADDR:
+        assert(value < 128); lut[value][0] = low; lut[value][1] = high; break;
+    case VDEC_ASSIST_CANVAS_BLK32: break;
+    default:
+        assert(reg >= ANC0_CANVAS_ADDR && reg < ANC0_CANVAS_ADDR + 32 * 4);
+        anc[(reg - ANC0_CANVAS_ADDR) / 4] = value;
+    }
+    return 0;
+}
+static int regmap_multi_reg_write(void *map, const struct reg_sequence *r, unsigned int n)
+{
+    for (unsigned int i = 0; i < n; i++) {
+        int ret = regmap_write(map, r[i].reg, r[i].def);
+        if (ret) return ret;
+    }
+    return 0;
+}
+static void expect_plane(unsigned int index, dma_addr_t addr,
+                         unsigned int stride, unsigned int height)
+{
+    assert(((lut[index][0] & 0x1fffffffU) << 3) == addr);
+    assert((((lut[index][0] >> 29) | ((lut[index][1] & 0x1ff) << 3)) << 3) == stride);
+    assert(((lut[index][1] >> 9) & 0x1fff) == height);
+    assert((lut[index][1] >> 22) == (7 << 4)); /* linear, no wrap, swap64 */
+}
+""" + spec + functions + """
+int main(void)
+{
+    struct aml_vdec_hw hw = { .has_internal_canvas = true };
+    struct h264_decode_buf_spec spec = {};
+    for (int job = 0; job < 2; job++) {
+        /* A new context must replace every entry lost across power-off. */
+        memset(lut, 0xa5, sizeof(lut));
+        for (int pos = 0; pos <= V4L2_H264_NUM_DPB_ENTRIES; pos++) {
+            spec.canvas_pos = pos;
+            spec.y_dma_addr = 0xc0000000 + job * 0x1000000 + pos * 0x80000;
+            spec.c_dma_addr = spec.y_dma_addr + 640 * 384;
+            assert(!config_decode_canvas(&hw, &spec, 40, 24));
+            unsigned int packed = anc[pos];
+            expect_plane(packed & 255, spec.y_dma_addr, 640, 384);
+            expect_plane((packed >> 8) & 255, spec.c_dma_addr, 640, 192);
+            assert((packed >> 16) == ((packed >> 8) & 255));
+            release_canvas_index(&hw, &spec);
+            assert(spec.y_canvas_index == -1 && spec.u_canvas_index == -1);
+        }
+    }
+    writes = 0; spec.canvas_pos = -1;
+    assert(config_decode_canvas(&hw, &spec, 40, 24) == -EINVAL && !writes);
+    spec.canvas_pos = V4L2_H264_NUM_DPB_ENTRIES + 1;
+    assert(config_decode_canvas(&hw, &spec, 40, 24) == -EINVAL && !writes);
+    spec.canvas_pos = 0;
+    for (unsigned int fail = 1; fail <= 8; fail++) {
+        writes = 0; fail_at = fail;
+        assert(config_decode_canvas(&hw, &spec, 40, 24) == -EIO);
+        assert(writes == fail);
+    }
+    return 0;
+}
+""")
+
     def test_b_picture_reordering_preserves_each_reference_list(self):
         copy = function(HERE / "h264.c", "copy_ref_list")
         run_c(COMMON + """
@@ -218,7 +310,7 @@ struct aml_h264_ctx {
     struct h264_decode_buf_spec curr_spec, ref_list0[1], ref_list1[1];
     int list_size[2], init_flag;
 };
-struct aml_vdec_hw { void *dev, *canvas, *curr_ctx; };
+struct aml_vdec_hw { void *dev, *canvas, *curr_ctx; bool has_internal_canvas; };
 struct dev { struct aml_vdec_hw *dec_hw; };
 struct aml_vdec_ctx { struct dev *dev; struct aml_h264_ctx *codec_priv; };
 static unsigned int freed;
@@ -1051,7 +1143,11 @@ typedef uintptr_t dma_addr_t;
 #define MESON_CANVAS_ENDIAN_SWAP64 0
 #define dev_dbg(...) ((void)0)
 #define spec2canvas(spec) 0
-struct aml_vdec_hw { void *canvas, *dev, *map[1]; };
+struct aml_vdec_hw { void *canvas, *dev, *map[1]; bool has_internal_canvas; };
+struct h264_decode_buf_spec;
+static int h264_config_internal_canvas(struct aml_vdec_hw *hw,
+    struct h264_decode_buf_spec *spec, u32 width, u32 height)
+{ assert(0); return -EINVAL; }
 static int allocations, fail_at, frees;
 static int meson_canvas_alloc(void *canvas, u8 *index)
 {

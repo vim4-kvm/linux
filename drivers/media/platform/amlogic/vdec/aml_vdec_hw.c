@@ -1088,6 +1088,7 @@ int dev_request_hw_resources(void *priv)
 	hw = dev->dec_hw;
 	hw->dev = &pdev->dev;
 	hw->has_dbus_ctrl = dev->pvdec_data->has_dbus_ctrl;
+	hw->has_internal_canvas = dev->pvdec_data->has_internal_canvas;
 
 	hw->dec_irq = platform_get_irq(pdev, hw->has_dbus_ctrl ? 0 : VDEC_IRQ_1);
 	if (hw->dec_irq < 0) {
@@ -1129,9 +1130,11 @@ int dev_request_hw_resources(void *priv)
 			__func__, (unsigned long long)res.start,
 			(unsigned long long)res.end, reg_base[i]);
 	}
-	hw->canvas = meson_canvas_get(&pdev->dev);
-	if (IS_ERR(hw->canvas))
-		return PTR_ERR(hw->canvas);
+	if (!hw->has_internal_canvas) {
+		hw->canvas = meson_canvas_get(&pdev->dev);
+		if (IS_ERR(hw->canvas))
+			return PTR_ERR(hw->canvas);
+	}
 
 	hw->pm = &pm[dev->pvdec_data->power_type];
 	if (hw->pm->init) {

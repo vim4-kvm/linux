@@ -146,6 +146,7 @@ struct aml_vdec_hw {
 	int dec_irq;
 	void *curr_ctx;
 	bool has_dbus_ctrl;
+	bool has_internal_canvas;
 	bool faulted;
 	bool powered;
 	bool power_test_passed;
