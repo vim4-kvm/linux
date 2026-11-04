@@ -9,6 +9,7 @@
 #include <dt-bindings/gpio/amlogic,t7-periphs-pinctrl.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
+#include <dt-bindings/usb/pd.h>
 
 / {
 	model = "Khadas VIM4";
@@ -677,6 +678,26 @@
 		#cooling-cells = <2>;
 	};
 
+	typec: typec-port@22 {
+		compatible = "fcs,fusb302";
+		reg = <0x22>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&typec_irq_pins>;
+		interrupt-parent = <&gpio_intc>;
+		interrupts = <133 IRQ_TYPE_LEVEL_LOW>; /* GPIOY_4 */
+		/* Enabled with the fixed-peripheral USB controller profile. */
+		status = "disabled";
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			power-role = "sink";
+			data-role = "device";
+			sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+			op-sink-microwatt = <15000000>;
+		};
+	};
+
 	rtc: rtc@51 {
 		compatible = "haoyu,hym8563";
 		reg = <0x51>;
@@ -705,6 +726,17 @@
 	status = "okay";
 	memory-region = <&pcie_dma_pool>;
 	reset-gpios = <&gpio GPIOH_3 GPIO_ACTIVE_LOW>;
+};
+
+&periphs_pinctrl {
+	typec_irq_pins: typec-irq {
+		mux {
+			groups = "GPIOY_4";
+			function = "gpio_periphs";
+			bias-pull-up;
+			output-disable;
+		};
+	};
 };
 
 &pwm_ab {
