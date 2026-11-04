@@ -831,23 +831,14 @@ static int poc_is_in_dpb(int poc, const struct v4l2_h264_dpb_entry *dpb)
 static int get_ref_list_size(struct aml_h264_ctx *h264_ctx, int cur_list)
 {
 	struct aml_vdec_ctx *ctx = h264_ctx->v4l2_ctx;
-	unsigned short override_flag = h264_ctx->dpb_param.l.data[REF_IDC_OVERRIDE_FLAG];
-	int num_ref_idx_lx_active_minus1;
+	int count = cur_list ? h264_ctx->mslice.num_ref_idx_l1 :
+			       h264_ctx->mslice.num_ref_idx_l0;
 
-	if (cur_list == 0) {
-		num_ref_idx_lx_active_minus1 =
-			h264_ctx->ctrl_ref.pps->num_ref_idx_l0_default_active_minus1;
-		if (override_flag)
-			num_ref_idx_lx_active_minus1 =
-				h264_ctx->dpb_param.dpb.num_ref_idx_l0_active_minus1;
-	} else {
-		num_ref_idx_lx_active_minus1 =
-			h264_ctx->ctrl_ref.pps->num_ref_idx_l1_default_active_minus1;
-	}
+	/* The firmware's parsed slice counts already include PPS overrides. */
 	dev_dbg(&ctx->dev->plat_dev->dev, "%s get list %d size %d\n",
-		__func__, cur_list, num_ref_idx_lx_active_minus1 + 1);
+		__func__, cur_list, count);
 
-	return num_ref_idx_lx_active_minus1 + 1;
+	return count;
 }
 
 static int get_refidx_by_picnum(struct aml_h264_ctx *h264_ctx, int pic_num,

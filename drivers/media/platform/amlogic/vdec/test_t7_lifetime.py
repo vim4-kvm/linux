@@ -54,6 +54,70 @@ typedef uint32_t u32;
 
 
 class LifetimeTests(unittest.TestCase):
+    def test_weighted_duplicate_references_use_parsed_slice_counts(self):
+        functions = "\n".join(function(HERE / "h264.c", name) for name in (
+            "get_ref_list_size", "get_refidx_by_picnum", "get_st_refpic_by_num",
+            "copy_ref_list", "reorder_short_term"))
+        run_c(COMMON + """
+#include <string.h>
+#define container_of(p, t, m) ((t *)((char *)(p) - offsetof(t, m)))
+#define dev_dbg(...) ((void)ctx)
+#define REF_IDC_OVERRIDE_FLAG 0
+struct aml_vdec_ctx {};
+struct v4l2_h264_dpb_entry { int pic_num; };
+struct h264_decode_buf_spec {
+    struct v4l2_h264_dpb_entry *dpb;
+    bool long_term_flag;
+};
+struct slice { int num_ref_idx_l0, num_ref_idx_l1; };
+struct pps {
+    int num_ref_idx_l0_default_active_minus1;
+    int num_ref_idx_l1_default_active_minus1;
+};
+struct aml_h264_ctx {
+    struct aml_vdec_ctx *v4l2_ctx;
+    struct slice mslice;
+    struct { struct pps *pps; } ctrl_ref;
+    struct {
+        struct { unsigned short data[1]; } l;
+        struct { unsigned short num_ref_idx_l0_active_minus1;
+                 unsigned short num_ref_idx_l1_active_minus1; } dpb;
+    } dpb_param;
+    struct h264_decode_buf_spec ref_list0[17], ref_list1[17];
+    struct h264_decode_buf_spec ref_list0_unreordered[17], ref_list1_unreordered[17];
+    int list_size[2];
+};
+""" + functions + """
+int main(void)
+{
+    struct pps pps = { 2, 0 };
+    struct aml_h264_ctx ctx = { .ctrl_ref.pps = &pps };
+    struct v4l2_h264_dpb_entry pictures[] = {{2}, {1}, {0}};
+    ctx.mslice.num_ref_idx_l0 = 4;
+    ctx.mslice.num_ref_idx_l1 = 2;
+    ctx.dpb_param.dpb.num_ref_idx_l0_active_minus1 = 3;
+    ctx.dpb_param.dpb.num_ref_idx_l1_active_minus1 = 1;
+    for (int i = 0; i < 3; i++)
+        ctx.ref_list0[i].dpb = &pictures[i];
+    ctx.list_size[0] = 3;
+    copy_ref_list(&ctx, 0);
+    /* The first failing Main P slice repeats picture 1 with a new weight,
+       then names 2 and 0. Its four active entries exceed the PPS default. */
+    int index = 0;
+    int order[] = {1, 1, 2, 0};
+    for (int i = 0; i < 4; i++)
+        reorder_short_term(&ctx.mslice, 0, order[i], &index);
+    assert(index == 4 && ctx.list_size[0] == 4);
+    for (int i = 0; i < 4; i++)
+        assert(ctx.ref_list0[i].dpb && ctx.ref_list0[i].dpb->pic_num == order[i]);
+    assert(get_ref_list_size(&ctx, 1) == 2);
+    /* A one-entry override must not fall back to the larger PPS default. */
+    ctx.mslice.num_ref_idx_l0 = 1;
+    assert(get_ref_list_size(&ctx, 0) == 1);
+    return 0;
+}
+""")
+
     def test_internal_canvas_targets_dma_planes_without_external_allocations(self):
         source = (HERE / "h264.c").read_text()
         start = source.index("struct h264_decode_buf_spec {")
