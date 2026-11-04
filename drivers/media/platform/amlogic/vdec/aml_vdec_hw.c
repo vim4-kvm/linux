@@ -241,6 +241,9 @@ int load_firmware(struct aml_vdec_hw *hw, const char *path, unsigned int codec)
 		case CODEC_TYPE_MPEG2:
 			format = 0x4d31324d; /* MPEG12_MULTI: tag M12M. */
 			break;
+		case CODEC_TYPE_MJPEG:
+			format = 6;
+			break;
 		default:
 			return -EINVAL;
 		}

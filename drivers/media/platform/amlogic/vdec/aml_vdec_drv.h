@@ -40,6 +40,7 @@ enum aml_fmt_type {
 enum aml_codec_type {
 	CODEC_TYPE_H264 = 0,
 	CODEC_TYPE_MPEG2,
+	CODEC_TYPE_MJPEG,
 	CODEC_TYPE_FRAME,
 };
 
@@ -163,6 +164,8 @@ struct aml_vdec_ctx {
 	int decode_result;
 	bool buffers_held;
 	bool decode_failed;
+	/* Before OUTPUT S_FMT, ENUM_FMT exposes all possible raw formats. */
+	bool output_fmt_set;
 	bool diag_started;
 };
 

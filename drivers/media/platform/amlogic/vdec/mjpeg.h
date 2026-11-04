@@ -17,6 +17,7 @@
 #define MJPEG_STOP_POS		AV_SCRATCH_K
 
 #define MJPEG_STATUS_SIZE	1	/* picture size known, waits for an ack */
+#define MJPEG_STATUS_EMPTY	2
 #define MJPEG_STATUS_TIMEOUT	0x21
 
 /* Not in reg_defines.h; addresses from the staging meson vdec headers. */
@@ -27,6 +28,8 @@
 #define VDEC_ASSIST_AMR1_INT8	REG_ALIGN(0x002d)
 
 int aml_mjpeg_init(void *priv);
+void aml_mjpeg_prepare(void *priv);
+void aml_mjpeg_finish(void *priv);
 void aml_mjpeg_exit(void *priv);
 int aml_mjpeg_dec_run(void *priv);
 

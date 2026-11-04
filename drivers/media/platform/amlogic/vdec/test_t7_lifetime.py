@@ -118,7 +118,8 @@ int main(void)
 """)
 
     def test_format_probe_selects_codec_and_capture_keeps_real_plane_count(self):
-        names = ('set_pic_info', 'vdec_try_fmt_mp', 'vdec_s_fmt_output', 'vdec_s_fmt_capture')
+        names = ('vdec_capture_supported', 'vidioc_vdec_enum_fmt', 'set_pic_info',
+                 'vdec_try_fmt_mp', 'vdec_s_fmt_output', 'vdec_s_fmt_capture')
         code = '\n'.join(function(HERE / 'aml_vdec.c', name) for name in names)
         run_c(COMMON + """
 #include <string.h>
@@ -127,18 +128,22 @@ int main(void)
 #define AML_FMT_DST 1
 #define AML_FMT_DEC 0
 #define AML_FMT_FRAME 1
+#define CODEC_TYPE_MJPEG 2
+#define strscpy(d, s, n) ((void)0)
 #define ALIGN(v, a) (((v) + (a) - 1) / (a) * (a))
 #define dev_dbg(...) ((void)0)
 struct aml_video_fmt {
-    unsigned int fourcc, num_planes, type, align;
+    unsigned int fourcc, num_planes, type, align, codec_type;
+    const char *name;
     struct v4l2_frmsize_stepwise stepwise;
 };
-struct platform { struct aml_video_fmt *dec_fmt; };
+struct platform { struct aml_video_fmt *dec_fmt; unsigned int num_fmts; };
 struct aml_vdec_dev { struct platform *pvdec_data; };
 struct vb2_queue { bool busy; };
 struct aml_vdec_ctx {
     struct aml_vdec_dev *dev;
     void *m2m_ctx;
+    bool output_fmt_set;
     struct aml_video_fmt dec_fmt[2];
     struct v4l2_pix_format_mplane pix_fmt[2];
     struct { unsigned int output_pix_fmt, cap_pix_fmt, coded_width, coded_height,
@@ -149,9 +154,12 @@ static struct aml_video_fmt formats[] = {
     { .fourcc = V4L2_PIX_FMT_MPEG2_SLICE, .num_planes = 1, .type = AML_FMT_DEC, .align = 64 },
     { .fourcc = V4L2_PIX_FMT_NV12, .num_planes = 1, .type = AML_FMT_FRAME, .align = 64 },
     { .fourcc = V4L2_PIX_FMT_NV12M, .num_planes = 2, .type = AML_FMT_FRAME, .align = 64 },
+    { .fourcc = V4L2_PIX_FMT_MJPEG, .num_planes = 1, .type = AML_FMT_DEC, .align = 64,
+      .codec_type = CODEC_TYPE_MJPEG },
+    { .fourcc = V4L2_PIX_FMT_YUV420, .num_planes = 1, .type = AML_FMT_FRAME, .align = 64 },
 };
 static const struct aml_video_fmt *aml_vdec_get_video_fmt(struct aml_vdec_dev *d, unsigned int f)
-{ for (int i = 0; i < 4; i++) if (formats[i].fourcc == f) return &formats[i]; return NULL; }
+{ for (int i = 0; i < 6; i++) if (formats[i].fourcc == f) return &formats[i]; return NULL; }
 static void v4l2_apply_frmsize_constraints(unsigned int *w, unsigned int *h, const void *s) {}
 static void v4l2_fill_pixfmt_mp(struct v4l2_pix_format_mplane *p, unsigned int f,
                               unsigned int w, unsigned int h)
@@ -163,10 +171,14 @@ static bool vb2_is_busy(struct vb2_queue *q) { return q->busy; }
 """ + code + """
 int main(void)
 {
-    struct platform p = { formats };
+    struct platform p = { formats, 6 };
     struct aml_vdec_dev dev = { &p };
     struct aml_vdec_ctx ctx = { .dev = &dev, .dec_fmt = { formats[0], formats[2] } };
     struct v4l2_format f = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
+    /* GStreamer's initial class registration sees the raw format union. */
+    struct v4l2_fmtdesc desc = { .index = 2 };
+    assert(!vidioc_vdec_enum_fmt(&ctx, &desc, false));
+    assert(desc.pixelformat == V4L2_PIX_FMT_YUV420);
     f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_MPEG2_SLICE;
     f.fmt.pix_mp.width = 640; f.fmt.pix_mp.height = 368;
     assert(!vdec_try_fmt_mp(&ctx, f.type, &f.fmt.pix_mp));
@@ -187,6 +199,30 @@ int main(void)
     f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
     assert(!vdec_s_fmt_capture(&ctx, &f));
     assert(ctx.pic_info.plane_num == 1);
+    assert(vidioc_vdec_enum_fmt(&ctx, &desc, false) == -EINVAL);
+    /* Switching codec changes both the negotiated format and queue layout. */
+    f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_MJPEG;
+    assert(!vdec_s_fmt_output(&ctx, &f));
+    assert(ctx.pix_fmt[1].pixelformat == V4L2_PIX_FMT_YUV420);
+    assert(ctx.dec_fmt[1].fourcc == V4L2_PIX_FMT_YUV420);
+    desc.index = 0;
+    assert(!vidioc_vdec_enum_fmt(&ctx, &desc, false));
+    assert(desc.pixelformat == V4L2_PIX_FMT_YUV420);
+    desc.index = 1;
+    assert(vidioc_vdec_enum_fmt(&ctx, &desc, false) == -EINVAL);
+    f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
+    assert(!vdec_s_fmt_capture(&ctx, &f));
+    assert(f.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_YUV420 && f.fmt.pix_mp.num_planes == 1);
+    f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264_SLICE;
+    assert(!vdec_s_fmt_output(&ctx, &f));
+    assert(ctx.dec_fmt[1].fourcc == V4L2_PIX_FMT_NV12);
+    f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_YUV420;
+    assert(!vdec_s_fmt_capture(&ctx, &f));
+    assert(f.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12);
     return 0;
 }
 """, flags=("-Wno-address-of-packed-member",))
@@ -854,6 +890,7 @@ static void aml_vdec_stop_job(struct aml_vdec_ctx *ctx)
     else ctx->dos_clk_en = 0;
 }
 static void v4l2_m2m_buf_copy_metadata(void *src, void *dst) {}
+static void vdec_mark_last(struct aml_vdec_ctx *ctx) {}
 static void v4l2_m2m_buf_done_and_job_finish(int device, void *ctx, int result)
 {
     assert(ctx == owner->m2m_ctx);
