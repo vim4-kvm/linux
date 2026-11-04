@@ -45,6 +45,8 @@
 #define MPEG12_CCBUF_SIZE	(5 * 1024)
 
 int aml_mpeg12_init(void *priv);
+void aml_mpeg12_prepare(void *priv);
+void aml_mpeg12_finish(void *priv);
 void aml_mpeg12_exit(void *priv);
 int aml_mpeg12_dec_run(void *priv);
 

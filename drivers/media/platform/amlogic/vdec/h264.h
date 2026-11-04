@@ -293,6 +293,7 @@
 #define GET_PPS_GET_SECOND_CHROMA_QP_OFFSET(x)        (x)
 
 int aml_h264_init(void *priv);
+void aml_h264_prepare(void *priv);
 void aml_h264_exit(void *priv);
 int aml_h264_dec_run(void *priv);
 void aml_h264_finish(void *priv);

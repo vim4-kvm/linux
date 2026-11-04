@@ -39,6 +39,7 @@ enum aml_fmt_type {
  */
 enum aml_codec_type {
 	CODEC_TYPE_H264 = 0,
+	CODEC_TYPE_MPEG2,
 	CODEC_TYPE_FRAME,
 };
 
