@@ -30,7 +30,9 @@
 
 /* VLD block registers the microcode keeps its picture state in. */
 #define MPEG1_2_REG		REG_ALIGN(0x0c01)
+#define F_CODE_REG		REG_ALIGN(0x0c02)
 #define PIC_HEAD_INFO		REG_ALIGN(0x0c03)
+#define SLICE_VER_POS_PIC_TYPE	REG_ALIGN(0x0c04)
 
 /* MREG_BUFFEROUT values. */
 #define MPEG12_PIC_DONE		1

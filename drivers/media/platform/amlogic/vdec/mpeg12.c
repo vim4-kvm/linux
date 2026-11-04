@@ -388,6 +388,8 @@ static u32 mpeg12_canvas_setup(struct aml_vdec_ctx *ctx,
 	meson_canvas_config(hw->canvas, ci, uv, w, h / 2, MESON_CANVAS_WRAP_NONE,
 			    MESON_CANVAS_BLKMODE_LINEAR, MESON_CANVAS_ENDIAN_SWAP64);
 configure:
+	dev_dbg(hw->dev, "mpeg12 canvas %u Y=%pad UV=%pad %ux%u planes=%u\n",
+		yi, &y, &uv, w, h, ctx->pic_info.plane_num);
 	regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_CANVAS_BLK32,
 		     (1 << 11) | (1 << 8) | yi);
 	regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_CANVAS_BLK32,
@@ -510,6 +512,11 @@ static void mpeg12_restore_hw(struct aml_vdec_ctx *ctx)
 	regmap_write(hw->map[DOS_BUS], MREG_PIC_WIDTH, 0);
 	regmap_write(hw->map[DOS_BUS], MREG_PIC_HEIGHT, 0);
 	regmap_write(hw->map[DOS_BUS], MREG_SEQ_INFO, 0);
+	regmap_write(hw->map[DOS_BUS], F_CODE_REG, 0);
+	regmap_write(hw->map[DOS_BUS], SLICE_VER_POS_PIC_TYPE, 0);
+	regmap_write(hw->map[DOS_BUS], MB_INFO, 0);
+	/* IQ/IDCT state survives the common reset; do not inherit H.264 mode. */
+	regmap_write(hw->map[DOS_BUS], VCOP_CTRL_REG, 0);
 	regmap_write(hw->map[DOS_BUS], MREG_SIGNAL_TYPE, 0);
 	regmap_write(hw->map[DOS_BUS], MREG_ERROR_COUNT, 0);
 	/* bit1: report width/height, bit0: CC buffer from the host */
@@ -723,6 +730,9 @@ int aml_mpeg12_dec_run(void *priv)
 		 pair ? " pair" : "",
 		 seq->horizontal_size, seq->vertical_size,
 		 rec, ref0, ref1);
+	dev_dbg(hw->dev, "mpeg12 state iq=%x vcop=%x dc=%x\n",
+		read_dos_reg(hw, IQIDCT_CONTROL), read_dos_reg(hw, VCOP_CTRL_REG),
+		read_dos_reg(hw, MDEC_PIC_DC_CTRL));
 
 	ctx->int_cond = 0;
 	ctx->decode_result = -EIO;

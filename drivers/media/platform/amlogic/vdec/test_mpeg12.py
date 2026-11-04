@@ -28,6 +28,51 @@ class Bits:
 
 
 class MPEG12Tests(unittest.TestCase):
+    def test_codec_switch_discards_previous_picture_and_iq_mode(self):
+        code = function(HERE / 'mpeg12.c', 'mpeg12_restore_hw')
+        registers = sorted(set(re.findall(
+            r'regmap_(?:write|update_bits)\(hw->map\[DOS_BUS\], (\w+)', code)))
+        definitions = '\n'.join(f'#define {name} {i}' for i, name in enumerate(registers))
+        run_c(COMMON + """
+#include <linux/videodev2.h>
+#define DOS_BUS 0
+#define AML_FMT_DST 0
+struct aml_vdec_hw { unsigned int *map[1]; };
+struct aml_mpeg12_ctx { unsigned int wks_paddr, cc_paddr; };
+struct aml_vdec_ctx {
+    struct aml_vdec_hw *dev;
+    struct aml_mpeg12_ctx *codec_priv;
+    struct { unsigned int coded_width, coded_height; } pic_info;
+    struct { unsigned int fourcc; } dec_fmt[1];
+};
+static struct aml_vdec_hw *vdec_get_hw(struct aml_vdec_hw *hw) { return hw; }
+static void regmap_write(unsigned int *map, unsigned int reg, unsigned int value)
+{ map[reg] = value; }
+static void regmap_update_bits(unsigned int *map, unsigned int reg,
+                               unsigned int mask, unsigned int value)
+{ map[reg] = (map[reg] & ~mask) | (value & mask); }
+""" + definitions + '\n' + code + """
+int main(void)
+{
+    unsigned int regs[128];
+    struct aml_vdec_hw hw = { .map = {regs} };
+    struct aml_mpeg12_ctx m = { .wks_paddr = 0x12340000, .cc_paddr = 0x12400000 };
+    struct aml_vdec_ctx ctx = { .dev = &hw, .codec_priv = &m,
+        .pic_info = {1920, 1088}, .dec_fmt = {{V4L2_PIX_FMT_NV21M}} };
+    for (int i = 0; i < 128; i++) regs[i] = 0xa5a5a5a5;
+    mpeg12_restore_hw(&ctx);
+    assert(regs[VCOP_CTRL_REG] == 0 && regs[MB_INFO] == 0);
+    assert(regs[F_CODE_REG] == 0 && regs[SLICE_VER_POS_PIC_TYPE] == 0);
+    assert(regs[MREG_CO_MV_START] == m.wks_paddr && regs[MREG_CC_ADDR] == m.cc_paddr);
+    assert((regs[MDEC_PIC_DC_CTRL] & (3 << 16)) == (3 << 16));
+    ctx.dec_fmt[0].fourcc = V4L2_PIX_FMT_NV12;
+    mpeg12_restore_hw(&ctx);
+    assert((regs[MDEC_PIC_DC_CTRL] & (3 << 16)) == (2 << 16));
+    assert((regs[MDEC_PIC_DC_CTRL] & ~(3 << 16)) == (0xa5a5a5a5 & ~(3 << 16)));
+    return 0;
+}
+""")
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix='mpeg12-headers-')
