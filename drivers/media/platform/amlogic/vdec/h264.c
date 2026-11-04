@@ -407,9 +407,10 @@ static void config_sps_params(struct aml_h264_ctx *h264_ctx,
 	}
 
 	frame_size = (sps->pic_width_in_mbs_minus1 + 1) * (sps->pic_height_in_map_units_minus1 + 1);
+	/* The eight-bit width field represents 256 macroblocks as zero. */
 	cfg_tmp = (get_flag(sps->flags, V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) << 31) |
 				(sps->max_num_ref_frames << 24) | (frame_size << 8) |
-				(sps->pic_width_in_mbs_minus1 + 1);
+				((sps->pic_width_in_mbs_minus1 + 1) & 0xff);
 	regmap_write(hw->map[DOS_BUS], AV_SCRATCH_1, cfg_tmp);
 	h264_ctx->seq_info = cfg_tmp;
 

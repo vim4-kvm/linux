@@ -290,6 +290,16 @@ int main(void)
     assert(table[0] == 0xa5a5 && table[257] == 0xa5a5);
     assert(table[4] == PARAM_BASE_VAL);
     for (unsigned int i = 9; i < 257; i++) assert(!table[i]);
+    for (unsigned int width = 240; width <= 256; width += 16) {
+        sps.pic_width_in_mbs_minus1 = width - 1;
+        sps.pic_height_in_map_units_minus1 = 143;
+        config_sps_params(&h264, table + 1, &sps);
+        unsigned int parsed_width = h264.seq_info & 255;
+        unsigned int parsed_area = (h264.seq_info >> 8) & 65535;
+        if (!parsed_width) parsed_width = 256;
+        assert(parsed_width == width && parsed_area == width * 144);
+        assert(parsed_area / parsed_width == 144);
+    }
     for (int qp = -26; qp <= 25; qp++) {
         pps.pic_init_qp_minus26 = pps.pic_init_qs_minus26 = qp;
         pps.chroma_qp_index_offset = qp % 13;
