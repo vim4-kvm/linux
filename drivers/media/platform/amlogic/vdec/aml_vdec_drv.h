@@ -89,8 +89,10 @@ struct aml_video_fmt {
 struct aml_vdec_dev {
 	struct platform_device *plat_dev;
 	struct v4l2_device v4l2_dev;
+	struct v4l2_device jpeg_v4l2_dev;
 	struct v4l2_m2m_dev *m2m_dev_dec;
 	struct video_device *vfd;
+	struct video_device *jpeg_vfd;
 	struct media_device mdev;
 
 	unsigned int open_count;
@@ -165,8 +167,7 @@ struct aml_vdec_ctx {
 	int decode_result;
 	bool buffers_held;
 	bool decode_failed;
-	/* Before OUTPUT S_FMT, ENUM_FMT exposes all possible raw formats. */
-	bool output_fmt_set;
+	bool is_jpeg;
 	bool diag_started;
 };
 

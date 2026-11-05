@@ -118,7 +118,7 @@ int main(void)
 """)
 
     def test_format_probe_selects_codec_and_capture_keeps_real_plane_count(self):
-        names = ('vdec_capture_supported', 'vidioc_vdec_enum_fmt', 'set_pic_info',
+        names = ('vdec_format_supported', 'vidioc_vdec_enum_fmt', 'set_pic_info',
                  'vdec_try_fmt_mp', 'vdec_s_fmt_output', 'vdec_s_fmt_capture', 'vdec_g_selection')
         code = '\n'.join(function(HERE / 'aml_vdec.c', name) for name in names)
         run_c(COMMON + """
@@ -143,7 +143,7 @@ struct vb2_queue { bool busy; };
 struct aml_vdec_ctx {
     struct aml_vdec_dev *dev;
     void *m2m_ctx;
-    bool output_fmt_set;
+    bool is_jpeg;
     struct v4l2_rect compose;
     struct aml_video_fmt dec_fmt[2];
     struct v4l2_pix_format_mplane pix_fmt[2];
@@ -178,10 +178,10 @@ int main(void)
     struct aml_vdec_dev dev = { &p };
     struct aml_vdec_ctx ctx = { .dev = &dev, .dec_fmt = { formats[0], formats[2] } };
     struct v4l2_format f = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
-    /* GStreamer's initial class registration sees the raw format union. */
+    /* A stateless video node must not advertise the JPEG codec contract. */
     struct v4l2_fmtdesc desc = { .index = 2 };
-    assert(!vidioc_vdec_enum_fmt(&ctx, &desc, false));
-    assert(desc.pixelformat == V4L2_PIX_FMT_YUV420);
+    assert(vidioc_vdec_enum_fmt(&ctx, &desc, false) == -EINVAL);
+    assert(vidioc_vdec_enum_fmt(&ctx, &desc, true) == -EINVAL);
     f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_MPEG2_SLICE;
     f.fmt.pix_mp.width = 640; f.fmt.pix_mp.height = 368;
     assert(!vdec_try_fmt_mp(&ctx, f.type, &f.fmt.pix_mp));
@@ -203,8 +203,19 @@ int main(void)
     assert(!vdec_s_fmt_capture(&ctx, &f));
     assert(ctx.pic_info.plane_num == 1);
     assert(vidioc_vdec_enum_fmt(&ctx, &desc, false) == -EINVAL);
-    /* Switching codec changes both the negotiated format and queue layout. */
+    /* An incompatible codec is rejected through the negotiated fallback. */
     f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_MJPEG;
+    assert(!vdec_s_fmt_output(&ctx, &f));
+    assert(f.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_MPEG2_SLICE);
+    /* Opening the JPEG node supplies its own raw format from the first probe. */
+    ctx.is_jpeg = true;
+    ctx.dec_fmt[0] = formats[4]; ctx.dec_fmt[1] = formats[5];
+    desc.index = 0;
+    assert(!vidioc_vdec_enum_fmt(&ctx, &desc, false));
+    assert(desc.pixelformat == V4L2_PIX_FMT_YUV420);
+    assert(!vidioc_vdec_enum_fmt(&ctx, &desc, true));
+    assert(desc.pixelformat == V4L2_PIX_FMT_MJPEG);
     f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_MJPEG;
     f.fmt.pix_mp.width = 1920; f.fmt.pix_mp.height = 1080;
     assert(!vdec_s_fmt_output(&ctx, &f));
@@ -218,6 +229,9 @@ int main(void)
     assert(selection.r.width == 1920 && selection.r.height == 1088);
     assert(ctx.pix_fmt[1].pixelformat == V4L2_PIX_FMT_YUV420);
     assert(ctx.dec_fmt[1].fourcc == V4L2_PIX_FMT_YUV420);
+    assert(ctx.pix_fmt[1].colorspace == V4L2_COLORSPACE_SRGB);
+    assert(ctx.pix_fmt[1].quantization == V4L2_QUANTIZATION_FULL_RANGE);
+    assert(ctx.pix_fmt[0].ycbcr_enc == V4L2_YCBCR_ENC_601);
     desc.index = 0;
     assert(!vidioc_vdec_enum_fmt(&ctx, &desc, false));
     assert(desc.pixelformat == V4L2_PIX_FMT_YUV420);
@@ -228,6 +242,11 @@ int main(void)
     assert(!vdec_s_fmt_capture(&ctx, &f));
     assert(f.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_YUV420 && f.fmt.pix_mp.num_planes == 1);
     f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264_SLICE;
+    assert(!vdec_s_fmt_output(&ctx, &f));
+    assert(f.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_MJPEG);
+    ctx.is_jpeg = false;
+    ctx.dec_fmt[0] = formats[0]; ctx.dec_fmt[1] = formats[2];
     f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264_SLICE;
     assert(!vdec_s_fmt_output(&ctx, &f));
     assert(ctx.dec_fmt[1].fourcc == V4L2_PIX_FMT_NV12);
@@ -964,6 +983,7 @@ struct aml_vdec_dev {
     struct aml_vdec_hw *dec_hw;
     struct platform *plat_dev;
     struct platform_data *pvdec_data;
+    void *jpeg_vfd;
     unsigned int open_count;
     int dev_mutex, m2m_dev_dec;
 };
@@ -973,16 +993,18 @@ struct aml_vdec_ctx {
     struct fh fh;
     void *m2m_ctx;
     int v4l2_intf_lock, queue, int_cond, ctrl_handler;
+    bool is_jpeg;
 };
-struct file { void *private_data; };
+struct file { void *private_data, *node; };
 static struct aml_vdec_hw hw = { .power_test_passed = true, .mdec_test_passed = true };
 static struct platform platform;
 static struct platform_data data = { true };
-static struct aml_vdec_dev dev = { .dec_hw = &hw, .plat_dev = &platform, .pvdec_data = &data };
+static struct aml_vdec_dev dev = { .dec_hw = &hw, .plat_dev = &platform,
+                                 .pvdec_data = &data, .jpeg_vfd = (void *)1 };
 static bool t7_snapshot_only, allow_t7_power = true, fail_queue, fail_controls;
 static int pm_refs, contexts, handles;
 static struct aml_vdec_dev *video_drvdata(struct file *f) { return &dev; }
-static void *video_devdata(struct file *f) { return NULL; }
+static void *video_devdata(struct file *f) { return f->node; }
 static struct aml_vdec_ctx *fh_to_dec_ctx(struct file *f)
 { return (void *)((char *)f->private_data - offsetof(struct aml_vdec_ctx, fh)); }
 static void mutex_lock(int *p) {}
@@ -1006,7 +1028,7 @@ static void aml_vdec_fault(struct aml_vdec_ctx *ctx) { assert(!"unexpected PM fa
 """ + functions + """
 int main(void)
 {
-    struct file first = {}, second = {}, failed = {};
+    struct file first = {}, second = { .node = (void *)1 }, failed = {};
     struct aml_vdec_ctx *a, *b;
 
     assert(!fops_vcodec_open(&first));
@@ -1014,6 +1036,7 @@ int main(void)
     hw.curr_ctx = a; /* Another file may open/close during a running job. */
     assert(!fops_vcodec_open(&second));
     b = fh_to_dec_ctx(&second);
+    assert(!a->is_jpeg && b->is_jpeg);
     assert(a != b && a->m2m_ctx != b->m2m_ctx);
     assert(a->fh.m2m_ctx == a->m2m_ctx && b->fh.m2m_ctx == b->m2m_ctx);
     assert(dev.open_count == 2 && pm_refs == 2 && contexts == 2 && handles == 2);
