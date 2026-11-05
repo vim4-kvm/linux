@@ -10,6 +10,7 @@
 #include <linux/firmware.h>
 #include <linux/module.h>
 #include <linux/bcm47xx_nvram.h>
+#include <kunit/visibility.h>
 
 #include "debug.h"
 #include "firmware.h"
@@ -397,9 +398,10 @@ static void brcmf_fw_add_macaddr(struct nvram_parser *nvp, u8 *mac)
  * and converts newlines to NULs. Shortens buffer as needed and pads with NULs.
  * End of buffer is completed with token identifying length of buffer.
  */
-static void *brcmf_fw_nvram_strip(const u8 *data, size_t data_len,
-				  u32 *new_length, u16 domain_nr, u16 bus_nr,
-				  struct device *dev)
+VISIBLE_IF_KUNIT
+void *brcmf_fw_nvram_strip(const u8 *data, size_t data_len,
+			   u32 *new_length, u16 domain_nr, u16 bus_nr,
+			   struct device *dev)
 {
 	struct nvram_parser nvp;
 	u32 pad;
@@ -452,6 +454,7 @@ static void *brcmf_fw_nvram_strip(const u8 *data, size_t data_len,
 
 	return nvp.nvram;
 }
+EXPORT_SYMBOL_IF_KUNIT(brcmf_fw_nvram_strip);
 
 void brcmf_fw_nvram_free(void *nvram)
 {
