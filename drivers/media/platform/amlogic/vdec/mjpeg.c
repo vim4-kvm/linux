@@ -95,7 +95,7 @@ static u32 mjpeg_canvas_setup(struct aml_vdec_ctx *ctx, struct vb2_buffer *vb)
  * 4:4:4 or progressive picture decodes "successfully" into garbage, and a
  * grey one fails.  Check the frame header and refuse the rest up front.
  */
-static bool mjpeg_supported(const u8 *p, u32 len, u32 max_width, u32 max_height)
+VISIBLE_IF_KUNIT bool mjpeg_supported(const u8 *p, u32 len, u32 max_width, u32 max_height)
 {
 	u32 i = 2;
 
@@ -135,6 +135,7 @@ static bool mjpeg_supported(const u8 *p, u32 len, u32 max_width, u32 max_height)
 	}
 	return false;
 }
+EXPORT_SYMBOL_IF_KUNIT(mjpeg_supported);
 
 static int mjpeg_prepare_input(struct aml_vdec_ctx *ctx,
 			       struct vb2_v4l2_buffer *src)
