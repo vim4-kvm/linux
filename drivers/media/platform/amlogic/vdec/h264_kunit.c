@@ -33,6 +33,7 @@ static int h264_test_init(struct kunit *test)
 	if (ret)
 		return ret;
 	ctx->ctx.dev = &ctx->dev;
+	ctx->ctx.codec_priv = &ctx->h264;
 	ctx->h264.v4l2_ctx = &ctx->ctx;
 	test->priv = &ctx->h264;
 	return 0;
@@ -136,6 +137,36 @@ static void field_reference_metadata(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, h->ref_list0[i].poc,
 				decode->dpb[refs[i].index].bottom_field_order_cnt);
 	}
+}
+
+static void current_picture_order_count(struct kunit *test)
+{
+	static const struct v4l2_ctrl_h264_sps sps = {};
+	struct aml_h264_ctx *h = test->priv;
+	struct v4l2_ctrl_h264_decode_params *decode;
+
+	decode = kunit_kzalloc(test, sizeof(*decode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, decode);
+	h->ctrl_ref.sps = &sps;
+	h->ctrl_ref.decode = decode;
+	decode->top_field_order_cnt = 8;
+	decode->bottom_field_order_cnt = -2;
+	decode->flags = V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC;
+	h264_config_ref_lists(h->v4l2_ctx);
+	KUNIT_EXPECT_EQ(test, h->curr_spec.poc, -2);
+
+	decode->flags |= V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC;
+	h264_config_ref_lists(h->v4l2_ctx);
+	KUNIT_EXPECT_EQ(test, h->curr_spec.poc, 8);
+	decode->flags |= V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD;
+	h264_config_ref_lists(h->v4l2_ctx);
+	KUNIT_EXPECT_EQ(test, h->curr_spec.poc, -2);
+
+	decode->flags = V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC;
+	decode->top_field_order_cnt = -8;
+	decode->bottom_field_order_cnt = 2;
+	h264_config_ref_lists(h->v4l2_ctx);
+	KUNIT_EXPECT_EQ(test, h->curr_spec.poc, -8);
 }
 
 static int signed_field(u8 code)
@@ -284,6 +315,7 @@ static struct kunit_case h264_test_cases[] = {
 	KUNIT_CASE(duplicate_weighted_references),
 	KUNIT_CASE(independent_b_reference_lists),
 	KUNIT_CASE(field_reference_metadata),
+	KUNIT_CASE(current_picture_order_count),
 	KUNIT_CASE(parameter_slots_and_signed_fields),
 	KUNIT_CASE(interlaced_frame_dimensions),
 	KUNIT_CASE(input_padding_boundaries),
