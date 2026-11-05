@@ -1201,6 +1201,156 @@ power_off:
 	return ret;
 }
 
+/* Caller keeps HEVC clocks and the DOS lease; this probe never enables its IRQ. */
+static int t7_hevc_stop(struct aml_vdec_hw *hw)
+{
+	struct regmap *map = hw->map[DOS_BUS];
+	u32 value;
+	unsigned int i;
+	int ret;
+
+	ret = regmap_write(map, HEVC_ASSIST_MBOX0_MASK, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, HEVC_MPSR, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, HEVC_CPSR, 0);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_IMEM_DMA_CTRL, value,
+				       !(value & BIT(15)), 10, 100000);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_LMEM_DMA_CTRL, value,
+				       !(value & BIT(15)), 10, 100000);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_WRRSP_LMEM, value,
+				       !(value & 0xfff), 10, 50000);
+	if (ret)
+		return ret;
+	for (i = 0; i < 3; i++) {
+		ret = regmap_read(map, DOS_SW_RESET3, &value);
+		if (ret)
+			return ret;
+	}
+
+	/* Shared power can remain on: both read and write paths must acknowledge. */
+	ret = regmap_update_bits(map, HEVC_ASSIST_AXI_CTRL, BIT(6), BIT(6));
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_ASSIST_AXI_STATUS, hw->hevc_axi_front,
+				       (hw->hevc_axi_front & (BIT(15) | BIT(11))) ==
+				       (BIT(15) | BIT(11)), 10, 100000);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, HEVC_ASSIST_AXI_CTRL, BIT(14), BIT(14));
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_ASSIST_AXI_STATUS2_LO, hw->hevc_axi_back,
+				       (hw->hevc_axi_back & (BIT(15) | BIT(11))) ==
+				       (BIT(15) | BIT(11)), 10, 100000);
+	if (ret)
+		return ret;
+	for (i = 0; i < 200; i++)
+		cpu_relax();
+	return 0;
+}
+
+static int t7_hevc_reset(struct aml_vdec_hw *hw)
+{
+	struct regmap *map = hw->map[DOS_BUS];
+	u32 value;
+	int ret;
+
+	/* AXI is isolated by t7_hevc_stop; never cycle shared-domain memories. */
+	ret = regmap_write(map, HEVC_STREAM_CONTROL, 0);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, HEVC_SAO_MMU_RESET_CTRL, BIT(0), BIT(0));
+	if (ret)
+		return ret;
+	ret = regmap_write(map, DOS_SW_RESET3,
+			   BIT(3) | BIT(4) | BIT(8) | BIT(10) | BIT(11) | BIT(12) |
+			   BIT(13) | BIT(14) | BIT(15) | BIT(17) | BIT(18) | BIT(19) |
+			   BIT(24) | BIT(26));
+	if (ret)
+		return ret;
+	ret = regmap_write(map, DOS_SW_RESET3, 0);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_WRRSP_LMEM, value,
+				       !(value & 0xfff), 10, 50000);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, HEVC_SAO_MMU_RESET_CTRL, BIT(0), 0);
+	if (ret)
+		return ret;
+	return regmap_update_bits(map, HEVC_ASSIST_AXI_CTRL, BIT(6) | BIT(14), 0);
+}
+
+int aml_vdec_t7_hevc_core_test(struct aml_vdec_hw *hw)
+{
+	struct arm_smccc_res result;
+	int ret, off_ret;
+
+	if (!hw->has_hevc)
+		return -EOPNOTSUPP;
+	if (hw->faulted || hw->probe_failed)
+		return -EIO;
+	if (!hw->hevc_test_passed || hw->powered || hw->probe_step)
+		return -EBUSY;
+	hw->hevc_core_test_passed = false;
+	ret = vdec_enable(hw);
+	if (ret)
+		return ret;
+	ret = t7_hevc_power_on(hw);
+	if (ret)
+		goto power_off;
+	dev_info(hw->dev, "HEVC core test: initial stop begin\n");
+	ret = t7_hevc_stop(hw);
+	if (ret)
+		goto fault;
+	dev_info(hw->dev, "HEVC AXI idle: front=%#x back=%#x\n",
+		 hw->hevc_axi_front, hw->hevc_axi_back);
+	/* The HEVC DMC client is distinct from legacy VDEC's client 13. */
+	arm_smccc_smc(0xb200000e, 4, 0, 0, 0, 0, 0, 0, &result);
+	if (result.a0) {
+		ret = -EACCES;
+		goto power_off;
+	}
+	ret = t7_hevc_reset(hw);
+	if (ret)
+		goto fault;
+	/* HEVC_MMU, legacy core routing: secure firmware selects its HEVC target. */
+	dev_info(hw->dev, "HEVC core test: secure firmware load begin\n");
+	arm_smccc_smc(0xb200000f, 17, 0, 0, 0, 0, 0, 0, &result);
+	dev_info(hw->dev, "HEVC secure firmware load: a0=%#lx\n", result.a0);
+	ret = result.a0 ? -EIO : 0;
+	/* Even a rejected load can have touched IMEM DMA; always drain it. */
+	off_ret = t7_hevc_stop(hw);
+	if (off_ret) {
+		ret = off_ret;
+		goto fault;
+	}
+power_off:
+	off_ret = t7_hevc_power_off(hw);
+	if (!hw->faulted)
+		off_ret = vdec_disable(hw) ?: off_ret;
+	ret = ret ?: off_ret;
+	if (ret)
+		hw->probe_failed = true;
+	else
+		hw->hevc_core_test_passed = true;
+	return ret;
+fault:
+	dev_err(hw->dev, "HEVC stop/reset failed: %d front=%#x back=%#x\n",
+		ret, hw->hevc_axi_front, hw->hevc_axi_back);
+	t7_power_fault(hw);
+	return ret;
+}
+
 static const struct power_manager_s pm[] = {
 	[AML_PM_PD] = {
 		.pd_data    = vdec_domain_data,
