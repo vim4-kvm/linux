@@ -1998,7 +1998,6 @@ static int crg_udc_ep_enable(struct usb_ep *ep,
 
 	CRG_DEBUG("num_enabled_eps = %d\n", crg_udc->num_enabled_eps);
 
-
 	param0 = (0x1 << udc_ep->DCI);
 	{
 		int ret = crg_issue_command(crg_udc, CRG_CMD_CONFIG_EP,
