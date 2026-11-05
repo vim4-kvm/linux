@@ -256,6 +256,9 @@ static void mjpeg_init_scaler(struct aml_vdec_hw *hw)
 
 	regmap_write(map, DOS_SW_RESET0, 1 << 10);
 	regmap_write(map, DOS_SW_RESET0, 0);
+	/* The T7 revision C pscaler has a separate byte-switch remap. */
+	if (hw->canvas_endian_remap)
+		regmap_update_bits(map, PSCALE_CTRL2, GENMASK(24, 16), GENMASK(24, 16));
 	regmap_write(map, PSCALE_RST, 0x7);
 	regmap_write(map, PSCALE_RST, 0x0);
 }

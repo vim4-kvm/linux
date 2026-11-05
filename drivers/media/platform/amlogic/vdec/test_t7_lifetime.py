@@ -230,7 +230,8 @@ int main(void)
     assert(ctx.pix_fmt[1].pixelformat == V4L2_PIX_FMT_YUV420);
     assert(ctx.dec_fmt[1].fourcc == V4L2_PIX_FMT_YUV420);
     assert(ctx.pix_fmt[1].colorspace == V4L2_COLORSPACE_SRGB);
-    assert(ctx.pix_fmt[1].quantization == V4L2_QUANTIZATION_FULL_RANGE);
+    assert(ctx.pix_fmt[1].quantization == V4L2_QUANTIZATION_LIM_RANGE);
+    assert(ctx.pix_fmt[0].quantization == V4L2_QUANTIZATION_FULL_RANGE);
     assert(ctx.pix_fmt[0].ycbcr_enc == V4L2_YCBCR_ENC_601);
     desc.index = 0;
     assert(!vidioc_vdec_enum_fmt(&ctx, &desc, false));
