@@ -34,6 +34,7 @@ void aml_hevc_device_run(struct aml_vdec_ctx *ctx);
 int aml_hevc_job_ready(struct aml_vdec_ctx *ctx);
 void aml_hevc_cancel_output(struct aml_vdec_ctx *ctx);
 void aml_hevc_start_capture(struct aml_vdec_ctx *ctx);
+void aml_hevc_eos(struct aml_vdec_ctx *ctx);
 int aml_hevc_try_fmt(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 		     struct v4l2_pix_format_mplane *fmt);
 int aml_hevc_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selection *selection);

@@ -1834,18 +1834,33 @@ static void h265_flush_pending(struct aml_hevc_ctx *h,
 		h265_output(h, slot, state, last && h->pending == 1);
 }
 
-static void h265_end_capture(struct aml_vdec_ctx *ctx)
+void aml_hevc_eos(struct aml_vdec_ctx *ctx)
+{
+	const struct v4l2_event event = { .type = V4L2_EVENT_EOS };
+
+	v4l2_event_queue_fh(&ctx->fh, &event);
+}
+
+static void h265_end_capture(struct aml_vdec_ctx *ctx, bool eos)
 {
 	struct vb2_v4l2_buffer *vb = v4l2_m2m_dst_buf_remove(ctx->m2m_ctx);
 	unsigned int i;
 
 	if (!vb) {
-		ctx->m2m_ctx->next_buf_last = true;
+		if (eos)
+			ctx->m2m_ctx->next_buf_last = true;
 		return;
 	}
 	for (i = 0; i < vb->vb2_buf.num_planes; i++)
 		vb2_set_plane_payload(&vb->vb2_buf, i, 0);
-	v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb);
+	if (eos) {
+		v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb);
+		aml_hevc_eos(ctx);
+	} else {
+		/* A source change terminates CAPTURE, not the OUTPUT drain. */
+		vb->flags |= V4L2_BUF_FLAG_LAST;
+		v4l2_m2m_buf_done(vb, VB2_BUF_STATE_DONE);
+	}
 }
 
 void aml_hevc_cancel_output(struct aml_vdec_ctx *ctx)
@@ -1885,7 +1900,7 @@ static void h265_source_change(struct aml_hevc_ctx *h)
 		if (h->pending)
 			h265_flush_pending(h, VB2_BUF_STATE_DONE, true);
 		else
-			h265_end_capture(ctx);
+			h265_end_capture(ctx, false);
 	}
 	h->format = ctx->pix_fmt[AML_FMT_DST];
 	h265_capture_format(&h->format, h->pic_w, h->pic_h);
@@ -1972,8 +1987,9 @@ void aml_hevc_device_run(struct aml_vdec_ctx *ctx)
 		if (h->pending) {
 			h265_flush_pending(h, VB2_BUF_STATE_DONE, true);
 			v4l2_m2m_mark_stopped(ctx->m2m_ctx);
+			aml_hevc_eos(ctx);
 		} else {
-			h265_end_capture(ctx);
+			h265_end_capture(ctx, true);
 		}
 	} else {
 		while ((slot = h265_next_output(h)) >= 0 &&
@@ -2000,12 +2016,14 @@ int aml_hevc_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd 
 {
 	struct aml_vdec_ctx *ctx = fh_to_dec_ctx(file);
 	struct aml_hevc_ctx *h;
+	bool was_stopped;
 	int ret;
 
 	ret = v4l2_m2m_ioctl_try_decoder_cmd(file, priv, cmd);
 	if (ret)
 		return ret;
 	mutex_lock(&ctx->hevc_lock);
+	was_stopped = ctx->m2m_ctx->has_stopped;
 	h = ctx->codec_priv;
 	if (cmd->cmd == V4L2_DEC_CMD_STOP && !ctx->m2m_ctx->is_draining &&
 	    !ctx->m2m_ctx->has_stopped && !v4l2_m2m_next_src_buf(ctx->m2m_ctx)) {
@@ -2021,6 +2039,8 @@ int aml_hevc_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd 
 		}
 	}
 	ret = v4l2_m2m_ioctl_decoder_cmd(file, priv, cmd);
+	if (!ret && cmd->cmd == V4L2_DEC_CMD_STOP && !was_stopped && ctx->m2m_ctx->has_stopped)
+		aml_hevc_eos(ctx);
 	mutex_unlock(&ctx->hevc_lock);
 	return ret;
 }

@@ -11,6 +11,80 @@ HERE = Path(__file__).resolve().parent
 
 
 class HEVCParameterTests(unittest.TestCase):
+    def test_eos_subscription_and_notification_follow_last_capture(self):
+        functions = '\n'.join(function(HERE / path, name) for path, name in (
+            ('aml_vdec.c', 'vdec_subscribe_event'), ('hevc.c', 'aml_hevc_eos'),
+            ('hevc.c', 'h265_end_capture'), ('aml_vdec.c', 'vb2_ops_vdec_buf_queue')))
+        run_c(COMMON + r'''
+#include <linux/videodev2.h>
+#define container_of(p, t, m) ((t *)((char *)(p) - offsetof(t, m)))
+#define VB2_BUF_STATE_DONE 1
+struct v4l2_fh { void *m2m_ctx; };
+struct vb2_buffer { unsigned int num_planes, payload[2], type; void *vb2_queue; };
+struct vb2_v4l2_buffer { struct vb2_buffer vb2_buf; u32 flags; };
+struct m2m {
+    struct vb2_v4l2_buffer *dst;
+    bool next_buf_last, has_stopped;
+};
+struct aml_vdec_ctx { struct v4l2_fh fh; struct m2m *m2m_ctx; bool is_hevc, is_jpeg; };
+static unsigned int completed, eos, queued;
+static void *vb2_get_drv_priv(void *q) { return q; }
+static struct vb2_v4l2_buffer *to_vb2_v4l2_buffer(struct vb2_buffer *b)
+{ return container_of(b, struct vb2_v4l2_buffer, vb2_buf); }
+static int v4l2_src_change_event_subscribe(struct v4l2_fh *f, const struct v4l2_event_subscription *s)
+{ assert(s->type == V4L2_EVENT_SOURCE_CHANGE); return 0; }
+static int v4l2_event_subscribe(struct v4l2_fh *f, const struct v4l2_event_subscription *s,
+                               int depth, void *ops)
+{ assert(s->type == V4L2_EVENT_EOS && depth > 0); return 0; }
+static int v4l2_ctrl_subscribe_event(struct v4l2_fh *f, const struct v4l2_event_subscription *s)
+{ return -EINVAL; }
+static void v4l2_event_queue_fh(struct v4l2_fh *f, const struct v4l2_event *event)
+{ assert(event->type == V4L2_EVENT_EOS && completed == eos + 1); eos++; }
+static struct vb2_v4l2_buffer *v4l2_m2m_dst_buf_remove(struct m2m *m)
+{ struct vb2_v4l2_buffer *b = m->dst; m->dst = NULL; return b; }
+static void vb2_set_plane_payload(struct vb2_buffer *b, unsigned int p, unsigned int n)
+{ b->payload[p] = n; }
+static void v4l2_m2m_buf_done(struct vb2_v4l2_buffer *b, int state)
+{
+    assert(state == VB2_BUF_STATE_DONE && (b->flags & V4L2_BUF_FLAG_LAST));
+    assert(!b->vb2_buf.payload[0] && !b->vb2_buf.payload[1]); completed++;
+}
+static void v4l2_m2m_last_buffer_done(struct m2m *m, struct vb2_v4l2_buffer *b)
+{
+    b->flags |= V4L2_BUF_FLAG_LAST; v4l2_m2m_buf_done(b, VB2_BUF_STATE_DONE);
+    m->has_stopped = true; m->next_buf_last = false;
+}
+static bool v4l2_m2m_dst_buf_is_last(struct m2m *m) { return m->next_buf_last; }
+static void v4l2_m2m_buf_queue(void *m, struct vb2_v4l2_buffer *b) { queued++; }
+''' + functions + r'''
+int main(void)
+{
+    struct m2m m = { 0 };
+    struct aml_vdec_ctx ctx = { .m2m_ctx = &m, .is_hevc = true };
+    struct v4l2_event_subscription sub = { .type = V4L2_EVENT_EOS };
+    struct vb2_v4l2_buffer b = { .vb2_buf = { .num_planes = 2, .payload = { 100, 50 },
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, .vb2_queue = &ctx } };
+    assert(!vdec_subscribe_event(&ctx.fh, &sub));
+    sub.type = V4L2_EVENT_SOURCE_CHANGE;
+    assert(!vdec_subscribe_event(&ctx.fh, &sub));
+    m.dst = &b;
+    h265_end_capture(&ctx, false); /* Resolution change is not EOS. */
+    assert(completed == 1 && !eos && !m.has_stopped);
+    completed = 0; m.dst = &b;
+    h265_end_capture(&ctx, true);
+    assert(completed == 1 && eos == 1 && m.has_stopped);
+    m.has_stopped = false;
+    h265_end_capture(&ctx, true); /* Empty CAPTURE queue delays LAST and EOS. */
+    assert(m.next_buf_last && completed == 1 && eos == 1);
+    b.vb2_buf.payload[0] = 100; b.vb2_buf.payload[1] = 50;
+    vb2_ops_vdec_buf_queue(&b.vb2_buf);
+    assert(completed == 2 && eos == 2 && m.has_stopped && !queued);
+    vb2_ops_vdec_buf_queue(&b.vb2_buf);
+    assert(queued == 1 && eos == 2);
+    return 0;
+}
+''')
+
     def test_reordered_frames_keep_their_storage_until_output_and_drain(self):
         source = (HERE / 'hevc.c').read_text()
         picture = re.search(r'struct h265_pic \{.*?\n\};', source, re.S).group()
