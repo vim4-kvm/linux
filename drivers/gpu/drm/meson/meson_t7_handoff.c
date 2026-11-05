@@ -927,7 +927,7 @@ static void __iomem *meson_t7_handoff_map(struct platform_device *pdev,
 	struct resource *resource = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
 
 	if (!resource || resource->start != start || resource_size(resource) != size)
-		return ERR_PTR(-EINVAL);
+		return IOMEM_ERR_PTR(-EINVAL);
 	return devm_ioremap_resource(&pdev->dev, resource);
 }
 
