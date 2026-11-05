@@ -1030,7 +1030,7 @@ static void h264_reorder_reflists(struct aml_h264_ctx *h264_ctx)
 	}
 }
 
-static void h264_config_ref_lists(struct aml_vdec_ctx *ctx)
+VISIBLE_IF_KUNIT void h264_config_ref_lists(struct aml_vdec_ctx *ctx)
 {
 	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)ctx->codec_priv;
 	struct vdec_h264_stateless_ctrl_ref *ctrls = &h264_ctx->ctrl_ref;
@@ -1045,10 +1045,11 @@ static void h264_config_ref_lists(struct aml_vdec_ctx *ctx)
 	struct v4l2_h264_reference v4l2_b1_reflist[V4L2_H264_REF_LIST_LEN];
 	struct slice *curr_slice = &h264_ctx->mslice;
 
-	if (decode->flags == V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC)
+	v4l2_h264_init_reflist_builder(&builder, decode, sps, dpb);
+	h264_ctx->curr_spec.poc = builder.cur_pic_order_count;
+	if (decode->flags & V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC)
 		return;
 
-	v4l2_h264_init_reflist_builder(&builder, decode, sps, dpb);
 	dev_dbg(&ctx->dev->plat_dev->dev, "%s num_valid = %d", __func__,
 		builder.num_valid);
 
@@ -1061,6 +1062,7 @@ static void h264_config_ref_lists(struct aml_vdec_ctx *ctx)
 				 builder.num_valid);
 	}
 }
+EXPORT_SYMBOL_IF_KUNIT(h264_config_ref_lists);
 
 static int allocate_canvas_pos(struct aml_h264_ctx *h264_ctx, int poc)
 {
@@ -1201,7 +1203,6 @@ static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *
 		h264_ctx->curr_spec.col_buf_index = -1;
 	if (decode->nal_ref_idc && h264_ctx->curr_spec.col_buf_index < 0)
 		return -EINVAL;
-	h264_ctx->curr_spec.poc = decode->top_field_order_cnt;
 
 references:
 	/* Slice types and list modifications may change within one picture. */
@@ -1351,7 +1352,7 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 	u32 reg_val;
 
 	regmap_write(hw->map[DOS_BUS], H264_CURRENT_POC_IDX_RESET, 0);
-	regmap_write(hw->map[DOS_BUS], H264_CURRENT_POC, decode->top_field_order_cnt);
+	regmap_write(hw->map[DOS_BUS], H264_CURRENT_POC, h264_ctx->curr_spec.poc);
 	regmap_write(hw->map[DOS_BUS], H264_CURRENT_POC, decode->top_field_order_cnt);
 	regmap_write(hw->map[DOS_BUS], H264_CURRENT_POC, decode->bottom_field_order_cnt);
 	regmap_write(hw->map[DOS_BUS], CURR_CANVAS_CTRL, h264_ctx->curr_spec.canvas_pos << 24);
