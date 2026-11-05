@@ -1077,10 +1077,13 @@ static int t7_hevc_power_off(struct aml_vdec_hw *hw)
 	clk_disable_unprepare(hw->gates[HEVCF_MUX].clk);
 	ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_HEVC].dev);
 	hw->hevc_powered = false;
-	if (ret < 0 || t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state) || state != 1) {
+	/* The HEVC temperature sensor independently holds the shared domain. */
+	if (ret < 0 || !pm_runtime_suspended(hw->pm->pd_data[VDEC_HEVC].dev) ||
+	    t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state)) {
 		t7_power_fault(hw);
 		return -EIO;
 	}
+	dev_info(hw->dev, "HEVC reference released: HEVC[3]=%d\n", state);
 	return 0;
 }
 
@@ -1099,7 +1102,7 @@ static int t7_hevc_power_on(struct aml_vdec_hw *hw)
 	ret = t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state);
 	if (ret)
 		return ret;
-	/* Firmware may leave this domain on; genpd still owns the runtime reference. */
+	/* Other consumers can keep the shared domain on across decoder lifetimes. */
 	dev_info(hw->dev, "HEVC initial power: HEVC[3]=%d\n", state);
 
 	/* DOS-top is accessible with VDEC on; the HEVC-local gate precedes secure PM. */
