@@ -9,7 +9,7 @@
 #include <linux/videodev2.h>
 #include "aml_vdec_drv.h"
 
-#define MAX_DEC_FORMAT 3
+#define MAX_DEC_FORMAT 4
 
 /**
  * struct aml_codec_ops - codec mode specific operations
