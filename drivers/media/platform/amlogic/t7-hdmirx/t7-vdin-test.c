@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
 /* T7 VDIN0 capture; the split-resource profile permits OSD-only handoff. */
+#include <kunit/visibility.h>
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
@@ -36,6 +37,8 @@
 #include <media/videobuf2-dma-contig.h>
 
 #include "t7-hdmirx.h"
+#include "t7-hdmirx-kunit.h"
+#include "t7-vdin-ring.h"
 #include <linux/amlogic-vdin.h>
 
 static bool nv12;
@@ -88,23 +91,6 @@ MODULE_PARM_DESC(direct_dma, "Capture into leased coherent vb2 buffers without a
 #define VDIN_WR_REQ		BIT(8)
 #define VDIN_VCP_WR		BIT(25)
 #define VDIN_DONE_CLEAR		BIT(21)
-#define VDIN_DMA_SLOTS		3
-
-enum t7_vdin_slot_state {
-	VDIN_SLOT_FREE,
-	VDIN_SLOT_WRITING,
-	VDIN_SLOT_READY,
-	VDIN_SLOT_COPYING,
-};
-
-struct t7_vdin_slot {
-	void *data;
-	dma_addr_t dma;
-	enum t7_vdin_slot_state state;
-	u64 timestamp;
-	u32 sequence;
-	struct t7_vdin_buffer *buffer;
-};
 
 struct t7_vdin_buffer {
 	struct vb2_v4l2_buffer vb;
@@ -258,8 +244,8 @@ static void t7_vdin_complete_buffer(struct t7_vdin *vdin,
 }
 
 /* Canonical LE samples match the values sent to the LUT data ports. */
-static u32 t7_vdin_lut_crc(const u32 *lut, unsigned int count,
-			   unsigned int shift)
+VISIBLE_IF_KUNIT u32 t7_vdin_lut_crc(const u32 *lut, unsigned int count,
+				     unsigned int shift)
 {
 	u32 crc = ~0U;
 	unsigned int i;
@@ -271,6 +257,7 @@ static u32 t7_vdin_lut_crc(const u32 *lut, unsigned int count,
 	}
 	return crc ^ ~0U;
 }
+EXPORT_SYMBOL_IF_KUNIT(t7_vdin_lut_crc);
 
 static void t7_vdin_record_hdr_luts(struct t7_vdin *vdin)
 {
@@ -769,15 +756,15 @@ static bool t7_vdin_ring_ready(struct t7_vdin *vdin)
 	return ready;
 }
 
-static struct t7_vdin_slot *t7_vdin_ring_take(struct t7_vdin *vdin)
+/* Slots are exclusively owned by the caller or protected by irq_lock. */
+VISIBLE_IF_KUNIT struct t7_vdin_slot *
+t7_vdin_take_ready(struct t7_vdin_slot slots[VDIN_DMA_SLOTS])
 {
 	struct t7_vdin_slot *oldest = NULL;
-	unsigned long flags;
 	unsigned int i;
 
-	spin_lock_irqsave(&vdin->irq_lock, flags);
 	for (i = 0; i < VDIN_DMA_SLOTS; i++) {
-		struct t7_vdin_slot *slot = &vdin->slots[i];
+		struct t7_vdin_slot *slot = &slots[i];
 
 		if (slot->state == VDIN_SLOT_READY &&
 		    (!oldest || (s32)(slot->sequence - oldest->sequence) < 0))
@@ -785,6 +772,17 @@ static struct t7_vdin_slot *t7_vdin_ring_take(struct t7_vdin *vdin)
 	}
 	if (oldest)
 		oldest->state = VDIN_SLOT_COPYING;
+	return oldest;
+}
+EXPORT_SYMBOL_IF_KUNIT(t7_vdin_take_ready);
+
+static struct t7_vdin_slot *t7_vdin_ring_take(struct t7_vdin *vdin)
+{
+	struct t7_vdin_slot *oldest;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vdin->irq_lock, flags);
+	oldest = t7_vdin_take_ready(vdin->slots);
 	spin_unlock_irqrestore(&vdin->irq_lock, flags);
 	return oldest;
 }
@@ -1740,7 +1738,7 @@ static void t7_vdin_free_frame(void *data)
 /* Both tables form one transaction. Never expose partially replaced LUTs to
  * the IRQ; malformed input leaves the previous curve completely intact.
  */
-static int t7_vdin_parse_hdr_curve(char *text, u32 *tables)
+VISIBLE_IF_KUNIT int t7_vdin_parse_hdr_curve(char *text, u32 *tables)
 {
 	char *token;
 	unsigned int i;
@@ -1761,6 +1759,7 @@ static int t7_vdin_parse_hdr_curve(char *text, u32 *tables)
 	}
 	return text || tables[149] || tables[297] != 4095 ? -EINVAL : 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(t7_vdin_parse_hdr_curve);
 
 static ssize_t hdr_curve_store(struct device *dev, struct device_attribute *attr,
 			       const char *buffer, size_t count)
