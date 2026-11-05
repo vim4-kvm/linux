@@ -10,6 +10,59 @@ HERE = Path(__file__).resolve().parent
 
 
 class MJPEGTests(unittest.TestCase):
+    def test_jpeg_interface_maps_shared_engines_and_cleans_partial_links(self):
+        code = function(HERE / 'aml_vdec_drv.c', 'aml_vdec_register_jpeg_interface')
+        run_c(COMMON + """
+#define MEDIA_LNK_FL_IMMUTABLE 1
+#define MEDIA_LNK_FL_ENABLED 2
+#define MEDIA_PAD_FL_SINK 1
+#define MEDIA_INTF_T_V4L_VIDEO 1
+#define VIDEO_MAJOR 81
+#define IS_ERR(p) ((intptr_t)(p) < 0)
+#define PTR_ERR(p) ((int)(intptr_t)(p))
+struct media_entity { int id; };
+struct media_pad { struct media_entity *entity; };
+struct media_intf_devnode { int intf; };
+struct video_device { struct media_entity entity; int minor; };
+struct aml_vdec_dev {
+    struct video_device *vfd, *jpeg_vfd;
+    struct media_intf_devnode *jpeg_intf;
+    int mdev;
+};
+static struct media_entity processor = { 2 }, sink = { 3 };
+static struct media_pad proc_pad = { &processor }, sink_pad = { &sink };
+static struct media_intf_devnode intf;
+static unsigned int links, calls, fail_at, removed;
+static struct media_pad *media_entity_remote_pad_unique(struct media_entity *e, unsigned int type)
+{ assert(type == MEDIA_PAD_FL_SINK); return e->id == 1 ? &proc_pad : &sink_pad; }
+static struct media_intf_devnode *media_devnode_create(int *d, int type, int flags, int major, int minor)
+{ assert(major == 81 && minor == 7); return &intf; }
+static void *media_create_intf_link(struct media_entity *e, int *i, u32 flags)
+{
+    calls++;
+    assert(i == &intf.intf && flags == 3 && e->id == (calls == 1 ? 1 : 3));
+    if (calls == fail_at) return NULL;
+    links++; return &intf;
+}
+static void media_devnode_remove(struct media_intf_devnode *i)
+{ assert(i == &intf); links = 0; removed++; }
+""" + code + """
+int main(void)
+{
+    struct video_device video = { .entity.id = 1 }, jpeg = { .minor = 7 };
+    struct aml_vdec_dev dev = { .vfd = &video, .jpeg_vfd = &jpeg };
+    for (fail_at = 1; fail_at <= 2; fail_at++) {
+        calls = 0;
+        assert(aml_vdec_register_jpeg_interface(&dev) == -ENOMEM);
+        assert(!links && !dev.jpeg_intf && removed == fail_at);
+    }
+    calls = 0; fail_at = 0;
+    assert(!aml_vdec_register_jpeg_interface(&dev));
+    assert(links == 2 && dev.jpeg_intf == &intf);
+    return 0;
+}
+""")
+
     def test_drain_preserves_last_frame_and_empties_only_sentinels(self):
         code = '\n'.join(function(HERE / 'aml_vdec.c', name) for name in
                          ('vdec_mark_last', 'vdec_try_decoder_cmd', 'vdec_decoder_cmd'))

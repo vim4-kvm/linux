@@ -276,33 +276,57 @@ static const struct media_device_ops aml_m2m_media_ops = {
 	.req_queue = v4l2_m2m_request_queue,
 };
 
+static int aml_vdec_register_jpeg_interface(struct aml_vdec_dev *dev)
+{
+	struct media_intf_devnode *intf;
+	struct media_pad *processor, *sink;
+	u32 flags = MEDIA_LNK_FL_IMMUTABLE | MEDIA_LNK_FL_ENABLED;
+
+	/* Both video interfaces use the same DMA engines and decoder scheduler. */
+	processor = media_entity_remote_pad_unique(&dev->vfd->entity, MEDIA_PAD_FL_SINK);
+	if (IS_ERR(processor))
+		return PTR_ERR(processor);
+	sink = media_entity_remote_pad_unique(processor->entity, MEDIA_PAD_FL_SINK);
+	if (IS_ERR(sink))
+		return PTR_ERR(sink);
+	intf = media_devnode_create(&dev->mdev, MEDIA_INTF_T_V4L_VIDEO, 0,
+				    VIDEO_MAJOR, dev->jpeg_vfd->minor);
+	if (!intf)
+		return -ENOMEM;
+	if (!media_create_intf_link(&dev->vfd->entity, &intf->intf, flags) ||
+	    !media_create_intf_link(sink->entity, &intf->intf, flags)) {
+		media_devnode_remove(intf);
+		return -ENOMEM;
+	}
+	dev->jpeg_intf = intf;
+	return 0;
+}
+
 static int aml_vdec_register_jpeg(struct aml_vdec_dev *dev)
 {
 	struct video_device *vfd;
 	int ret;
 
 	/* JPEG has a different V4L2 codec contract and does not use media requests. */
-	ret = v4l2_device_register(&dev->plat_dev->dev, &dev->jpeg_v4l2_dev);
-	if (ret)
-		return ret;
 	vfd = video_device_alloc();
-	if (!vfd) {
-		ret = -ENOMEM;
-		goto unregister;
-	}
+	if (!vfd)
+		return -ENOMEM;
 	*vfd = dec_dev;
 	strscpy(vfd->name, "aml_jpeg_decoder", sizeof(vfd->name));
-	vfd->v4l2_dev = &dev->jpeg_v4l2_dev;
+	vfd->v4l2_dev = &dev->v4l2_dev;
 	vfd->lock = &dev->dev_mutex;
 	video_set_drvdata(vfd, dev);
 	dev->jpeg_vfd = vfd;
 	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
-	if (!ret)
-		return 0;
+	if (!ret) {
+		ret = aml_vdec_register_jpeg_interface(dev);
+		if (!ret)
+			return 0;
+		video_unregister_device(vfd);
+	} else {
+		video_device_release(vfd);
+	}
 	dev->jpeg_vfd = NULL;
-	video_device_release(vfd);
-unregister:
-	v4l2_device_unregister(&dev->jpeg_v4l2_dev);
 	return ret;
 }
 
@@ -453,8 +477,8 @@ static void aml_vdec_drv_remove(struct platform_device *pdev)
 	}
 
 	if (dev->jpeg_vfd) {
+		media_devnode_remove(dev->jpeg_intf);
 		video_unregister_device(dev->jpeg_vfd);
-		v4l2_device_unregister(&dev->jpeg_v4l2_dev);
 	}
 	if (media_devnode_is_registered(dev->mdev.devnode)) {
 		media_device_unregister(&dev->mdev);
