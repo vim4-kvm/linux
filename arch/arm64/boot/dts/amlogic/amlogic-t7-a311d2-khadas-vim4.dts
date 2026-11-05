@@ -541,68 +541,572 @@
 
 &a53_thermal {
 	trips {
-		a53_active: a53-active {
-			temperature = <50000>; /* millicelsius */
-			hysteresis = <2000>; /* millicelsius */
+		a53_fan_05: fan-trip-05 {
+			temperature = <45000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_10: fan-trip-10 {
+			temperature = <47500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_15: fan-trip-15 {
+			temperature = <50000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_20: fan-trip-20 {
+			temperature = <52500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_25: fan-trip-25 {
+			temperature = <55000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_30: fan-trip-30 {
+			temperature = <57500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_35: fan-trip-35 {
+			temperature = <60000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_43: fan-trip-43 {
+			temperature = <65000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_52: fan-trip-52 {
+			temperature = <70000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_61: fan-trip-61 {
+			temperature = <75000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_70: fan-trip-70 {
+			temperature = <80000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_77: fan-trip-77 {
+			temperature = <85000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_85: fan-trip-85 {
+			temperature = <90000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_92: fan-trip-92 {
+			temperature = <95000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a53_fan_100: fan-trip-100 {
+			temperature = <100000>;
+			hysteresis = <0>;
 			type = "active";
 		};
 	};
 
 	cooling-maps {
-		map {
-			trip = <&a53_active>;
-			cooling-device = <&khadas_mcu 30 100>;
+		map-fan-05 {
+			trip = <&a53_fan_05>;
+			cooling-device = <&khadas_mcu 5 5>;
+		};
+		map-fan-10 {
+			trip = <&a53_fan_10>;
+			cooling-device = <&khadas_mcu 10 10>;
+		};
+		map-fan-15 {
+			trip = <&a53_fan_15>;
+			cooling-device = <&khadas_mcu 15 15>;
+		};
+		map-fan-20 {
+			trip = <&a53_fan_20>;
+			cooling-device = <&khadas_mcu 20 20>;
+		};
+		map-fan-25 {
+			trip = <&a53_fan_25>;
+			cooling-device = <&khadas_mcu 25 25>;
+		};
+		map-fan-30 {
+			trip = <&a53_fan_30>;
+			cooling-device = <&khadas_mcu 30 30>;
+		};
+		map-fan-35 {
+			trip = <&a53_fan_35>;
+			cooling-device = <&khadas_mcu 35 35>;
+		};
+		map-fan-43 {
+			trip = <&a53_fan_43>;
+			cooling-device = <&khadas_mcu 43 43>;
+		};
+		map-fan-52 {
+			trip = <&a53_fan_52>;
+			cooling-device = <&khadas_mcu 52 52>;
+		};
+		map-fan-61 {
+			trip = <&a53_fan_61>;
+			cooling-device = <&khadas_mcu 61 61>;
+		};
+		map-fan-70 {
+			trip = <&a53_fan_70>;
+			cooling-device = <&khadas_mcu 70 70>;
+		};
+		map-fan-77 {
+			trip = <&a53_fan_77>;
+			cooling-device = <&khadas_mcu 77 77>;
+		};
+		map-fan-85 {
+			trip = <&a53_fan_85>;
+			cooling-device = <&khadas_mcu 85 85>;
+		};
+		map-fan-92 {
+			trip = <&a53_fan_92>;
+			cooling-device = <&khadas_mcu 92 92>;
+		};
+		map-fan-100 {
+			trip = <&a53_fan_100>;
+			cooling-device = <&khadas_mcu 100 100>;
 		};
 	};
 };
 
 &a73_thermal {
 	trips {
-		a73_active: a73-active {
-			temperature = <50000>; /* millicelsius */
-			hysteresis = <2000>; /* millicelsius */
+		a73_fan_05: fan-trip-05 {
+			temperature = <45000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_10: fan-trip-10 {
+			temperature = <47500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_15: fan-trip-15 {
+			temperature = <50000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_20: fan-trip-20 {
+			temperature = <52500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_25: fan-trip-25 {
+			temperature = <55000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_30: fan-trip-30 {
+			temperature = <57500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_35: fan-trip-35 {
+			temperature = <60000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_43: fan-trip-43 {
+			temperature = <65000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_52: fan-trip-52 {
+			temperature = <70000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_61: fan-trip-61 {
+			temperature = <75000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_70: fan-trip-70 {
+			temperature = <80000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_77: fan-trip-77 {
+			temperature = <85000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_85: fan-trip-85 {
+			temperature = <90000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_92: fan-trip-92 {
+			temperature = <95000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		a73_fan_100: fan-trip-100 {
+			temperature = <100000>;
+			hysteresis = <0>;
 			type = "active";
 		};
 	};
 
 	cooling-maps {
-		map {
-			trip = <&a73_active>;
-			cooling-device = <&khadas_mcu 30 100>;
+		map-fan-05 {
+			trip = <&a73_fan_05>;
+			cooling-device = <&khadas_mcu 5 5>;
+		};
+		map-fan-10 {
+			trip = <&a73_fan_10>;
+			cooling-device = <&khadas_mcu 10 10>;
+		};
+		map-fan-15 {
+			trip = <&a73_fan_15>;
+			cooling-device = <&khadas_mcu 15 15>;
+		};
+		map-fan-20 {
+			trip = <&a73_fan_20>;
+			cooling-device = <&khadas_mcu 20 20>;
+		};
+		map-fan-25 {
+			trip = <&a73_fan_25>;
+			cooling-device = <&khadas_mcu 25 25>;
+		};
+		map-fan-30 {
+			trip = <&a73_fan_30>;
+			cooling-device = <&khadas_mcu 30 30>;
+		};
+		map-fan-35 {
+			trip = <&a73_fan_35>;
+			cooling-device = <&khadas_mcu 35 35>;
+		};
+		map-fan-43 {
+			trip = <&a73_fan_43>;
+			cooling-device = <&khadas_mcu 43 43>;
+		};
+		map-fan-52 {
+			trip = <&a73_fan_52>;
+			cooling-device = <&khadas_mcu 52 52>;
+		};
+		map-fan-61 {
+			trip = <&a73_fan_61>;
+			cooling-device = <&khadas_mcu 61 61>;
+		};
+		map-fan-70 {
+			trip = <&a73_fan_70>;
+			cooling-device = <&khadas_mcu 70 70>;
+		};
+		map-fan-77 {
+			trip = <&a73_fan_77>;
+			cooling-device = <&khadas_mcu 77 77>;
+		};
+		map-fan-85 {
+			trip = <&a73_fan_85>;
+			cooling-device = <&khadas_mcu 85 85>;
+		};
+		map-fan-92 {
+			trip = <&a73_fan_92>;
+			cooling-device = <&khadas_mcu 92 92>;
+		};
+		map-fan-100 {
+			trip = <&a73_fan_100>;
+			cooling-device = <&khadas_mcu 100 100>;
 		};
 	};
 };
 
 &gpu_thermal {
 	trips {
-		gpu_active: gpu-active {
-			temperature = <50000>; /* millicelsius */
-			hysteresis = <2000>; /* millicelsius */
+		gpu_fan_05: fan-trip-05 {
+			temperature = <45000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_10: fan-trip-10 {
+			temperature = <47500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_15: fan-trip-15 {
+			temperature = <50000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_20: fan-trip-20 {
+			temperature = <52500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_25: fan-trip-25 {
+			temperature = <55000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_30: fan-trip-30 {
+			temperature = <57500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_35: fan-trip-35 {
+			temperature = <60000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_43: fan-trip-43 {
+			temperature = <65000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_52: fan-trip-52 {
+			temperature = <70000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_61: fan-trip-61 {
+			temperature = <75000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_70: fan-trip-70 {
+			temperature = <80000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_77: fan-trip-77 {
+			temperature = <85000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_85: fan-trip-85 {
+			temperature = <90000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_92: fan-trip-92 {
+			temperature = <95000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		gpu_fan_100: fan-trip-100 {
+			temperature = <100000>;
+			hysteresis = <0>;
 			type = "active";
 		};
 	};
 
 	cooling-maps {
-		map {
-			trip = <&gpu_active>;
-			cooling-device = <&khadas_mcu 30 100>;
+		map-fan-05 {
+			trip = <&gpu_fan_05>;
+			cooling-device = <&khadas_mcu 5 5>;
+		};
+		map-fan-10 {
+			trip = <&gpu_fan_10>;
+			cooling-device = <&khadas_mcu 10 10>;
+		};
+		map-fan-15 {
+			trip = <&gpu_fan_15>;
+			cooling-device = <&khadas_mcu 15 15>;
+		};
+		map-fan-20 {
+			trip = <&gpu_fan_20>;
+			cooling-device = <&khadas_mcu 20 20>;
+		};
+		map-fan-25 {
+			trip = <&gpu_fan_25>;
+			cooling-device = <&khadas_mcu 25 25>;
+		};
+		map-fan-30 {
+			trip = <&gpu_fan_30>;
+			cooling-device = <&khadas_mcu 30 30>;
+		};
+		map-fan-35 {
+			trip = <&gpu_fan_35>;
+			cooling-device = <&khadas_mcu 35 35>;
+		};
+		map-fan-43 {
+			trip = <&gpu_fan_43>;
+			cooling-device = <&khadas_mcu 43 43>;
+		};
+		map-fan-52 {
+			trip = <&gpu_fan_52>;
+			cooling-device = <&khadas_mcu 52 52>;
+		};
+		map-fan-61 {
+			trip = <&gpu_fan_61>;
+			cooling-device = <&khadas_mcu 61 61>;
+		};
+		map-fan-70 {
+			trip = <&gpu_fan_70>;
+			cooling-device = <&khadas_mcu 70 70>;
+		};
+		map-fan-77 {
+			trip = <&gpu_fan_77>;
+			cooling-device = <&khadas_mcu 77 77>;
+		};
+		map-fan-85 {
+			trip = <&gpu_fan_85>;
+			cooling-device = <&khadas_mcu 85 85>;
+		};
+		map-fan-92 {
+			trip = <&gpu_fan_92>;
+			cooling-device = <&khadas_mcu 92 92>;
+		};
+		map-fan-100 {
+			trip = <&gpu_fan_100>;
+			cooling-device = <&khadas_mcu 100 100>;
 		};
 	};
 };
 
 &hevc_thermal {
 	trips {
-		hevc_active: hevc-active {
-			temperature = <50000>; /* millicelsius */
-			hysteresis = <2000>; /* millicelsius */
+		hevc_fan_05: fan-trip-05 {
+			temperature = <45000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_10: fan-trip-10 {
+			temperature = <47500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_15: fan-trip-15 {
+			temperature = <50000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_20: fan-trip-20 {
+			temperature = <52500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_25: fan-trip-25 {
+			temperature = <55000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_30: fan-trip-30 {
+			temperature = <57500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_35: fan-trip-35 {
+			temperature = <60000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_43: fan-trip-43 {
+			temperature = <65000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_52: fan-trip-52 {
+			temperature = <70000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_61: fan-trip-61 {
+			temperature = <75000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_70: fan-trip-70 {
+			temperature = <80000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_77: fan-trip-77 {
+			temperature = <85000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_85: fan-trip-85 {
+			temperature = <90000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_92: fan-trip-92 {
+			temperature = <95000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		hevc_fan_100: fan-trip-100 {
+			temperature = <100000>;
+			hysteresis = <0>;
 			type = "active";
 		};
 	};
 
 	cooling-maps {
-		map {
-			trip = <&hevc_active>;
-			cooling-device = <&khadas_mcu 30 100>;
+		map-fan-05 {
+			trip = <&hevc_fan_05>;
+			cooling-device = <&khadas_mcu 5 5>;
+		};
+		map-fan-10 {
+			trip = <&hevc_fan_10>;
+			cooling-device = <&khadas_mcu 10 10>;
+		};
+		map-fan-15 {
+			trip = <&hevc_fan_15>;
+			cooling-device = <&khadas_mcu 15 15>;
+		};
+		map-fan-20 {
+			trip = <&hevc_fan_20>;
+			cooling-device = <&khadas_mcu 20 20>;
+		};
+		map-fan-25 {
+			trip = <&hevc_fan_25>;
+			cooling-device = <&khadas_mcu 25 25>;
+		};
+		map-fan-30 {
+			trip = <&hevc_fan_30>;
+			cooling-device = <&khadas_mcu 30 30>;
+		};
+		map-fan-35 {
+			trip = <&hevc_fan_35>;
+			cooling-device = <&khadas_mcu 35 35>;
+		};
+		map-fan-43 {
+			trip = <&hevc_fan_43>;
+			cooling-device = <&khadas_mcu 43 43>;
+		};
+		map-fan-52 {
+			trip = <&hevc_fan_52>;
+			cooling-device = <&khadas_mcu 52 52>;
+		};
+		map-fan-61 {
+			trip = <&hevc_fan_61>;
+			cooling-device = <&khadas_mcu 61 61>;
+		};
+		map-fan-70 {
+			trip = <&hevc_fan_70>;
+			cooling-device = <&khadas_mcu 70 70>;
+		};
+		map-fan-77 {
+			trip = <&hevc_fan_77>;
+			cooling-device = <&khadas_mcu 77 77>;
+		};
+		map-fan-85 {
+			trip = <&hevc_fan_85>;
+			cooling-device = <&khadas_mcu 85 85>;
+		};
+		map-fan-92 {
+			trip = <&hevc_fan_92>;
+			cooling-device = <&khadas_mcu 92 92>;
+		};
+		map-fan-100 {
+			trip = <&hevc_fan_100>;
+			cooling-device = <&khadas_mcu 100 100>;
 		};
 	};
 };
@@ -707,17 +1211,143 @@
 
 &nna_thermal {
 	trips {
-		nna_active: nna-active {
-			temperature = <50000>; /* millicelsius */
-			hysteresis = <2000>; /* millicelsius */
+		nna_fan_05: fan-trip-05 {
+			temperature = <45000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_10: fan-trip-10 {
+			temperature = <47500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_15: fan-trip-15 {
+			temperature = <50000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_20: fan-trip-20 {
+			temperature = <52500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_25: fan-trip-25 {
+			temperature = <55000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_30: fan-trip-30 {
+			temperature = <57500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_35: fan-trip-35 {
+			temperature = <60000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_43: fan-trip-43 {
+			temperature = <65000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_52: fan-trip-52 {
+			temperature = <70000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_61: fan-trip-61 {
+			temperature = <75000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_70: fan-trip-70 {
+			temperature = <80000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_77: fan-trip-77 {
+			temperature = <85000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_85: fan-trip-85 {
+			temperature = <90000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_92: fan-trip-92 {
+			temperature = <95000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		nna_fan_100: fan-trip-100 {
+			temperature = <100000>;
+			hysteresis = <0>;
 			type = "active";
 		};
 	};
 
 	cooling-maps {
-		map {
-			trip = <&nna_active>;
-			cooling-device = <&khadas_mcu 30 100>;
+		map-fan-05 {
+			trip = <&nna_fan_05>;
+			cooling-device = <&khadas_mcu 5 5>;
+		};
+		map-fan-10 {
+			trip = <&nna_fan_10>;
+			cooling-device = <&khadas_mcu 10 10>;
+		};
+		map-fan-15 {
+			trip = <&nna_fan_15>;
+			cooling-device = <&khadas_mcu 15 15>;
+		};
+		map-fan-20 {
+			trip = <&nna_fan_20>;
+			cooling-device = <&khadas_mcu 20 20>;
+		};
+		map-fan-25 {
+			trip = <&nna_fan_25>;
+			cooling-device = <&khadas_mcu 25 25>;
+		};
+		map-fan-30 {
+			trip = <&nna_fan_30>;
+			cooling-device = <&khadas_mcu 30 30>;
+		};
+		map-fan-35 {
+			trip = <&nna_fan_35>;
+			cooling-device = <&khadas_mcu 35 35>;
+		};
+		map-fan-43 {
+			trip = <&nna_fan_43>;
+			cooling-device = <&khadas_mcu 43 43>;
+		};
+		map-fan-52 {
+			trip = <&nna_fan_52>;
+			cooling-device = <&khadas_mcu 52 52>;
+		};
+		map-fan-61 {
+			trip = <&nna_fan_61>;
+			cooling-device = <&khadas_mcu 61 61>;
+		};
+		map-fan-70 {
+			trip = <&nna_fan_70>;
+			cooling-device = <&khadas_mcu 70 70>;
+		};
+		map-fan-77 {
+			trip = <&nna_fan_77>;
+			cooling-device = <&khadas_mcu 77 77>;
+		};
+		map-fan-85 {
+			trip = <&nna_fan_85>;
+			cooling-device = <&khadas_mcu 85 85>;
+		};
+		map-fan-92 {
+			trip = <&nna_fan_92>;
+			cooling-device = <&khadas_mcu 92 92>;
+		};
+		map-fan-100 {
+			trip = <&nna_fan_100>;
+			cooling-device = <&khadas_mcu 100 100>;
 		};
 	};
 };
@@ -893,17 +1523,143 @@
 
 &vpu_thermal {
 	trips {
-		vpu_active: vpu-active {
-			temperature = <50000>; /* millicelsius */
-			hysteresis = <2000>; /* millicelsius */
+		vpu_fan_05: fan-trip-05 {
+			temperature = <45000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_10: fan-trip-10 {
+			temperature = <47500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_15: fan-trip-15 {
+			temperature = <50000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_20: fan-trip-20 {
+			temperature = <52500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_25: fan-trip-25 {
+			temperature = <55000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_30: fan-trip-30 {
+			temperature = <57500>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_35: fan-trip-35 {
+			temperature = <60000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_43: fan-trip-43 {
+			temperature = <65000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_52: fan-trip-52 {
+			temperature = <70000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_61: fan-trip-61 {
+			temperature = <75000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_70: fan-trip-70 {
+			temperature = <80000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_77: fan-trip-77 {
+			temperature = <85000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_85: fan-trip-85 {
+			temperature = <90000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_92: fan-trip-92 {
+			temperature = <95000>;
+			hysteresis = <0>;
+			type = "active";
+		};
+		vpu_fan_100: fan-trip-100 {
+			temperature = <100000>;
+			hysteresis = <0>;
 			type = "active";
 		};
 	};
 
 	cooling-maps {
-		map {
-			trip = <&vpu_active>;
-			cooling-device = <&khadas_mcu 30 100>;
+		map-fan-05 {
+			trip = <&vpu_fan_05>;
+			cooling-device = <&khadas_mcu 5 5>;
+		};
+		map-fan-10 {
+			trip = <&vpu_fan_10>;
+			cooling-device = <&khadas_mcu 10 10>;
+		};
+		map-fan-15 {
+			trip = <&vpu_fan_15>;
+			cooling-device = <&khadas_mcu 15 15>;
+		};
+		map-fan-20 {
+			trip = <&vpu_fan_20>;
+			cooling-device = <&khadas_mcu 20 20>;
+		};
+		map-fan-25 {
+			trip = <&vpu_fan_25>;
+			cooling-device = <&khadas_mcu 25 25>;
+		};
+		map-fan-30 {
+			trip = <&vpu_fan_30>;
+			cooling-device = <&khadas_mcu 30 30>;
+		};
+		map-fan-35 {
+			trip = <&vpu_fan_35>;
+			cooling-device = <&khadas_mcu 35 35>;
+		};
+		map-fan-43 {
+			trip = <&vpu_fan_43>;
+			cooling-device = <&khadas_mcu 43 43>;
+		};
+		map-fan-52 {
+			trip = <&vpu_fan_52>;
+			cooling-device = <&khadas_mcu 52 52>;
+		};
+		map-fan-61 {
+			trip = <&vpu_fan_61>;
+			cooling-device = <&khadas_mcu 61 61>;
+		};
+		map-fan-70 {
+			trip = <&vpu_fan_70>;
+			cooling-device = <&khadas_mcu 70 70>;
+		};
+		map-fan-77 {
+			trip = <&vpu_fan_77>;
+			cooling-device = <&khadas_mcu 77 77>;
+		};
+		map-fan-85 {
+			trip = <&vpu_fan_85>;
+			cooling-device = <&khadas_mcu 85 85>;
+		};
+		map-fan-92 {
+			trip = <&vpu_fan_92>;
+			cooling-device = <&khadas_mcu 92 92>;
+		};
+		map-fan-100 {
+			trip = <&vpu_fan_100>;
+			cooling-device = <&khadas_mcu 100 100>;
 		};
 	};
 };
