@@ -59,9 +59,11 @@ void dos_enable(struct aml_vdec_hw *hw)
 	regmap_update_bits(hw->map[DOS_BUS], MDEC_PIC_DC_CTRL, (1 << 31), 0);
 }
 
-int aml_vdec_reset_core(struct aml_vdec_hw *hw)
+int aml_vdec_reset_core(struct aml_vdec_hw *hw, unsigned int codec)
 {
 	unsigned int mask = BIT(21);
+	unsigned int reset = BIT(3) | BIT(4) | BIT(5) | BIT(7) | BIT(8) | BIT(9);
+	unsigned int power = 0;
 	unsigned int value;
 	unsigned int i;
 	int ret;
@@ -81,14 +83,24 @@ int aml_vdec_reset_core(struct aml_vdec_hw *hw)
 		regmap_update_bits(hw->map[DMC_BUS], 0x0, mask, 0);
 		usleep_range(60, 70);
 	}
-	ret = regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0,
-			   (1 << 3) | (1 << 4) | (1 << 5) | (1 << 7) |
-			   (1 << 8) | (1 << 9));
+	if (codec == CODEC_TYPE_MPEG2) {
+		/* MPEG-2 starts without saved IQ/IDCT or microcontroller state. */
+		ret = regmap_read(hw->map[DOS_BUS], POWER_CTL_VLD, &power);
+		if (ret)
+			return ret;
+		reset |= GENMASK(31, 4);
+	}
+	ret = regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, reset);
 	if (ret)
 		return ret;
 	ret = regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, 0);
 	if (ret)
 		return ret;
+	if (codec == CODEC_TYPE_MPEG2) {
+		ret = regmap_write(hw->map[DOS_BUS], POWER_CTL_VLD, power);
+		if (ret)
+			return ret;
+	}
 	ret = regmap_update_bits(hw->map[DOS_BUS], VDEC_ASSIST_MMC_CTRL1, 1 << 3, 0);
 	if (ret)
 		return ret;
