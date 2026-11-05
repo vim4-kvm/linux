@@ -11,6 +11,101 @@ HERE = Path(__file__).resolve().parent
 
 
 class HEVCParameterTests(unittest.TestCase):
+    def test_reordered_frames_keep_their_storage_until_output_and_drain(self):
+        source = (HERE / 'hevc.c').read_text()
+        picture = re.search(r'struct h265_pic \{.*?\n\};', source, re.S).group()
+        functions = '\n'.join(function(HERE / 'hevc.c', name) for name in (
+            'h265_free_slot', 'h265_next_output', 'h265_output', 'h265_flush_pending'))
+        run_c(COMMON + r'''
+#define H265_SLOTS 18
+#define V4L2_BUF_FLAG_LAST 1
+typedef uint64_t dma_addr_t;
+enum vb2_buffer_state { VB2_BUF_STATE_DONE, VB2_BUF_STATE_ERROR };
+struct vb2_v4l2_buffer { u32 sequence, flags, timestamp; };
+''' + picture + r'''
+struct aml_hevc_ctx {
+    struct h265_pic pic[H265_SLOTS];
+    int nslots;
+    u32 sequence;
+    unsigned int pending;
+};
+static u32 timestamps[18], flags[18];
+static unsigned int count;
+static enum vb2_buffer_state expected;
+static void v4l2_m2m_buf_done(struct vb2_v4l2_buffer *vb, enum vb2_buffer_state state)
+{
+    assert(state == expected && vb->sequence == count);
+    timestamps[count] = vb->timestamp; flags[count++] = vb->flags;
+}
+''' + functions + r'''
+int main(void)
+{
+    struct aml_hevc_ctx h = { .nslots = 5, .pending = 5 };
+    const int pocs[] = { 0, 4, 2, 1, 0 };
+    struct vb2_v4l2_buffer frames[5] = { 0 };
+    for (unsigned int i = 0; i < 5; i++) {
+        frames[i].timestamp = 100 + i;
+        h.pic[i].valid = true;
+        h.pic[i].poc = pocs[i];
+        h.pic[i].epoch = i == 4 ? 2 : 1;
+        h.pic[i].output = &frames[i];
+    }
+    assert(h265_free_slot(&h) == -ENOBUFS); /* Non-reference output is still held. */
+    h.pic[0].referenced = true;
+    assert(h265_next_output(&h) == 0);
+    h265_output(&h, 0, VB2_BUF_STATE_DONE, false);
+    assert(h265_free_slot(&h) == -ENOBUFS); /* Displayed reference is still held. */
+    h.pic[0].referenced = false;
+    assert(h265_free_slot(&h) == 0);
+    h.nslots = 2; /* A new smaller SPS must not hide old pending pictures. */
+    h265_flush_pending(&h, VB2_BUF_STATE_DONE, true);
+    assert(count == 5 && !h.pending && h265_next_output(&h) == -1);
+    assert(timestamps[0] == 100 && timestamps[1] == 103 && timestamps[2] == 102);
+    assert(timestamps[3] == 101 && timestamps[4] == 104);
+    for (unsigned int i = 0; i < 5; i++) assert(flags[i] == (i == 4));
+    h265_flush_pending(&h, VB2_BUF_STATE_DONE, true);
+    assert(count == 5);
+    frames[0].flags = 0; h.pic[0].output = &frames[0]; h.pending = 1;
+    expected = VB2_BUF_STATE_ERROR;
+    h265_flush_pending(&h, VB2_BUF_STATE_ERROR, false);
+    assert(count == 6 && !flags[5]);
+    return 0;
+}
+''')
+
+    def test_capture_planes_cover_sao_burst_lengths(self):
+        run_c(COMMON + r'''
+#include <linux/videodev2.h>
+#define H265_MAX_DIM 4096
+#define H265_MAX_HEIGHT 2304
+#define SZ_64K 65536U
+#define ALIGN(v, a) (((v) + (a) - 1) / (a) * (a))
+#define clamp_t(t, v, lo, hi) ((v) < (lo) ? (lo) : (v) > (hi) ? (hi) : (v))
+static void v4l2_fill_pixfmt_mp(struct v4l2_pix_format_mplane *f, u32 fourcc, u32 w, u32 h)
+{
+    f->pixelformat = fourcc; f->width = w; f->height = h; f->num_planes = 2;
+    f->plane_fmt[0].bytesperline = f->plane_fmt[1].bytesperline = w;
+}
+''' + function(HERE / 'hevc.c', 'h265_capture_format') + r'''
+int main(void)
+{
+    struct v4l2_pix_format_mplane f = { 0 };
+    const u32 sizes[][2] = { { 64, 64 }, { 256, 256 }, { 640, 368 },
+                             { 1920, 1080 }, { 4096, 2304 } };
+    for (unsigned int i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        h265_capture_format(&f, sizes[i][0], sizes[i][1]);
+        assert(f.num_planes == 2 && f.width >= sizes[i][0] && f.height >= sizes[i][1]);
+        assert(f.plane_fmt[0].sizeimage >= f.width * f.height);
+        assert(f.plane_fmt[1].sizeimage >= f.width * f.height / 2);
+        assert(!(f.plane_fmt[1].sizeimage % SZ_64K));
+        assert(f.plane_fmt[0].sizeimage == 2 * f.plane_fmt[1].sizeimage);
+    }
+    h265_capture_format(&f, 256, 256);
+    assert(f.plane_fmt[0].sizeimage == 131072 && f.plane_fmt[1].sizeimage == 65536);
+    return 0;
+}
+''')
+
     def test_job_synchronizes_stop_before_returning_dma_ownership(self):
         run_c(COMMON + r'''
 #include "hevc.h"
@@ -119,13 +214,15 @@ struct aml_hevc_ctx {
     struct h265_tile tile[H265_MAX_TILE_ROWS][H265_MAX_TILE_COLS];
     struct h265_pic pic[H265_SLOTS];
     int curr_poc, slice_type, cur, ref_num_l0, ref_num_l1;
+    int prev_tid0_poc, nal_type, temporal_id, poc_random_access;
     u32 pic_w, pic_h;
     int ref_poc_l0[H265_MAX_REF], ref_poc_l1[H265_MAX_REF];
 };
 ''' + function(HERE / 'hevc.c', 'h265_validate_params') + '\n' +
               function(HERE / 'hevc.c', 'h265_update_tiles') + '\n' +
               '\n'.join(function(HERE / 'hevc.c', name) for name in (
-                  'h265_pic_by_poc', 'h265_rps_poc', 'h265_ref_entry', 'h265_set_ref_lists')) + r'''
+                  'h265_pic_by_poc', 'h265_rps_poc', 'h265_ref_entry', 'h265_set_ref_lists',
+                  'h265_update_poc')) + r'''
 static struct aml_hevc_ctx h;
 static void reset(void)
 {
@@ -138,6 +235,26 @@ static void reset(void)
 }
 int main(void)
 {
+    reset(); h.temporal_id = 1; h.nal_type = 1; h.prev_tid0_poc = 1;
+    h.p[P_POC_LSB] = 255;
+    h265_update_poc(&h);
+    assert(h.curr_poc == -1 && h.prev_tid0_poc == -1);
+    h.p[P_POC_LSB] = 1;
+    h265_update_poc(&h);
+    assert(h.curr_poc == 1 && h.prev_tid0_poc == 1);
+    const unsigned int excluded[] = { 0, 2, 4, 6, 7, 8, 9 };
+    for (unsigned int i = 0; i < sizeof(excluded) / sizeof(excluded[0]); i++) {
+        h.nal_type = excluded[i]; h.p[P_POC_LSB] = 3;
+        h265_update_poc(&h);
+        assert(h.curr_poc == 3 && h.prev_tid0_poc == 1);
+    }
+    h.nal_type = H265_NAL_CRA; h.poc_random_access = H265_MAX_INT;
+    h.p[P_POC_LSB] = 240;
+    h265_update_poc(&h);
+    assert(h.curr_poc == 240 && h.prev_tid0_poc == 240);
+    h.nal_type = H265_NAL_IDR_N_LP;
+    h265_update_poc(&h);
+    assert(!h.curr_poc && !h.prev_tid0_poc);
     reset(); assert(!h265_validate_params(h.p));
     h.p[P_BIT_DEPTH] = 0x22;
     assert(h265_validate_params(h.p) == -EOPNOTSUPP);
@@ -167,7 +284,7 @@ int main(void)
     assert(h265_validate_params(h.p) == -EINVAL);
     reset(); h.p[P_TILES_ENABLED_FLAG] = 1; h.p[P_NUM_TILE_ROWS_MINUS1] = 9;
     assert(h265_validate_params(h.p) == -EOPNOTSUPP);
-    reset(); h.p[P_PIC_WIDTH] = h.p[P_PIC_HEIGHT] = 4096;
+    reset(); h.p[P_PIC_WIDTH] = 4096; h.p[P_PIC_HEIGHT] = 2304;
     h.p[P_LOG2_DIFF_MAX_MIN_CB_SIZE] = 1;
     h.p[P_TILES_ENABLED_FLAG] = 3; h.p[P_NUM_TILE_COLUMNS_MINUS1] = 9;
     assert(h265_validate_params(h.p) == -EOPNOTSUPP);

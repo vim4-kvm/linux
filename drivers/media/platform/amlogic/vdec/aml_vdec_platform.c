@@ -8,6 +8,7 @@
 #include "h264.h"
 #include "mpeg12.h"
 #include "mjpeg.h"
+#include "hevc.h"
 
 #define VIDEO_DEC_H264  "s4_h264_multi.bin"
 
@@ -67,6 +68,15 @@ static struct aml_video_fmt aml_s4_video_formats[] = {
 };
 
 static struct aml_video_fmt aml_t7_video_formats[] = {
+	{
+		.name = "HEVC",
+		.fourcc = V4L2_PIX_FMT_HEVC,
+		.type = AML_FMT_DEC,
+		.align = 64,
+		.codec_type = CODEC_TYPE_HEVC,
+		.num_planes = 1,
+		.stepwise = {64, 4096, 2, 64, 2304, 2},
+	},
 	{
 		.name = "MJPEG",
 		.fourcc = V4L2_PIX_FMT_MJPEG,
@@ -152,6 +162,10 @@ static struct aml_video_fmt aml_t7_video_formats[] = {
 };
 
 const struct aml_codec_ops aml_S4_dec_ops[] = {
+	[CODEC_TYPE_HEVC] = {
+		.init = aml_hevc_init,
+		.exit = aml_hevc_exit,
+	},
 	[CODEC_TYPE_MJPEG] = {
 		.init = aml_mjpeg_init,
 		.exit = aml_mjpeg_exit,
