@@ -723,8 +723,23 @@ VISIBLE_IF_KUNIT int h264_ref_list_size(struct aml_h264_ctx *h264_ctx, int cur_l
 }
 EXPORT_SYMBOL_IF_KUNIT(h264_ref_list_size);
 
+VISIBLE_IF_KUNIT int
+h264_reference_pic_num(struct aml_h264_ctx *h264, const struct h264_decode_buf_spec *ref)
+{
+	const struct v4l2_ctrl_h264_decode_params *decode = h264->ctrl_ref.decode;
+	bool bottom = decode->flags & V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD;
+	int frame_num = ref->dpb->frame_num;
+
+	if (!(decode->flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC))
+		return ref->dpb->pic_num;
+	if (!ref->long_term_flag && frame_num > decode->frame_num)
+		frame_num -= 1 << (h264->ctrl_ref.sps->log2_max_frame_num_minus4 + 4);
+	return 2 * frame_num + (bottom == (ref->fields == V4L2_H264_BOTTOM_FIELD_REF));
+}
+EXPORT_SYMBOL_IF_KUNIT(h264_reference_pic_num);
+
 static int get_refidx_by_picnum(struct aml_h264_ctx *h264_ctx, int pic_num,
-				int curr_list)
+				int curr_list, bool long_term)
 {
 	int i;
 	struct h264_decode_buf_spec *ref_list;
@@ -734,8 +749,9 @@ static int get_refidx_by_picnum(struct aml_h264_ctx *h264_ctx, int pic_num,
 	else
 		ref_list = &h264_ctx->ref_list1[0];
 
-	for (i = 0; ref_list[i].dpb; i++) {
-		if (pic_num == ref_list[i].dpb->pic_num)
+	for (i = 0; i < h264_ctx->list_size[curr_list] && ref_list[i].dpb; i++) {
+		if (ref_list[i].long_term_flag == long_term &&
+		    pic_num == h264_reference_pic_num(h264_ctx, &ref_list[i]))
 			return i;
 	}
 
@@ -753,8 +769,9 @@ static struct h264_decode_buf_spec *get_st_refpic_by_num(struct aml_h264_ctx *h2
 	else
 		ref_list = &h264_ctx->ref_list1_unreordered[0];
 
-	for (i = 0; ref_list[i].dpb; i++) {
-		if (pic_num == ref_list[i].dpb->pic_num && ref_list[i].long_term_flag == 0)
+	for (i = 0; i < V4L2_H264_REF_LIST_LEN && ref_list[i].dpb; i++) {
+		if (pic_num == h264_reference_pic_num(h264_ctx, &ref_list[i]) &&
+		    !ref_list[i].long_term_flag)
 			return &ref_list[i];
 	}
 
@@ -772,8 +789,9 @@ static struct h264_decode_buf_spec *get_lt_refpic_by_num(struct aml_h264_ctx *h2
 	else
 		ref_list = &h264_ctx->ref_list1_unreordered[0];
 
-	for (i = 0; ref_list[i].dpb; i++) {
-		if (pic_num == ref_list[i].dpb->pic_num && ref_list[i].long_term_flag == 1)
+	for (i = 0; i < V4L2_H264_REF_LIST_LEN && ref_list[i].dpb; i++) {
+		if (pic_num == h264_reference_pic_num(h264_ctx, &ref_list[i]) &&
+		    ref_list[i].long_term_flag)
 			return &ref_list[i];
 	}
 
@@ -805,7 +823,7 @@ VISIBLE_IF_KUNIT void h264_reorder_short_term(struct slice *curr_slice, int cur_
 		return;
 	}
 
-	if (*ref_idx_lx == get_refidx_by_picnum(h264_ctx, pic_num_lx, cur_list)) {
+	if (*ref_idx_lx == get_refidx_by_picnum(h264_ctx, pic_num_lx, cur_list, false)) {
 		dev_dbg(&ctx->dev->plat_dev->dev, "no need to move pic lx %d\n", *ref_idx_lx);
 		*ref_idx_lx = *ref_idx_lx + 1;
 		return;
@@ -823,7 +841,7 @@ VISIBLE_IF_KUNIT void h264_reorder_short_term(struct slice *curr_slice, int cur_
 	n_idx = *ref_idx_lx;
 	for (c_idx = *ref_idx_lx; c_idx <= num_ref_idx_lx_active; c_idx++) {
 		if (ref_list_reordered[c_idx].long_term_flag || !ref_list_reordered[c_idx].dpb ||
-		    ref_list_reordered[c_idx].dpb->pic_num != pic_num_lx)
+		    h264_reference_pic_num(h264_ctx, &ref_list_reordered[c_idx]) != pic_num_lx)
 			memcpy(&ref_list_reordered[n_idx++], &ref_list_reordered[c_idx],
 			       sizeof(struct h264_decode_buf_spec));
 	}
@@ -857,7 +875,7 @@ static void reorder_long_term(struct slice *curr_slice, int cur_list,
 		return;
 	}
 
-	if (*ref_idx_lx == get_refidx_by_picnum(h264_ctx, lt_pic_num, cur_list)) {
+	if (*ref_idx_lx == get_refidx_by_picnum(h264_ctx, lt_pic_num, cur_list, true)) {
 		dev_dbg(&ctx->dev->plat_dev->dev, "no need to move pic lx %d\n", *ref_idx_lx);
 		*ref_idx_lx = *ref_idx_lx + 1;
 		return;
@@ -875,7 +893,7 @@ static void reorder_long_term(struct slice *curr_slice, int cur_list,
 	/* Pointer dpb is NULL means this is a dummy frame store */
 	for (c_idx = *ref_idx_lx; c_idx <= num_ref_idx_lx_active; c_idx++) {
 		if (!ref_list[c_idx].long_term_flag || !ref_list[c_idx].dpb ||
-		    ref_list[c_idx].dpb->pic_num != lt_pic_num)
+		    h264_reference_pic_num(h264_ctx, &ref_list[c_idx]) != lt_pic_num)
 			memcpy(&ref_list[n_idx++], &ref_list[c_idx],
 			       sizeof(struct h264_decode_buf_spec));
 	}
@@ -937,6 +955,10 @@ static void reorder_pics(struct aml_h264_ctx *h264_ctx,
 	int nowarp_tmp = 0;
 	int i;
 
+	if (h264_ctx->ctrl_ref.decode->flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC) {
+		curr_pic_num = 2 * curr_pic_num + 1;
+		max_pic_num *= 2;
+	}
 	pic_num_lx_pred = curr_pic_num;
 	for (i = 0; i < REORDERING_COMMAND_MAX_SIZE && modification_of_pic_nums_idc[i] != 3; i++) {
 		if (modification_of_pic_nums_idc[i] > 3) {
@@ -951,7 +973,7 @@ static void reorder_pics(struct aml_h264_ctx *h264_ctx,
 			} else if (modification_of_pic_nums_idc[i] == 1) {
 				nowarp_tmp = pic_num_lx_pred + (abs_diff_pic_num_minus1[i] + 1);
 				pic_num_lx_nowarp = nowarp_tmp -
-					(nowarp_tmp > max_pic_num ? max_pic_num : 0);
+					(nowarp_tmp >= max_pic_num ? max_pic_num : 0);
 			}
 			pic_num_lx_pred = pic_num_lx_nowarp;
 			if (pic_num_lx_nowarp > curr_pic_num)
