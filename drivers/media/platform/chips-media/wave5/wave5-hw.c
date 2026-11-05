@@ -1575,9 +1575,7 @@ int wave5_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 	return ret;
 }
 
-#ifdef CONFIG_FAIL_FUNCTION
 ALLOW_ERROR_INJECTION(wave5_vpu_reset, ERRNO);
-#endif
 
 int wave5_vpu_dec_finish_seq(struct vpu_instance *inst, u32 *fail_res)
 {
@@ -2657,9 +2655,7 @@ int wave5_vpu_enc_finish_seq(struct vpu_instance *inst, u32 *fail_res)
 	return send_firmware_command(inst, W5_DESTROY_INSTANCE, true, NULL, fail_res);
 }
 
-#ifdef CONFIG_FAIL_FUNCTION
 ALLOW_ERROR_INJECTION(wave5_vpu_enc_finish_seq, ERRNO);
-#endif
 
 static bool wave5_vpu_enc_check_common_param_valid(struct vpu_instance *inst,
 						   struct enc_open_param *open_param)
