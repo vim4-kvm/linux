@@ -9,3 +9,5 @@ wave5-objs +=  	wave5-hw.o \
 		wave5-vpu-enc.o \
 		wave5-isolation.o \
 		wave5-helper.o
+
+obj-$(CONFIG_VIDEO_WAVE_VPU_KUNIT_TEST) += wave5_vui_kunit.o
