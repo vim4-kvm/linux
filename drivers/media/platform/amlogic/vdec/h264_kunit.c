@@ -378,7 +378,57 @@ static void colocated_mv_layout(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
+static void timestamp_picture_slots(struct kunit *test)
+{
+	struct aml_h264_ctx *h = test->priv;
+	struct v4l2_ctrl_h264_decode_params *decode;
+	int first_canvas, first_mv;
+
+	decode = kunit_kzalloc(test, sizeof(*decode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, decode);
+	h->ctrl_ref.decode = decode;
+	h->colocated_buf_num = 2;
+	decode->nal_ref_idc = 1;
+	decode->flags = V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC;
+	h->curr_spec.structure = H264_PICTURE_TOP;
+	h264_prune_picture_slots(h, 0, false);
+	KUNIT_ASSERT_EQ(test, h264_get_picture_slots(h, 0), 0);
+	first_canvas = h->curr_spec.canvas_pos;
+	first_mv = h->curr_spec.col_buf_index;
+
+	/* Zero is a valid timestamp; IDR's held second field must reuse it. */
+	h->curr_spec.structure = H264_PICTURE_BOTTOM;
+	h264_prune_picture_slots(h, 0, true);
+	KUNIT_ASSERT_EQ(test, h264_get_picture_slots(h, 0), 0);
+	KUNIT_EXPECT_EQ(test, h->curr_spec.canvas_pos, first_canvas);
+	KUNIT_EXPECT_EQ(test, h->curr_spec.col_buf_index, first_mv);
+	KUNIT_EXPECT_EQ(test, h->colocated_structure[first_mv], H264_PICTURE_TOP);
+
+	decode->flags = 0;
+	decode->dpb[0].flags = V4L2_H264_DPB_ENTRY_FLAG_ACTIVE;
+	decode->dpb[0].reference_ts = 0;
+	h264_prune_picture_slots(h, 1ULL << 40, false);
+	KUNIT_ASSERT_EQ(test, h264_get_picture_slots(h, 1ULL << 40), 0);
+	KUNIT_EXPECT_NE(test, h->curr_spec.canvas_pos, first_canvas);
+	KUNIT_EXPECT_NE(test, h->curr_spec.col_buf_index, first_mv);
+	KUNIT_EXPECT_EQ(test, h264_get_picture_slots(h, 17), -ENOSPC);
+
+	/* An inactive DPB entry cannot keep storage alive after FLUSH/reuse. */
+	decode->dpb[0].flags = 0;
+	h264_prune_picture_slots(h, 18, false);
+	KUNIT_EXPECT_EQ(test, h->canvas_pos_map, 0);
+	KUNIT_EXPECT_EQ(test, h->colocated_buf_map, 0);
+	KUNIT_ASSERT_EQ(test, h264_get_picture_slots(h, 18), 0);
+	decode->flags = V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC;
+	decode->dpb[0].flags = V4L2_H264_DPB_ENTRY_FLAG_ACTIVE;
+	decode->dpb[0].reference_ts = 18;
+	h264_prune_picture_slots(h, 19, false);
+	KUNIT_EXPECT_EQ(test, h->canvas_pos_map, 0);
+	KUNIT_EXPECT_EQ(test, h->colocated_buf_map, 0);
+}
+
 static struct kunit_case h264_test_cases[] = {
+	KUNIT_CASE(timestamp_picture_slots),
 	KUNIT_CASE(original_picture_structure),
 	KUNIT_CASE(colocated_mv_layout),
 	KUNIT_CASE(duplicate_weighted_references),
