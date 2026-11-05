@@ -7,18 +7,19 @@
  */
 
 #include <kunit/visibility.h>
+#include <linux/limits.h>
+#include <linux/mfd/khadas-mcu.h>
 #include <linux/module.h>
-#include "khadas_mcu_fan_kunit.h"
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/mfd/khadas-mcu.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/sysfs.h>
 #include <linux/thermal.h>
-#include <linux/regulator/consumer.h>
-#include <linux/limits.h>
 #include <linux/workqueue.h>
-#include <linux/mutex.h>
+
+#include "khadas_mcu_fan_kunit.h"
 
 static bool quiet_auto = true;
 module_param(quiet_auto, bool, 0444);
