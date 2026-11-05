@@ -5,6 +5,7 @@
  * Copyright (C) 2021-2023 CHIPS&MEDIA INC
  */
 
+#include <kunit/visibility.h>
 #include <linux/pm_runtime.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-direct.h>
@@ -12,6 +13,7 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/wave5_buffers.h>
 #include "wave5-helper.h"
+#include "wave5-params-kunit.h"
 
 static void wave5_trace_source(struct vb2_v4l2_buffer *buffer, int phase)
 {
@@ -1532,8 +1534,8 @@ static void wave5_vpu_enc_buf_queue(struct vb2_buffer *vb)
 	v4l2_m2m_buf_queue(m2m_ctx, vbuf);
 }
 
-static void wave5_set_intra_refresh(struct enc_wave_param *param, u32 height,
-				  u32 period, bool hevc)
+VISIBLE_IF_KUNIT void wave5_set_intra_refresh(struct enc_wave_param *param, u32 height,
+					      u32 period, bool hevc)
 {
 	u32 rows = DIV_ROUND_UP(height, hevc ? 64 : 16);
 	u32 refresh_rows = period ? DIV_ROUND_UP(rows, period) : 0;
@@ -1546,9 +1548,10 @@ static void wave5_set_intra_refresh(struct enc_wave_param *param, u32 height,
 	param->intra_refresh_mode = hevc && period ? REFRESH_MODE_CTU_ROWS : 0;
 	param->intra_refresh_arg = hevc ? refresh_rows : 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(wave5_set_intra_refresh);
 
-static void wave5_set_enc_picture_size(struct enc_open_param *open_param,
-				       struct vpu_instance *inst)
+VISIBLE_IF_KUNIT void wave5_set_enc_picture_size(struct enc_open_param *open_param,
+						 struct vpu_instance *inst)
 {
 	/* SRC_SIZE must remain block aligned even when the visible rectangle is
 	 * not. Padding comes from the negotiated OUTPUT storage, never beyond it.
@@ -1566,9 +1569,10 @@ static void wave5_set_enc_picture_size(struct enc_open_param *open_param,
 	open_param->wave_param.conf_win_bot = open_param->pic_height -
 		inst->conf_win.top - inst->conf_win.height;
 }
+EXPORT_SYMBOL_IF_KUNIT(wave5_set_enc_picture_size);
 
-static int wave5_set_vbv_size(struct enc_open_param *open_param,
-			      struct vpu_instance *inst)
+VISIBLE_IF_KUNIT int wave5_set_vbv_size(struct enc_open_param *open_param,
+					struct vpu_instance *inst)
 {
 	u32 size = inst->std == W_AVC_ENC ? inst->h264_cpb_size : inst->vbv_buf_size;
 	u64 duration;
@@ -1587,6 +1591,7 @@ static int wave5_set_vbv_size(struct enc_open_param *open_param,
 	open_param->vbv_buffer_size = duration;
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(wave5_set_vbv_size);
 
 static void wave5_set_constant_quality(struct enc_wave_param *param,
 				       struct vpu_instance *inst)
@@ -1602,7 +1607,7 @@ static void wave5_set_constant_quality(struct enc_wave_param *param,
 	param->fixed_qp_b = qp;
 }
 
-static int wave5_set_enc_gop(struct enc_open_param *open, struct vpu_instance *inst)
+VISIBLE_IF_KUNIT int wave5_set_enc_gop(struct enc_open_param *open, struct vpu_instance *inst)
 {
 	const struct enc_wave_param *input = inst->std == W_HEVC_ENC ?
 		&inst->hevc_param : &inst->enc_param;
@@ -1678,6 +1683,7 @@ static int wave5_set_enc_gop(struct enc_open_param *open, struct vpu_instance *i
 	}
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(wave5_set_enc_gop);
 
 static int wave5_set_enc_openparam(struct enc_open_param *open_param,
 				   struct vpu_instance *inst)

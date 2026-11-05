@@ -5,12 +5,14 @@
  * Copyright (C) 2021-2023 CHIPS&MEDIA INC
  */
 
+#include <kunit/visibility.h>
 #include <linux/iopoll.h>
 #include <linux/bitfield.h>
 #include <linux/ktime.h>
 #include "wave5-vpu.h"
 #include "wave5.h"
 #include "wave5-regdefine.h"
+#include "wave5-params-kunit.h"
 
 #define FIO_TIMEOUT			10000000
 #define FIO_CTRL_READY			BIT(31)
@@ -1719,8 +1721,8 @@ free_vb_work:
 	return ret;
 }
 
-static void wave5_set_enc_crop_info(u32 codec, struct enc_wave_param *param, int rot_mode,
-				    int src_width, int src_height)
+VISIBLE_IF_KUNIT void wave5_set_enc_crop_info(u32 codec, struct enc_wave_param *param, int rot_mode,
+					      int src_width, int src_height)
 {
 	int aligned_width = (codec == W_HEVC_ENC) ? ALIGN(src_width, 32) : ALIGN(src_width, 16);
 	int aligned_height = (codec == W_HEVC_ENC) ? ALIGN(src_height, 32) : ALIGN(src_height, 16);
@@ -1805,8 +1807,9 @@ static void wave5_set_enc_crop_info(u32 codec, struct enc_wave_param *param, int
 		WARN(1, "Invalid prp_mode: %d, must be in range of 1 - 15\n", prp_mode);
 	}
 }
+EXPORT_SYMBOL_IF_KUNIT(wave5_set_enc_crop_info);
 
-static u32 wave5_enc_sps_profile(struct vpu_instance *inst, u32 profile)
+VISIBLE_IF_KUNIT u32 wave5_enc_sps_profile(struct vpu_instance *inst, u32 profile)
 {
 	/* The T7 firmware predates Extended: its AVC High/High10 IDs are 3/4,
 	 * while the current Wave5 command ABI uses 4/5. Keep API values intact
@@ -1817,6 +1820,7 @@ static u32 wave5_enc_sps_profile(struct vpu_instance *inst, u32 profile)
 		return profile - 1;
 	return profile;
 }
+EXPORT_SYMBOL_IF_KUNIT(wave5_enc_sps_profile);
 
 int wave5_vpu_enc_init_seq(struct vpu_instance *inst)
 {
@@ -2374,7 +2378,7 @@ static u32 wave5_vpu_enc_validate_sec_axi(struct vpu_instance *inst)
 	return ret;
 }
 
-static u32 wave5_enc_source_endian(enum frame_buffer_format format, bool legacy)
+VISIBLE_IF_KUNIT u32 wave5_enc_source_endian(enum frame_buffer_format format, bool legacy)
 {
 	/* P010 uses LE words with low six padding bits. The legacy firmware
 	 * reads those words with VDI_128BIT_LE_BYTE_SWAP (17): the source
@@ -2384,6 +2388,7 @@ static u32 wave5_enc_source_endian(enum frame_buffer_format format, bool legacy)
 		return 0xe;
 	return PIC_SRC_ENDIANNESS_BIG_ENDIAN;
 }
+EXPORT_SYMBOL_IF_KUNIT(wave5_enc_source_endian);
 
 int wave5_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *fail_res)
 {
