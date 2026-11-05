@@ -205,15 +205,25 @@ int aml_stop_vdec_hw(struct aml_vdec_hw *hw)
 	return 0;
 }
 
+VISIBLE_IF_KUNIT u64 aml_vdec_canvas_layout(dma_addr_t addr, u32 stride, u32 height)
+{
+	u32 low = (u32)(addr >> 3) | ((stride >> 3) << 29);
+	u32 high = (stride >> 6) | (height << 9) | (MESON_CANVAS_ENDIAN_SWAP64 << 26);
+
+	return low | ((u64)high << 32);
+}
+EXPORT_SYMBOL_IF_KUNIT(aml_vdec_canvas_layout);
+
 int aml_vdec_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
 				   dma_addr_t addr, u32 stride, u32 height)
 {
+	u64 layout = aml_vdec_canvas_layout(addr, stride, height);
+
 	/* Revision C needs both the LUT endian field and byte-switch remap. */
 	const struct reg_sequence regs[] = {
 		{ MDEC_CAV_CFG0, hw->canvas_endian_remap ? GENMASK(25, 17) : 0 },
-		{ MDEC_CAV_LUT_DATAL, (u32)(addr >> 3) | ((stride >> 3) << 29) },
-		{ MDEC_CAV_LUT_DATAH, (stride >> 6) | (height << 9) |
-				    (MESON_CANVAS_ENDIAN_SWAP64 << 26) },
+		{ MDEC_CAV_LUT_DATAL, lower_32_bits(layout) },
+		{ MDEC_CAV_LUT_DATAH, upper_32_bits(layout) },
 		{ MDEC_CAV_LUT_ADDR, index },
 	};
 

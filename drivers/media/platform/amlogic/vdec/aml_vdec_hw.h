@@ -6,6 +6,8 @@
 #ifndef _AML_VDEC_HW_H_
 #define _AML_VDEC_HW_H_
 
+#include <kunit/visibility.h>
+
 #include <linux/module.h>
 #include <linux/clk.h>
 #include <linux/platform_device.h>
@@ -20,6 +22,10 @@
 
 #define VDEC_FIFO_ALIGN     8
 #define VLD_PADDING_SIZE    1024
+
+#if IS_ENABLED(CONFIG_KUNIT)
+u64 aml_vdec_canvas_layout(dma_addr_t addr, u32 stride, u32 height);
+#endif
 
 /**
  * struct aml_vdec_hw_ops - codec mode specific operations for hw
@@ -43,6 +49,9 @@ struct aml_vdec_hw_ops {
 
 /**
  * enum vdec_type_e - Type of decoder hardware.
+ * @VDEC_1: Legacy decoder core.
+ * @VDEC_HEVC: HEVC decoder core.
+ * @VDEC_MAX: Number of decoder cores.
  */
 enum vdec_type_e {
 	VDEC_1 = 0,
@@ -52,6 +61,10 @@ enum vdec_type_e {
 
 /**
  * enum vdec_irq_num - Definition of the irq.
+ * @VDEC_IRQ_0: First mailbox interrupt.
+ * @VDEC_IRQ_1: Second mailbox interrupt.
+ * @VDEC_IRQ_2: Third mailbox interrupt.
+ * @VDEC_IRQ_MAX: Number of interrupt slots.
  */
 enum vdec_irq_num {
 	VDEC_IRQ_0 = 0,
@@ -61,7 +74,11 @@ enum vdec_irq_num {
 };
 
 /**
- * enum vdec_type_e - Type of decoder clock.
+ * enum clk_type_e - Type of decoder clock.
+ * @VDEC: Decoder bus clock.
+ * @VDEC_MUX: Legacy decoder functional clock.
+ * @HEVCF_MUX: HEVC front-end functional clock.
+ * @DOS_CLK_MAX: Number of shared clock slots.
  */
 enum clk_type_e {
 	VDEC = 0,
@@ -72,6 +89,7 @@ enum clk_type_e {
 
 /**
  * enum aml_power_type_e - Type of decoder power.
+ * @AML_PM_PD: Generic power-domain management.
  */
 enum aml_power_type_e {
 	AML_PM_PD = 0,
@@ -79,6 +97,9 @@ enum aml_power_type_e {
 
 /**
  * enum mm_bus_e - Type of decoder hardware bus.
+ * @DOS_BUS: Decoder register bank.
+ * @DMC_BUS: Memory request control register bank.
+ * @MAX_REG_BUS: Number of register banks.
  */
 enum mm_bus_e {
 	DOS_BUS = 0,
@@ -90,7 +111,7 @@ enum mm_bus_e {
  * struct pm_pd_s - power domain definition
  * @name: Power domain name.
  * @dev: Pointer to device structure.
- * @mutex: Pointer to device_link structure.
+ * @link: Link retaining the power-domain supplier.
  * @ref_count: Curr power domain instance ref count.
  */
 struct pm_pd_s {
@@ -104,14 +125,17 @@ struct pm_pd_s {
  * struct aml_vdec_hw - decoder hardware resources definition
  * @pdev: Pointer to struct platform_device.
  * @dev: Pointer to struct device.
- * @regs: Reg base for dos/dmc hardware.
+ * @map: Regmaps for the decoder and memory request register banks.
  * @pm_mutex: Mutex for pm->pd_data.
+ * @canvas: External canvas provider on hardware without an internal LUT.
  * @pm: Pointer to struct power_manager_s.
  * @hw_ops: Hardware resource operation functions. See struct aml_vdec_hw_ops.
  * @gates: Clk instance used by curr decoder context.
  * @dec_irq: Irq registered.
  * @curr_ctx: Pointer to curr decoder context.
  * @has_dbus_ctrl: Isolate VDEC through DOS instead of DMC; no local PD writes.
+ * @has_internal_canvas: Use the decoder's private canvas LUT.
+ * @canvas_endian_remap: Revision requires byte-switch remap with LUT endian bits.
  * @faulted: DMA ownership could not be returned; reset the system to recover.
  * @powered: Domain and functional clocks are held.
  * @power_test_passed: Explicit read-only DOS access and power-off succeeded.
@@ -133,6 +157,22 @@ struct pm_pd_s {
  * @apb_gates: CPU APB bridge gates retained during experimental T7 power-on.
  * @apb_held: APB references remain held until secure power-off completes.
  * @vdec_p0: Functional clock path selected by the live T7 vendor decoder.
+ * @hevc_p0: HEVC front-end functional clock parent.
+ * @hevcb: HEVC back-end functional clock.
+ * @hevcb_p0: HEVC back-end functional clock parent.
+ * @has_hevc: Complete HEVC resources were described by firmware.
+ * @hevc_powered: This driver holds HEVC power and clock references.
+ * @hevc_test_passed: Explicit HEVC power preflight completed.
+ * @hevc_parser_version: Cached parser version from preflight.
+ * @hevc_core_test_passed: Firmware load and idle stop check completed.
+ * @hevc_axi_front: Cached front-end AXI stop status.
+ * @hevc_axi_back: Cached back-end AXI stop status.
+ * @hevc_irq: HEVC mailbox interrupt number.
+ * @hevc_irq_enabled: Interrupt delivery is enabled for the active job.
+ * @hevc_fw_loaded: Firmware is loaded for the current power lifetime.
+ * @hevc_irq_status: Status published by the hard interrupt handler.
+ * @hevc_irq_thread: Active codec callback, cleared after interrupt synchronization.
+ * @hevc_priv: Active codec callback argument.
  */
 struct aml_vdec_hw {
 	struct platform_device *pdev;
