@@ -202,6 +202,15 @@ static int h264_prepare_input(struct aml_vdec_ctx *ctx)
 	return 0;
 }
 
+static u32 h264_sps_frame_height(const struct v4l2_ctrl_h264_sps *sps)
+{
+	u32 map_units = sps->pic_height_in_map_units_minus1 + 1;
+
+	/* A map unit covers two macroblock rows for both field and MBAFF SPS. */
+	return map_units * 16 *
+		(2 - !!(sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY));
+}
+
 VISIBLE_IF_KUNIT void h264_build_sps_params(struct aml_h264_ctx *h264_ctx,
 					    unsigned short *sps_base,
 					    const struct v4l2_ctrl_h264_sps *sps)
@@ -213,7 +222,7 @@ VISIBLE_IF_KUNIT void h264_build_sps_params(struct aml_h264_ctx *h264_ctx,
 	int i, ii;
 
 	h264_ctx->frame_width = (sps->pic_width_in_mbs_minus1 + 1) << 4;
-	h264_ctx->frame_height = (sps->pic_height_in_map_units_minus1 + 1) << 4;
+	h264_ctx->frame_height = h264_sps_frame_height(sps);
 
 	data_tmp[offset] = PARAM_BASE_VAL;
 	offset += 2;
@@ -272,15 +281,16 @@ VISIBLE_IF_KUNIT void h264_build_sps_params(struct aml_h264_ctx *h264_ctx,
 			sps_base[i + 3 - ii] = data_tmp[i + ii];
 	}
 
-	frame_size = (sps->pic_width_in_mbs_minus1 + 1) * (sps->pic_height_in_map_units_minus1 + 1);
+	frame_size = (h264_ctx->frame_width >> 4) *
+		     (h264_ctx->frame_height >> 4);
 	/* The eight-bit width field represents 256 macroblocks as zero. */
 	cfg_tmp = (get_flag(sps->flags, V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) << 31) |
 				(sps->max_num_ref_frames << 24) | (frame_size << 8) |
 				((sps->pic_width_in_mbs_minus1 + 1) & 0xff);
 	h264_ctx->seq_info = cfg_tmp;
 
-	h264_ctx->mb_width = (sps->pic_width_in_mbs_minus1 + 4) & 0xfffffffc;
-	h264_ctx->mb_height = (sps->pic_height_in_map_units_minus1 + 4) & 0xfffffffc;
+	h264_ctx->mb_width = ALIGN(h264_ctx->frame_width, 64) >> 4;
+	h264_ctx->mb_height = ALIGN(h264_ctx->frame_height, 64) >> 4;
 	h264_ctx->mb_total = h264_ctx->mb_width * h264_ctx->mb_height;
 	h264_ctx->max_num_ref_frames = sps->max_num_ref_frames;
 }
@@ -1884,7 +1894,7 @@ static int aml_h264_get_stateless_ctrl_ref(struct aml_h264_ctx *h264_ctx)
 	    !(ctrls->sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) ||
 	    ctrls->sps->max_num_ref_frames > V4L2_H264_NUM_DPB_ENTRIES ||
 	    (ctrls->sps->pic_width_in_mbs_minus1 + 1) * 16 > ctx->pic_info.coded_width ||
-	    (ctrls->sps->pic_height_in_map_units_minus1 + 1) * 16 > ctx->pic_info.coded_height)
+	    h264_sps_frame_height(ctrls->sps) > ctx->pic_info.coded_height)
 		return -EINVAL;
 
 	ctrls->pps =

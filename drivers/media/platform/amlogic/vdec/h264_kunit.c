@@ -142,6 +142,41 @@ static void parameter_slots_and_signed_fields(struct kunit *test)
 	}
 }
 
+static void interlaced_frame_dimensions(struct kunit *test)
+{
+	struct aml_h264_ctx *h = test->priv;
+	struct v4l2_ctrl_h264_sps sps = {
+		.chroma_format_idc = 1,
+		.pic_width_in_mbs_minus1 = 119,
+		.pic_height_in_map_units_minus1 = 33,
+	};
+	u16 table[256];
+
+	/* 1080i needs 1088 coded lines, not one field's 544 lines. */
+	h264_build_sps_params(h, table, &sps);
+	KUNIT_EXPECT_EQ(test, h->frame_height, 1088);
+	KUNIT_EXPECT_EQ(test, h->mb_height, 68);
+	KUNIT_EXPECT_EQ(test, h->mb_total, 120 * 68);
+	KUNIT_EXPECT_EQ(test, (h->seq_info >> 8) & 0xffff, 120 * 68);
+	sps.flags = V4L2_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD;
+	h264_build_sps_params(h, table, &sps);
+	KUNIT_EXPECT_EQ(test, h->frame_height, 1088);
+
+	/* Expand map units before rounding the canvas to four MB rows. */
+	sps.pic_height_in_map_units_minus1 = 34;
+	h264_build_sps_params(h, table, &sps);
+	KUNIT_EXPECT_EQ(test, h->frame_height, 1120);
+	KUNIT_EXPECT_EQ(test, h->mb_height, 72);
+	KUNIT_EXPECT_EQ(test, (h->seq_info >> 8) & 0xffff, 120 * 70);
+
+	/* Progressive SPS retains its one-row map units. */
+	sps.flags = V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY;
+	h264_build_sps_params(h, table, &sps);
+	KUNIT_EXPECT_EQ(test, h->frame_height, 560);
+	KUNIT_EXPECT_EQ(test, h->mb_height, 36);
+	KUNIT_EXPECT_EQ(test, (h->seq_info >> 8) & 0xffff, 120 * 35);
+}
+
 static void input_padding_boundaries(struct kunit *test)
 {
 	static const u32 sizes[] = { 1, 7, 8, 1000, 3064 };
@@ -192,6 +227,7 @@ static struct kunit_case h264_test_cases[] = {
 	KUNIT_CASE(duplicate_weighted_references),
 	KUNIT_CASE(independent_b_reference_lists),
 	KUNIT_CASE(parameter_slots_and_signed_fields),
+	KUNIT_CASE(interlaced_frame_dimensions),
 	KUNIT_CASE(input_padding_boundaries),
 	KUNIT_CASE(canvas_address_layout),
 	{}
