@@ -372,7 +372,7 @@ static int khadas_mcu_fan_probe(struct platform_device *pdev)
 		return 0;
 	}
 
-	cdev = devm_thermal_of_child_cooling_device_register(dev->parent,
+	cdev = devm_thermal_of_child_cooling_device_register(dev,
 							     dev->parent->of_node,
 							     "khadas-mcu-fan", ctx,
 							     &khadas_mcu_fan_cooling_ops);
