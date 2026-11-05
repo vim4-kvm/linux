@@ -235,6 +235,8 @@ struct aml_h264_ctx {
 void h264_prune_picture_slots(struct aml_h264_ctx *h264, u64 timestamp, bool held);
 int h264_get_picture_slots(struct aml_h264_ctx *h264, u64 timestamp);
 enum h264_picture_structure
+h264_reference_structure(enum h264_picture_structure original, u8 fields);
+enum h264_picture_structure
 h264_picture_structure(const struct v4l2_ctrl_h264_decode_params *decode,
 		       const struct v4l2_ctrl_h264_sps *sps);
 int h264_mv_offsets(enum h264_picture_structure current_structure,
