@@ -516,7 +516,7 @@ enum {
 	MESON_VCLK_HDMI_27000,
 };
 
-struct meson_vclk_params {
+static struct meson_vclk_params {
 	unsigned long long pll_freq;
 	unsigned long long phy_freq;
 	unsigned long long vclk_freq;
