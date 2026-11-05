@@ -22,6 +22,8 @@
 #define AML_VDEC_MIN_H    64U
 #define AML_VDEC_1080P_MAX_H  1088U
 #define AML_VDEC_1080P_MAX_W  1920U
+#define AML_VDEC_4K_MAX_H    2304U
+#define AML_VDEC_4K_MAX_W    4096U
 
 struct aml_vdec_ctx;
 /**
@@ -37,6 +39,7 @@ enum aml_fmt_type {
  */
 enum aml_codec_type {
 	CODEC_TYPE_H264 = 0,
+	CODEC_TYPE_MPEG2,
 	CODEC_TYPE_FRAME,
 };
 
