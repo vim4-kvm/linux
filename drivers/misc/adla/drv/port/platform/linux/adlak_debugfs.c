@@ -545,6 +545,7 @@ static int adlak_get_utilization(struct adlak_device *padlak, char *buf, size_t 
         case 0x00000200 :
         case 0x00000300 :
             dev_macc_count = 2048 * cur_freq; //Mops
+		break;
         case 0x00000301 :
             dev_macc_count = 2048 * s6_hw_info.max_frq; //Mops
             break;
