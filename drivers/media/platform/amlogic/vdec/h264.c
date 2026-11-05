@@ -422,6 +422,7 @@ static int h264_config_internal_canvas(struct aml_vdec_hw *hw,
 				       struct h264_decode_buf_spec *buf_spec,
 				       u32 mb_width, u32 mb_height)
 {
+	struct aml_h264_ctx *h264 = hw->curr_ctx;
 	u8 y_index, uv_index;
 	int ret;
 
@@ -437,6 +438,13 @@ static int h264_config_internal_canvas(struct aml_vdec_hw *hw,
 	 */
 	y_index = buf_spec->canvas_pos * 2;
 	uv_index = y_index + 1;
+	buf_spec->y_canvas_index = y_index;
+	buf_spec->u_canvas_index = uv_index;
+	buf_spec->v_canvas_index = uv_index;
+	/* Later slices retain the same picture and DPB mappings until DMA stops. */
+	if (h264->configured_canvas_map & BIT(buf_spec->canvas_pos))
+		return 0;
+
 	ret = aml_vdec_write_internal_canvas(hw, y_index, buf_spec->y_dma_addr,
 					     mb_width << 4, mb_height << 4);
 	if (ret)
@@ -445,17 +453,17 @@ static int h264_config_internal_canvas(struct aml_vdec_hw *hw,
 					     mb_width << 4, mb_height << 3);
 	if (ret)
 		return ret;
-	buf_spec->y_canvas_index = y_index;
-	buf_spec->u_canvas_index = uv_index;
-	buf_spec->v_canvas_index = uv_index;
 
 	regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_CANVAS_BLK32,
 		     BIT(11) | BIT(8) | y_index);
 	regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_CANVAS_BLK32,
 		     BIT(11) | BIT(8) | uv_index);
-	return regmap_write(hw->map[DOS_BUS],
-			    ANC0_CANVAS_ADDR + (buf_spec->canvas_pos << 2),
-			    spec2canvas(buf_spec));
+	ret = regmap_write(hw->map[DOS_BUS],
+			   ANC0_CANVAS_ADDR + (buf_spec->canvas_pos << 2),
+			   spec2canvas(buf_spec));
+	if (!ret)
+		h264->configured_canvas_map |= BIT(buf_spec->canvas_pos);
+	return ret;
 }
 
 static int config_decode_canvas(struct aml_vdec_hw *hw,
@@ -1031,12 +1039,10 @@ static void h264_config_ref_lists(struct aml_vdec_ctx *ctx)
 	dev_dbg(&ctx->dev->plat_dev->dev, "%s num_valid = %d", __func__,
 		builder.num_valid);
 
-	if (curr_slice->slice_type == P_SLICE &&
-	    (decode->flags & V4L2_H264_DECODE_PARAM_FLAG_PFRAME)) {
+	if (curr_slice->slice_type == P_SLICE) {
 		v4l2_h264_build_p_ref_list(&builder, v4l2_p0_reflist);
 		config_p_reflist(h264_ctx, v4l2_p0_reflist, builder.num_valid);
-	} else if (curr_slice->slice_type == B_SLICE &&
-		  (decode->flags & V4L2_H264_DECODE_PARAM_FLAG_BFRAME)) {
+	} else if (curr_slice->slice_type == B_SLICE) {
 		v4l2_h264_build_b_ref_lists(&builder, v4l2_b0_reflist, v4l2_b1_reflist);
 		config_b_reflist(h264_ctx, v4l2_b0_reflist, v4l2_b1_reflist,
 				 builder.num_valid);
@@ -1154,6 +1160,9 @@ static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *
 	struct vb2_queue *vq;
 	int i;
 
+	if (hw->has_internal_canvas && !h264_ctx->new_pic_flag)
+		goto references;
+
 	clear_unused_col_buf(h264_ctx, decode);
 
 	vb2_v4l2 = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
@@ -1180,6 +1189,15 @@ static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *
 	if (decode->nal_ref_idc && h264_ctx->curr_spec.col_buf_index < 0)
 		return -EINVAL;
 	h264_ctx->curr_spec.poc = decode->top_field_order_cnt;
+
+references:
+	/* Slice types and list modifications may change within one picture. */
+	if (hw->has_internal_canvas) {
+		memset(h264_ctx->ref_list0, 0, sizeof(h264_ctx->ref_list0));
+		memset(h264_ctx->ref_list1, 0, sizeof(h264_ctx->ref_list1));
+		h264_ctx->list_size[0] = 0;
+		h264_ctx->list_size[1] = 0;
+	}
 
 	h264_config_ref_lists(ctx);
 
@@ -1730,10 +1748,8 @@ static irqreturn_t h264_threaded_isr_func(int irq, void *priv)
 		    h264_ctx->mslice.num_ref_idx_l0 > V4L2_H264_NUM_DPB_ENTRIES ||
 		    h264_ctx->mslice.num_ref_idx_l1 > V4L2_H264_NUM_DPB_ENTRIES)
 			goto header_error;
-		/* First T7 experiment never recycles canvases between slice IRQs. */
-		if (hw->has_dbus_ctrl && h264_ctx->mslice.first_mb_in_slice)
-			goto header_error;
-		if (h264_ctx->mslice.first_mb_in_slice != 0)
+		if (!hw->has_internal_canvas &&
+		    h264_ctx->mslice.first_mb_in_slice != 0)
 			h264_release_decode_spec(hw, ctx);
 
 		if (h264_config_decode_spec(hw, ctx))
@@ -2195,6 +2211,7 @@ int aml_h264_dec_run(void *priv)
 	}
 
 	h264_ctx->new_pic_flag = 1;
+	h264_ctx->configured_canvas_map = 0;
 	ctx->decode_result = -EIO;
 	h264_config_params(ctx);
 
