@@ -311,7 +311,76 @@ static void canvas_address_layout(struct kunit *test)
 	}
 }
 
+static void original_picture_structure(struct kunit *test)
+{
+	struct v4l2_ctrl_h264_decode_params decode = {};
+	struct v4l2_ctrl_h264_sps sps = {};
+
+	sps.flags = V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY;
+	KUNIT_EXPECT_EQ(test, h264_picture_structure(&decode, &sps), H264_PICTURE_FRAME);
+	sps.flags = V4L2_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD;
+	KUNIT_EXPECT_EQ(test, h264_picture_structure(&decode, &sps), H264_PICTURE_MBAFF);
+	decode.flags = V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC;
+	KUNIT_EXPECT_EQ(test, h264_picture_structure(&decode, &sps), H264_PICTURE_TOP);
+	decode.flags |= V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD;
+	KUNIT_EXPECT_EQ(test, h264_picture_structure(&decode, &sps), H264_PICTURE_BOTTOM);
+	/* A frame picture need not be MBAFF when field pictures are allowed. */
+	sps.flags = 0;
+	decode.flags = 0;
+	KUNIT_EXPECT_EQ(test, h264_picture_structure(&decode, &sps), H264_PICTURE_FRAME);
+}
+
+static void colocated_mv_layout(struct kunit *test)
+{
+	static const struct {
+		enum h264_picture_structure current_structure, reference;
+		u32 write_mb, read_mb;
+	} cases[] = {
+		{ H264_PICTURE_FRAME, H264_PICTURE_FRAME, 7, 7 },
+		{ H264_PICTURE_TOP, H264_PICTURE_FRAME, 14, 11 },
+		{ H264_PICTURE_BOTTOM, H264_PICTURE_FRAME, 14, 11 },
+		{ H264_PICTURE_FRAME, H264_PICTURE_TOP, 7, 6 },
+		{ H264_PICTURE_FRAME, H264_PICTURE_BOTTOM, 7, 6 },
+		{ H264_PICTURE_MBAFF, H264_PICTURE_TOP, 14, 14 },
+		{ H264_PICTURE_MBAFF, H264_PICTURE_FRAME, 14, 14 },
+		{ H264_PICTURE_FRAME, H264_PICTURE_MBAFF, 7, 7 },
+		{ H264_PICTURE_TOP, H264_PICTURE_MBAFF, 14, 14 },
+		{ H264_PICTURE_TOP, H264_PICTURE_BOTTOM, 14, 14 },
+	};
+	u32 write_offset, read_offset;
+	unsigned int i;
+	int ret;
+
+	/* Nonzero row and column distinguish field and frame address layouts. */
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		ret = h264_mv_offsets(cases[i].current_structure, cases[i].reference,
+				      7, 4, 16 * 96, false, &write_offset, &read_offset);
+		KUNIT_ASSERT_EQ(test, ret, 0);
+		KUNIT_EXPECT_EQ(test, write_offset, cases[i].write_mb * 96);
+		KUNIT_EXPECT_EQ(test, read_offset, cases[i].read_mb * 96);
+	}
+	ret = h264_mv_offsets(H264_PICTURE_FRAME, H264_PICTURE_FRAME,
+			      15, 4, 16 * 96, true, &write_offset, &read_offset);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, write_offset, 15 * 24);
+	KUNIT_EXPECT_EQ(test, read_offset, 15 * 24);
+	ret = h264_mv_offsets(H264_PICTURE_FRAME, H264_PICTURE_FRAME,
+			      16, 4, 16 * 96, true, &write_offset, &read_offset);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	ret = h264_mv_offsets(H264_PICTURE_TOP, H264_PICTURE_FRAME,
+			      8, 4, 16 * 96, false, &write_offset, &read_offset);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	ret = h264_mv_offsets(H264_PICTURE_FRAME, H264_PICTURE_FRAME,
+			      U32_MAX, 4, U32_MAX, false, &write_offset, &read_offset);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	ret = h264_mv_offsets(H264_PICTURE_FRAME, H264_PICTURE_FRAME,
+			      0, 0, 16 * 96, false, &write_offset, &read_offset);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+}
+
 static struct kunit_case h264_test_cases[] = {
+	KUNIT_CASE(original_picture_structure),
+	KUNIT_CASE(colocated_mv_layout),
 	KUNIT_CASE(duplicate_weighted_references),
 	KUNIT_CASE(independent_b_reference_lists),
 	KUNIT_CASE(field_reference_metadata),

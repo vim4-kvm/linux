@@ -533,6 +533,53 @@ static int config_decode_canvas(struct aml_vdec_hw *hw,
 	return 0;
 }
 
+VISIBLE_IF_KUNIT enum h264_picture_structure
+h264_picture_structure(const struct v4l2_ctrl_h264_decode_params *decode,
+		       const struct v4l2_ctrl_h264_sps *sps)
+{
+	if (decode->flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC)
+		return decode->flags & V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD ?
+			H264_PICTURE_BOTTOM : H264_PICTURE_TOP;
+	if (sps->flags & V4L2_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD)
+		return H264_PICTURE_MBAFF;
+	return H264_PICTURE_FRAME;
+}
+EXPORT_SYMBOL_IF_KUNIT(h264_picture_structure);
+
+VISIBLE_IF_KUNIT int
+h264_mv_offsets(enum h264_picture_structure current_structure,
+		enum h264_picture_structure reference,
+		u32 first_mb, u32 mb_width, u32 buffer_size,
+		bool compact, u32 *write_offset, u32 *read_offset)
+{
+	u32 bytes_per_mb = COL_SIZE_FOR_ONE_MB >> (compact ? 2 : 0);
+	u64 write_mb, read_mb, row, column;
+
+	if (!mb_width || current_structure > H264_PICTURE_MBAFF ||
+	    reference > H264_PICTURE_MBAFF)
+		return -EINVAL;
+
+	row = first_mb / mb_width;
+	column = first_mb % mb_width;
+	write_mb = (u64)first_mb * (current_structure == H264_PICTURE_FRAME ? 1 : 2);
+	read_mb = write_mb;
+	/* Field rows and MBAFF pairs occupy two consecutive MB slots. */
+	if (current_structure < H264_PICTURE_FRAME && reference == H264_PICTURE_FRAME)
+		read_mb = row * 2 * mb_width + column;
+	else if (current_structure == H264_PICTURE_FRAME && reference < H264_PICTURE_FRAME)
+		read_mb = (row / 2 * mb_width + column) * 2;
+
+	buffer_size >>= compact ? 2 : 0;
+	if ((write_mb + 1) * bytes_per_mb > buffer_size ||
+	    (read_mb + 1) * bytes_per_mb > buffer_size)
+		return -ENOSPC;
+
+	*write_offset = write_mb * bytes_per_mb;
+	*read_offset = read_mb * bytes_per_mb;
+	return 0;
+}
+EXPORT_SYMBOL_IF_KUNIT(h264_mv_offsets);
+
 static int allocate_colocate_buf(struct aml_h264_ctx *h264_ctx, int poc)
 {
 	int i;
@@ -549,6 +596,7 @@ static int allocate_colocate_buf(struct aml_h264_ctx *h264_ctx, int poc)
 		return -1;
 
 	h264_ctx->colocated_buf_poc[i] = poc;
+	h264_ctx->colocated_structure[i] = h264_ctx->curr_spec.structure;
 	dev_dbg(&ctx->dev->plat_dev->dev, "%s colocated_buf_index %d poc %d\n",
 		__func__, i, h264_ctx->colocated_buf_poc[i]);
 
@@ -1179,6 +1227,7 @@ static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *
 		goto references;
 
 	clear_unused_col_buf(h264_ctx, decode);
+	h264_ctx->curr_spec.structure = h264_picture_structure(decode, ctrls->sps);
 
 	vb2_v4l2 = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
 	vb = &vb2_v4l2->vb2_buf;
@@ -1341,11 +1390,13 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 	struct slice *curr_slice = &h264_ctx->mslice;
 	unsigned int type_cfg = 0x3;	/* 0x3: frame type */
 	unsigned int colocate_adr_offset = 0;
+	u32 colocate_rd_adr_offset;
+	enum h264_picture_structure reference_structure = H264_PICTURE_FRAME;
 	unsigned int colocate_wr_adr;
 	unsigned int info0;
 	unsigned int info1;
 	unsigned int info2;
-	int i, j;
+	int i, j, ret;
 	int h264_buffer_info_data_write_count = 0;
 	u8 canvas_pos;
 	u8 use_mode_8x8_flag;
@@ -1487,16 +1538,26 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 	else
 		use_mode_8x8_flag = 0;
 
+	if (h264_ctx->list_size[1]) {
+		int index = h264_ctx->ref_list1[0].col_buf_index;
+
+		if (index < 0 || index >= h264_ctx->colocated_buf_num)
+			return -EINVAL;
+		reference_structure = h264_ctx->colocated_structure[index];
+	}
+	ret = h264_mv_offsets(h264_ctx->curr_spec.structure, reference_structure,
+			      curr_slice->first_mb_in_slice,
+			      ctrls->sps->pic_width_in_mbs_minus1 + 1,
+			      h264_ctx->one_col_buf_size, use_mode_8x8_flag,
+			      &colocate_adr_offset, &colocate_rd_adr_offset);
+	if (ret)
+		return ret;
+
 	read_poll_timeout(read_dos_reg, reg_val,
 			  !(reg_val & 0x800),
 			  10, 0, true, hw, H264_CO_MB_RW_CTL);
 
 	/* col buf for curr frame */
-	colocate_adr_offset = COL_SIZE_FOR_ONE_MB;
-	if (use_mode_8x8_flag)
-		colocate_adr_offset >>= 2;
-	colocate_adr_offset *= curr_slice->first_mb_in_slice;
-
 	if (h264_ctx->curr_spec.col_buf_index >= 0 &&
 	    h264_ctx->curr_spec.col_buf_index < h264_ctx->colocated_buf_num) {
 		colocate_wr_adr = h264_ctx->collated_cma_addr +
@@ -1524,20 +1585,20 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 		struct h264_decode_buf_spec *colocate_pic =
 		    &h264_ctx->ref_list1[0];
 		struct h264_decode_buf_spec *curr_pic = &h264_ctx->curr_spec;
-		int l10_structure = 2;	/* for pic struct == FRAME, default to 2 */
 		int cur_colocate_ref_type;
 		unsigned int colocate_rd_adr;
-		unsigned int colocate_rd_adr_offset = 0;
 		unsigned int val;
 
-		cur_colocate_ref_type =
-		    (abs(curr_pic->poc - colocate_pic->dpb->top_field_order_cnt) <
-		     abs(curr_pic->poc - colocate_pic->dpb->bottom_field_order_cnt)) ? 0 : 1;
-		colocate_rd_adr_offset = COL_SIZE_FOR_ONE_MB;
-		if (use_mode_8x8_flag)
-			colocate_rd_adr_offset >>= 2;
+		if (curr_pic->structure < H264_PICTURE_FRAME) {
+			cur_colocate_ref_type = colocate_pic->fields == V4L2_H264_BOTTOM_FIELD_REF;
+		} else {
+			s64 top_delta = (s64)curr_pic->poc -
+				colocate_pic->dpb->top_field_order_cnt;
+			s64 bottom_delta = (s64)curr_pic->poc -
+				colocate_pic->dpb->bottom_field_order_cnt;
 
-		colocate_rd_adr_offset *= curr_slice->first_mb_in_slice;
+			cur_colocate_ref_type = abs(top_delta) >= abs(bottom_delta);
+		}
 		if (colocate_pic->col_buf_index >= 0 &&
 		    colocate_pic->col_buf_index < h264_ctx->colocated_buf_num) {
 			colocate_rd_adr = h264_ctx->collated_cma_addr +
@@ -1553,7 +1614,7 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 			}
 			val  = ((colocate_rd_adr_offset + colocate_rd_adr) >> 3) |
 				(cur_colocate_ref_type << 29) |
-				(l10_structure << 30);
+				((u32)reference_structure << 30);
 			regmap_write(hw->map[DOS_BUS], H264_CO_MB_RD_ADDR, val);
 		} else {
 			dev_err
