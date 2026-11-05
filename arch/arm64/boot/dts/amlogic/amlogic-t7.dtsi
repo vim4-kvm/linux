@@ -2163,17 +2163,24 @@
 		compatible = "amlogic,t7-vcodec-dec";
 		reg = <0x0 0x320000 0x0 0x10000>;
 		reg-names = "dos";
-		interrupts = <GIC_SPI 92 IRQ_TYPE_EDGE_RISING>;
+		interrupts = <GIC_SPI 92 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 91 IRQ_TYPE_EDGE_RISING>;
 		clocks = <&clkc_periphs CLKID_SYS_DOS>,
 			 <&clkc_periphs CLKID_VDEC>,
 			 <&clkc_periphs CLKID_SYS_PCLK_SYS_APB>,
 			 <&clkc_periphs CLKID_SYS_A73PCLK_APB>,
-			 <&clkc_periphs CLKID_VDEC_0>;
-		clock-names = "vdec", "clk_vdec_mux", "sys-apb", "a73-apb", "vdec-p0";
+			 <&clkc_periphs CLKID_VDEC_0>,
+			 <&clkc_periphs CLKID_HEVCF>,
+			 <&clkc_periphs CLKID_HEVCF_0>,
+			 <&clkc_periphs CLKID_HEVCB>,
+			 <&clkc_periphs CLKID_HEVCB_0>;
+		clock-names = "vdec", "clk_vdec_mux", "sys-apb", "a73-apb", "vdec-p0",
+			      "clk_hevcf_mux", "hevc-p0", "clk_hevcb_mux", "hevcb-p0";
 		/* Secure firmware owns VDEC RAM/isolation/reset; NIC3 is its parent. */
 		power-domains = <&pwrc PWRC_T7_DOS_VDEC_ID>,
-				<&pwrc PWRC_T7_NIC3_ID>;
-		power-domain-names = "vdec", "nic3";
+				<&pwrc PWRC_T7_NIC3_ID>,
+				<&pwrc PWRC_T7_DOS_HEVC_ID>;
+		power-domain-names = "vdec", "nic3", "hevc";
 		amlogic,canvas = <&canvas>;
 		status = "disabled";
 	};
