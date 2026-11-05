@@ -5,6 +5,7 @@
 
 /* Toplevel file. Relies on dhd_linux.c to send commands to the dongle. */
 
+#include <kunit/visibility.h>
 #include <linux/kernel.h>
 #include <linux/etherdevice.h>
 #include <linux/module.h>
@@ -1092,6 +1093,7 @@ void brcmf_scan_params_v2_to_v1(struct brcmf_scan_params_v2_le *params_v2_le,
 	memcpy(&params_le->channel_list[0],
 	       &params_v2_le->channel_list[0], params_size);
 }
+EXPORT_SYMBOL_IF_KUNIT(brcmf_scan_params_v2_to_v1);
 
 static void brcmf_escan_prep(struct brcmf_cfg80211_info *cfg,
 			     struct brcmf_scan_params_v2_le *params_le,

@@ -2,6 +2,7 @@
 /*
  * Copyright (c) 2022 Broadcom Corporation
  */
+#include <kunit/visibility.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/etherdevice.h>
@@ -17,6 +18,7 @@
 #include <fweh.h>
 #include <fwsignal.h>
 
+#include "kunit.h"
 #include "vops.h"
 
 #define BRCMF_WCC_E_LAST		213
@@ -56,6 +58,24 @@ static bool brcmf_wcc_extsae(struct brcmf_pub *drvr)
 	       (drvr->feat_flags & BIT(BRCMF_FEAT_SAE_EXT));
 }
 
+VISIBLE_IF_KUNIT void brcmf_wcc_feat_update(struct brcmf_pub *drvr, const char *caps,
+					    int err, bool discovery_bss)
+{
+	/*
+	 * Concurrent channels need firmware TX credits instead of blindly
+	 * queueing frames for an interface whose radio context is absent.
+	 * Keep an explicit fcmode=0/1/2 request and other firmware defaults.
+	 */
+	if (!err && discovery_bss &&
+	    strstr(caps, "proptxstatus ") &&
+	    drvr->settings->fcmode == BRCMF_FWS_FCMODE_AUTO)
+		drvr->settings->fcmode = BRCMF_FWS_FCMODE_EXPLICIT_CREDIT;
+	if (!err && strstr(caps, "extsae ") &&
+	    !(drvr->settings->feature_disable & BIT(BRCMF_FEAT_SAE_EXT)))
+		drvr->feat_flags |= BIT(BRCMF_FEAT_SAE_EXT);
+}
+EXPORT_SYMBOL_IF_KUNIT(brcmf_wcc_feat_update);
+
 static void brcmf_wcc_feat_attach(struct brcmf_if *ifp)
 {
 	char caps[768] = {};
@@ -75,18 +95,7 @@ static void brcmf_wcc_feat_attach(struct brcmf_if *ifp)
 					 BIT(BRCMF_FEAT_QUIRK_ARP_ND_PRIMARY) |
 					 BIT(BRCMF_FEAT_QUIRK_ND_HOSTIP_V1);
 	err = brcmf_fil_iovar_data_get(ifp, "cap", caps, sizeof(caps) - 1);
-	/*
-	 * Concurrent channels need firmware TX credits instead of blindly
-	 * queueing frames for an interface whose radio context is absent.
-	 * Keep an explicit fcmode=0/1/2 request and other firmware defaults.
-	 */
-	if (!err && discovery_bss &&
-	    strstr(caps, "proptxstatus ") &&
-	    ifp->drvr->settings->fcmode == BRCMF_FWS_FCMODE_AUTO)
-		ifp->drvr->settings->fcmode = BRCMF_FWS_FCMODE_EXPLICIT_CREDIT;
-	if (!err && strstr(caps, "extsae ") &&
-	    !(ifp->drvr->settings->feature_disable & BIT(BRCMF_FEAT_SAE_EXT)))
-		ifp->drvr->feat_flags |= BIT(BRCMF_FEAT_SAE_EXT);
+	brcmf_wcc_feat_update(ifp->drvr, caps, err, discovery_bss);
 }
 
 static int brcmf_wcc_assoc_control(struct brcmf_if *ifp, u16 command, u16 params)

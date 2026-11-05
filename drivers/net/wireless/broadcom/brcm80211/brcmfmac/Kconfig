@@ -21,6 +21,16 @@ config BRCMFMAC_KUNIT_TEST
 	  and comments larger than the output buffer limit. Tests invoke
 	  the production parser without requesting firmware or a Wi-Fi bus.
 
+config BRCMFMAC_P2P_KUNIT_TEST
+	tristate "KUnit tests for brcmfmac scan and capability policy" if !KUNIT_ALL_TESTS
+	depends on KUNIT && BRCMFMAC
+	default KUNIT_ALL_TESTS
+	help
+	  Test production scan parameter conversion and capability decisions.
+	  Cover channel/SSID alignment and explicit user feature overrides.
+	  Keep firmware queries and P2P lifecycle validation on real hardware.
+	  This suite may also be built as a separate KUnit module.
+
 config BRCMFMAC_PROTO_MSGBUF
 	bool
 
