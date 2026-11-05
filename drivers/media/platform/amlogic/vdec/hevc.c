@@ -59,6 +59,7 @@
 #define H265_AUX_SUFFIX_SIZE	(12 * 1024)
 
 #define H265_PADDING_SIZE	(16 * 1024)
+#define H265_FIFO_ALIGN		8
 #define H265_TIMEOUT_MS		500
 
 /* 16 references plus the picture being decoded plus slack. */
@@ -407,7 +408,8 @@ static void h265_prot_init(struct aml_hevc_ctx *h)
 	h265_config_workspace(h);
 	h265_init_decoder(h);
 
-	wr(hw, HEVC_WAIT_FLAG, 1);
+	/* A fresh frame-based input starts at offset zero, with no invalid bytes. */
+	wr(hw, HEVC_WAIT_FLAG, 0);
 	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
 	wr(hw, HEVC_ASSIST_MBOX0_MASK, 1);
 	wr(hw, HEVC_PSCALE_CTRL, 0);
@@ -425,7 +427,8 @@ static void h265_prot_init(struct aml_hevc_ctx *h)
 static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 {
 	struct aml_vdec_hw *hw = h->hw;
-	size_t want = ALIGN(size + H265_PADDING_SIZE, SZ_64K);
+	size_t want = ALIGN(size + H265_PADDING_SIZE + H265_FIFO_ALIGN, SZ_64K);
+	size_t write_offset = round_down(size + H265_PADDING_SIZE, H265_FIFO_ALIGN);
 
 	if (!data || !size)
 		return -EINVAL;
@@ -446,15 +449,17 @@ static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 	h->payload = size;
 
 	wr(hw, HEVC_STREAM_START_ADDR, h->stream_p);
-	wr(hw, HEVC_STREAM_END_ADDR, h->stream_p + h->stream_size - 1);
+	/* Keep a FIFO word spare so padded input never looks like an empty ring. */
+	wr(hw, HEVC_STREAM_END_ADDR, h->stream_p + h->stream_size);
 	wr(hw, HEVC_STREAM_RD_PTR, h->stream_p);
-	wr(hw, HEVC_STREAM_WR_PTR, h->stream_p + size + H265_PADDING_SIZE);
+	wr(hw, HEVC_STREAM_WR_PTR, h->stream_p + write_offset);
 	wr(hw, HEVC_SHIFT_BYTE_COUNT, 0);
 	wr(hw, H265_DECODE_SIZE, size);
 	wr(hw, HEVC_STREAM_CONTROL,
-	   (read_dos_reg(hw, HEVC_STREAM_CONTROL) & ~0xfff0) | (7 << 4) | BIT(0));
+	   (read_dos_reg(hw, HEVC_STREAM_CONTROL) & ~0xfff1) | (7 << 4));
 	wr(hw, HEVC_STREAM_FIFO_CTL,
 	   read_dos_reg(hw, HEVC_STREAM_FIFO_CTL) | BIT(29));
+	regmap_update_bits(hw->map[DOS_BUS], HEVC_STREAM_CONTROL, BIT(0), BIT(0));
 	return 0;
 }
 
@@ -1546,7 +1551,8 @@ int aml_hevc_dec_run(void *priv)
 	wr(hw, DOS_SW_RESET3, BIT(12) | BIT(11));
 	wr(hw, DOS_SW_RESET3, 0);
 	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
-	wr(hw, HEVC_DEC_STATUS_REG, 0);
+	/* Release the frame-based firmware command handshake before starting it. */
+	wr(hw, HEVC_DEC_STATUS_REG, H265_ACTION_DONE);
 	wr(hw, HEVC_CPSR, 0);
 	wr(hw, HEVC_MPSR, 1);
 
@@ -1555,8 +1561,9 @@ int aml_hevc_dec_run(void *priv)
 				     msecs_to_jiffies(H265_TIMEOUT_MS));
 	ret = elapsed ? ctx->decode_result : -ETIMEDOUT;
 	if (!elapsed)
-		dev_err(hw->dev, "hevc: timeout, status %02x pc %08x shift %08x\n",
-			hw->hevc_irq_status, read_dos_reg(hw, HEVC_MPC_E),
+		dev_err(hw->dev, "hevc: timeout, irq_status %02x status %02x pc %08x shift %08x\n",
+			hw->hevc_irq_status, read_dos_reg(hw, HEVC_DEC_STATUS_REG),
+			read_dos_reg(hw, HEVC_MPC_E),
 			read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT));
 stop:
 	stop_ret = aml_hevc_stop_hw(hw);
