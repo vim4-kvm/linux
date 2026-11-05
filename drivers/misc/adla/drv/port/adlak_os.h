@@ -23,6 +23,9 @@
 
 /***************************** Include Files *********************************/
 
+#include <linux/errno.h>
+#include <linux/mutex.h>
+
 #include "adlak_log.h"
 #include "adlak_os_base.h"
 #include "adlak_typedef.h"
@@ -66,7 +69,26 @@ void  adlak_os_udelay(unsigned int us);
 
 uintptr_t     adlak_os_msecs_to_jiffies(uintptr_t ms);
 typedef void *adlak_os_mutex_t;
-int           adlak_os_mutex_init(adlak_os_mutex_t *pmutex);
+/**
+ * adlak_os_mutex_alloc() - Allocate a handle for adlak_os_mutex_init()
+ * @mutex: receives the private handle, or NULL on allocation failure
+ *
+ * Return: the uninitialized mutex, or NULL if allocation fails.
+ */
+struct mutex *adlak_os_mutex_alloc(adlak_os_mutex_t *mutex);
+
+/* Keep mutex_init() at the caller so distinct lock roles get distinct keys. */
+#define adlak_os_mutex_init(handle) \
+({ \
+	struct mutex *__adlak_mutex = adlak_os_mutex_alloc(handle); \
+	int __adlak_ret = -ENOMEM; \
+	\
+	if (__adlak_mutex) { \
+		mutex_init(__adlak_mutex); \
+		__adlak_ret = 0; \
+	} \
+	__adlak_ret; \
+})
 int           adlak_os_mutex_destroy(adlak_os_mutex_t *pmutex);
 int           adlak_os_mutex_lock(adlak_os_mutex_t *pmutex);
 int           adlak_os_mutex_unlock(adlak_os_mutex_t *pmutex);

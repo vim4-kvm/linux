@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <kunit/resource.h>
 #include <kunit/test.h>
 #include <linux/bitmap.h>
+#include <linux/debug_locks.h>
 #include <linux/limits.h>
 #include <linux/module.h>
 
@@ -55,6 +57,36 @@ static void adla_bitmap_pool_test(struct kunit *test)
 static void adla_mutex_release(void *data)
 {
 	adlak_os_mutex_destroy(data);
+}
+
+static void adla_mutex_roles_test(struct kunit *test)
+{
+	adlak_os_mutex_t *device, *smmu;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_PROVE_LOCKING)) {
+		kunit_skip(test, "mutex class regression requires PROVE_LOCKING");
+		return;
+	}
+
+	device = kunit_kzalloc(test, sizeof(*device), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, device);
+	smmu = kunit_kzalloc(test, sizeof(*smmu), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, smmu);
+	KUNIT_ASSERT_EQ(test, adlak_os_mutex_init(device), 0);
+	ret = kunit_add_action_or_reset(test, adla_mutex_release, device);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test, adlak_os_mutex_init(smmu), 0);
+	ret = kunit_add_action_or_reset(test, adla_mutex_release, smmu);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	/* Device initialization holds its mutex while initializing the SMMU. */
+	KUNIT_ASSERT_EQ(test, READ_ONCE(debug_locks), 1);
+	KUNIT_ASSERT_EQ(test, adlak_os_mutex_lock(device), 0);
+	KUNIT_EXPECT_EQ(test, adlak_os_mutex_lock(smmu), 0);
+	KUNIT_EXPECT_EQ(test, adlak_os_mutex_unlock(smmu), 0);
+	KUNIT_EXPECT_EQ(test, adlak_os_mutex_unlock(device), 0);
+	KUNIT_EXPECT_EQ(test, READ_ONCE(debug_locks), 1);
 }
 
 static void adla_add_task(struct list_head *list, struct adlak_task *task,
@@ -133,6 +165,7 @@ static void adla_fixup_bounds_test(struct kunit *test)
 }
 
 static struct kunit_case adla_cases[] = {
+	KUNIT_CASE(adla_mutex_roles_test),
 	KUNIT_CASE(adla_bitmap_pool_test),
 	KUNIT_CASE(adla_queued_cancel_test),
 	KUNIT_CASE(adla_range_bounds_test),
@@ -149,4 +182,4 @@ kunit_test_suite(adla_suite);
 
 MODULE_IMPORT_NS("EXPORTED_FOR_KUNIT_TESTING");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("ADLA allocation, queued cancellation and bounds tests");
+MODULE_DESCRIPTION("ADLA mutex classes, allocation, cancellation and bounds tests");

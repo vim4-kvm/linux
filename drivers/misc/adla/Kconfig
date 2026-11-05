@@ -10,7 +10,7 @@ config AMLOGIC_ADLA_COMPAT
 	  required before use on T7C boards.
 
 config AMLOGIC_ADLA_KUNIT_TEST
-	tristate "KUnit tests for ADLA memory and cancellation" if !KUNIT_ALL_TESTS
+	tristate "KUnit tests for ADLA mutexes, memory and cancellation" if !KUNIT_ALL_TESTS
 	depends on KUNIT && AMLOGIC_ADLA_COMPAT
 	default KUNIT_ALL_TESTS
 	help
@@ -18,3 +18,5 @@ config AMLOGIC_ADLA_KUNIT_TEST
 	  untrusted command bounds using real driver types and kernel lists.
 	  DMA, recovery, power and ioctl lifetimes require board validation.
 	  This suite may also be built as a separate KUnit module.
+	  With PROVE_LOCKING, also check initialization-site mutex classes.
+	  Without lockdep, only the mutex-class regression case is skipped.

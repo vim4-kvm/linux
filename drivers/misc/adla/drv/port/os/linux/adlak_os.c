@@ -205,21 +205,18 @@ typedef struct adlak_os_mutex_inner {
     struct mutex mutex_hd;
 } adlak_os_mutex_inner_t;
 
-int adlak_os_mutex_init(adlak_os_mutex_t *mutex) {
-    adlak_os_mutex_inner_t *pmutex_inner = NULL;
-    PRINT_FUNC_NAME;
-    pmutex_inner =
-        (adlak_os_mutex_inner_t *)adlak_os_malloc(sizeof(adlak_os_mutex_inner_t), ADLAK_GFP_KERNEL);
-    if (ADLAK_IS_ERR_OR_NULL(pmutex_inner)) {
-        *mutex = NULL;
-        return ERR(ENOMEM);
-    }
-    mutex_init(&pmutex_inner->mutex_hd);
-    *mutex = pmutex_inner;
-    AML_LOG_DEBUG("mutex_init success!\n");
-    return ERR(NONE);
+struct mutex *adlak_os_mutex_alloc(adlak_os_mutex_t *mutex)
+{
+	adlak_os_mutex_inner_t *inner;
+
+	inner = adlak_os_malloc(sizeof(*inner), ADLAK_GFP_KERNEL);
+	*mutex = inner;
+	if (!inner)
+		return NULL;
+
+	return &inner->mutex_hd;
 }
-EXPORT_SYMBOL_IF_KUNIT(adlak_os_mutex_init);
+EXPORT_SYMBOL_IF_KUNIT(adlak_os_mutex_alloc);
 
 int adlak_os_mutex_destroy(adlak_os_mutex_t *mutex) {
     adlak_os_mutex_inner_t *pmutex_inner = (adlak_os_mutex_inner_t *)*mutex;
@@ -247,6 +244,7 @@ int adlak_os_mutex_lock(adlak_os_mutex_t *mutex) {
     }
     return ERR(EINVAL);
 }
+EXPORT_SYMBOL_IF_KUNIT(adlak_os_mutex_lock);
 
 int adlak_os_mutex_unlock(adlak_os_mutex_t *mutex) {
     adlak_os_mutex_inner_t *pmutex_inner = (adlak_os_mutex_inner_t *)*mutex;
@@ -257,6 +255,7 @@ int adlak_os_mutex_unlock(adlak_os_mutex_t *mutex) {
     }
     return ERR(EINVAL);
 }
+EXPORT_SYMBOL_IF_KUNIT(adlak_os_mutex_unlock);
 
 typedef struct adlak_os_spinlock_inner {
     spinlock_t    spinlock_hd;
