@@ -40,6 +40,7 @@ enum aml_fmt_type {
 enum aml_codec_type {
 	CODEC_TYPE_H264 = 0,
 	CODEC_TYPE_MPEG2,
+	CODEC_TYPE_MJPEG,
 	CODEC_TYPE_FRAME,
 };
 
@@ -90,6 +91,8 @@ struct aml_vdec_dev {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_m2m_dev *m2m_dev_dec;
 	struct video_device *vfd;
+	struct video_device *jpeg_vfd;
+	struct media_intf_devnode *jpeg_intf;
 	struct media_device mdev;
 
 	unsigned int open_count;
@@ -151,6 +154,7 @@ struct aml_vdec_ctx {
 	int int_cond;
 	wait_queue_head_t queue;
 	struct v4l2_pix_format_mplane pix_fmt[2];
+	struct v4l2_rect compose;
 	struct aml_video_fmt dec_fmt[2];
 
 	bool is_cap_streamon;
@@ -163,6 +167,7 @@ struct aml_vdec_ctx {
 	int decode_result;
 	bool buffers_held;
 	bool decode_failed;
+	bool is_jpeg;
 	bool diag_started;
 };
 
