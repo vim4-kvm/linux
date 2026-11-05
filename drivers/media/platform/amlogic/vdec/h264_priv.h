@@ -137,8 +137,8 @@ union param {
 };
 
 struct h264_canvas {
-	int canvas_pos;
-	int poc;
+	u64 timestamp;
+	enum h264_picture_structure structure;
 };
 
 struct h264_decode_buf_spec {
@@ -214,7 +214,7 @@ struct aml_h264_ctx {
 	u32 col_buf_alloc_size;
 	u32 one_col_buf_size;
 	u32 colocated_buf_map;
-	int colocated_buf_poc[H264_MAX_COL_BUF];
+	u64 colocated_timestamp[H264_MAX_COL_BUF];
 	enum h264_picture_structure colocated_structure[H264_MAX_COL_BUF];
 
 	u32 frame_width;
@@ -232,6 +232,8 @@ struct aml_h264_ctx {
 };
 
 #if IS_ENABLED(CONFIG_KUNIT)
+void h264_prune_picture_slots(struct aml_h264_ctx *h264, u64 timestamp, bool held);
+int h264_get_picture_slots(struct aml_h264_ctx *h264, u64 timestamp);
 enum h264_picture_structure
 h264_picture_structure(const struct v4l2_ctrl_h264_decode_params *decode,
 		       const struct v4l2_ctrl_h264_sps *sps);
