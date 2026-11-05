@@ -188,6 +188,7 @@ struct aml_h264_ctx {
 	struct h264_decode_buf_spec ref_list1_unreordered[V4L2_H264_NUM_DPB_ENTRIES + 1];
 	u8 list_size[2];
 	u32 canvas_pos_map;
+	u32 configured_canvas_map;
 	struct h264_canvas ref_canvas[V4L2_H264_NUM_DPB_ENTRIES + 1];
 	dma_addr_t lmem_phy_addr;
 	void *lmem_addr;
