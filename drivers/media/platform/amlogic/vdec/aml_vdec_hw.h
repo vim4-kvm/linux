@@ -179,6 +179,12 @@ struct aml_vdec_hw {
 	bool hevc_core_test_passed;
 	u32 hevc_axi_front;
 	u32 hevc_axi_back;
+	int hevc_irq;
+	bool hevc_irq_enabled;
+	bool hevc_fw_loaded;
+	u32 hevc_irq_status;
+	irqreturn_t (*hevc_irq_thread)(int irq, void *priv);
+	void *hevc_priv;
 };
 
 /**
@@ -210,6 +216,11 @@ int aml_vdec_t7_power_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_hevc_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_hevc_core_test(struct aml_vdec_hw *hw);
+int aml_hevc_prepare_hw(struct aml_vdec_hw *hw);
+int aml_hevc_enable_irq(struct aml_vdec_hw *hw,
+			irqreturn_t (*thread)(int irq, void *priv), void *priv);
+int aml_hevc_stop_hw(struct aml_vdec_hw *hw);
+int aml_hevc_release_hw(struct aml_vdec_hw *hw);
 int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);

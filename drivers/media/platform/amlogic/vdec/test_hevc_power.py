@@ -35,7 +35,7 @@ struct aml_vdec_hw {
     struct clk *hevc_p0, *hevcb, *hevcb_p0;
     struct pm *pm;
     bool has_hevc, powered, faulted, hevc_powered, probe_failed;
-    bool hevc_test_passed, mdec_test_passed;
+    bool hevc_test_passed, mdec_test_passed, hevc_fw_loaded;
     u32 hevc_parser_version, probe_step;
 };
 static unsigned int calls, fail_at, last_calls, internal_reads;

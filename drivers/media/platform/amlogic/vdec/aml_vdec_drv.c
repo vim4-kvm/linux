@@ -578,8 +578,10 @@ static int aml_vdec_runtime_resume(struct device *dev)
 static int aml_vdec_runtime_suspend(struct device *dev)
 {
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
+	int ret;
 
-	return vdec_disable(vdec->dec_hw);
+	ret = aml_hevc_release_hw(vdec->dec_hw);
+	return ret ?: vdec_disable(vdec->dec_hw);
 }
 
 static const struct dev_pm_ops aml_vdec_pm_ops = {
