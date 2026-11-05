@@ -427,8 +427,23 @@ static void timestamp_picture_slots(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, h->colocated_buf_map, 0);
 }
 
+static void paired_field_reference_view(struct kunit *test)
+{
+	enum h264_picture_structure view;
+
+	view = h264_reference_structure(H264_PICTURE_BOTTOM, V4L2_H264_FRAME_REF);
+	KUNIT_EXPECT_EQ(test, view, H264_PICTURE_TOP);
+	view = h264_reference_structure(H264_PICTURE_TOP, V4L2_H264_BOTTOM_FIELD_REF);
+	KUNIT_EXPECT_EQ(test, view, H264_PICTURE_BOTTOM);
+	view = h264_reference_structure(H264_PICTURE_FRAME, V4L2_H264_BOTTOM_FIELD_REF);
+	KUNIT_EXPECT_EQ(test, view, H264_PICTURE_FRAME);
+	view = h264_reference_structure(H264_PICTURE_MBAFF, V4L2_H264_TOP_FIELD_REF);
+	KUNIT_EXPECT_EQ(test, view, H264_PICTURE_MBAFF);
+}
+
 static struct kunit_case h264_test_cases[] = {
 	KUNIT_CASE(timestamp_picture_slots),
+	KUNIT_CASE(paired_field_reference_view),
 	KUNIT_CASE(original_picture_structure),
 	KUNIT_CASE(colocated_mv_layout),
 	KUNIT_CASE(duplicate_weighted_references),
