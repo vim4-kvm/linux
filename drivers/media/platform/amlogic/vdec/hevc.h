@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR MIT) */
 /*
- * HEVC (H.265) decoding on the Amlogic S4 HEVC core.
+ * HEVC (H.265) decoding on the Amlogic HEVC core.
  */
 
 #ifndef _AML_HEVC_H_
 #define _AML_HEVC_H_
 
-#include "vp9.h"
+#include "hevc_regs.h"
 
 /*
  * Scratch register meanings for the HEVC microcode.  Several of these names
@@ -40,7 +40,6 @@
 #define H265_DECODE_INFO		HEVC_ASSIST_SCRATCH_1
 
 /* Not in av1.h/vp9.h yet; addresses from the staging meson hevc_regs.h. */
-#define HEVC_PARSER_VERSION		REG_ALIGN(0x3100)
 #define HEVC_PARSER_LCU_START		REG_ALIGN(0x3124)
 #define HEVC_MCPU_INTR_REQ		REG_ALIGN(0x3305)
 #define HEVC_MPRED_CTRL1		REG_ALIGN(0x3202)
@@ -105,21 +104,9 @@
 #define H265_P_SLICE			1
 #define H265_I_SLICE			2
 
-#define H265_FW_FORMAT_MMU		17	/* VIDEO_DEC_HEVC_MMU */
-#define H265_FW_CORE_HEVC		2
-
 int aml_hevc_init(void *priv);
 void aml_hevc_exit(void *priv);
+int aml_hevc_configure(void *priv);
 int aml_hevc_dec_run(void *priv);
-
-/*
- * Reference lists for the picture, as POCs: [0] = 1 when valid, [1..16] L0,
- * [17..32] L1.  The microcode does not count explicitly coded long-term
- * pictures in NumPicTotalCurr and so misreads list_entry; a client that
- * strips ref_pic_lists_modification() from the slice passes the final lists
- * here instead.  Not set (0) = build them from the RPS as usual.
- */
-#define V4L2_CID_AML_HEVC_REFS	(V4L2_CID_USER_BASE + 0x1f01)
-#define AML_HEVC_REFS_LEN	33
 
 #endif
