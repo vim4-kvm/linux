@@ -48,27 +48,6 @@ static inline uint32_t spec2canvas(struct h264_decode_buf_spec *buf_spec)
 		(buf_spec->y_canvas_index << 0);
 }
 
-static struct h264_decode_buf_spec *find_spec_by_dpb_index(struct aml_h264_ctx
-							   *h264_ctx, int index, int list)
-{
-	int i;
-	int size;
-	struct h264_decode_buf_spec *ref_list;
-
-	size = h264_ctx->list_size[list];
-	if (list == 0)
-		ref_list = &h264_ctx->ref_list0[0];
-	else
-		ref_list = &h264_ctx->ref_list1[0];
-
-	for (i = 0; i < size; i++) {
-		if (index == ref_list[i].dpb_index)
-			return &ref_list[i];
-	}
-
-	return NULL;
-}
-
 static bool h264_needs_headers(struct aml_h264_ctx *h264)
 {
 	const struct vdec_h264_stateless_ctrl_ref *ctrl = &h264->ctrl_ref;
@@ -1173,7 +1152,7 @@ static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *
 	struct vb2_buffer *vb;
 	struct vb2_v4l2_buffer *vb2_v4l2;
 	struct vb2_queue *vq;
-	int i, ret;
+	int i, list, ret;
 
 	if (hw->has_internal_canvas && !h264_ctx->new_pic_flag)
 		goto references;
@@ -1201,26 +1180,43 @@ references:
 
 	vq = v4l2_m2m_get_vq(ctx->m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 
-	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
-		struct v4l2_h264_dpb_entry *dpb = &decode->dpb[i];
-		struct h264_decode_buf_spec *l0, *l1, *spec;
+	for (list = 0; list < 2; list++) {
+		struct h264_decode_buf_spec *refs;
 
-		if (!(dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE))
-			continue;
-		l0 = find_spec_by_dpb_index(h264_ctx, i, 0);
-		l1 = find_spec_by_dpb_index(h264_ctx, i, 1);
-		spec = l0 ? l0 : l1;
-		if (!spec)
-			continue;
-		spec->canvas_pos = get_canvas_pos(h264_ctx, dpb->reference_ts);
-		vb = vb2_find_buffer(vq, dpb->reference_ts);
-		if (spec->canvas_pos < 0 || !vb)
-			return -EINVAL;
-		h264_set_buffer_address(ctx, spec, vb);
-		if (l0 && l1)
-			memcpy(l1, l0, sizeof(*l1));
+		refs = list ? h264_ctx->ref_list1 : h264_ctx->ref_list0;
+
+		/* Both field views of one DPB entry must retain their own metadata. */
+		for (i = 0; i < h264_ctx->list_size[list]; i++) {
+			u64 timestamp = refs[i].dpb->reference_ts;
+
+			refs[i].canvas_pos = get_canvas_pos(h264_ctx, timestamp);
+			refs[i].col_buf_index = get_col_buf_index(h264_ctx, timestamp);
+			vb = vb2_find_buffer(vq, timestamp);
+			if (refs[i].canvas_pos < 0 || !vb)
+				return -EINVAL;
+			h264_set_buffer_address(ctx, &refs[i], vb);
+		}
 	}
 	return 0;
+}
+
+VISIBLE_IF_KUNIT enum h264_picture_structure
+h264_reference_structure(enum h264_picture_structure original, u8 fields)
+{
+	if (original >= H264_PICTURE_FRAME)
+		return original;
+	/* A paired-field frame view still uses the field MV layout. */
+	return fields == V4L2_H264_BOTTOM_FIELD_REF ? H264_PICTURE_BOTTOM : H264_PICTURE_TOP;
+}
+EXPORT_SYMBOL_IF_KUNIT(h264_reference_structure);
+
+static u32 h264_buffer_info(enum h264_picture_structure structure, u8 fields)
+{
+	if (fields == V4L2_H264_TOP_FIELD_REF)
+		return 0xf400;
+	if (fields == V4L2_H264_BOTTOM_FIELD_REF)
+		return 0xf440;
+	return structure == H264_PICTURE_MBAFF ? 0xf4c0 : 0xf480;
 }
 
 static int h264_config_decode_buf(struct aml_vdec_hw *hw,
@@ -1234,7 +1230,6 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 	unsigned int ref_cfg;
 	unsigned int ref_cfg_once = 0;
 	struct slice *curr_slice = &h264_ctx->mslice;
-	unsigned int type_cfg = 0x3;	/* 0x3: frame type */
 	unsigned int colocate_adr_offset = 0;
 	u32 colocate_rd_adr_offset;
 	enum h264_picture_structure reference_structure = H264_PICTURE_FRAME;
@@ -1273,7 +1268,12 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 		info2 = 0;
 
 		if (j == h264_ctx->curr_spec.canvas_pos) {
-			info0 = 0xf480 | 0xf;
+			u8 fields = V4L2_H264_FRAME_REF;
+
+			if (decode->flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC)
+				fields = decode->flags & V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD ?
+					V4L2_H264_BOTTOM_FIELD_REF : V4L2_H264_TOP_FIELD_REF;
+			info0 = h264_buffer_info(h264_ctx->curr_spec.structure, fields) | 0xf;
 			info1 = decode->top_field_order_cnt;
 			info2 = decode->bottom_field_order_cnt;
 			if (decode->bottom_field_order_cnt <
@@ -1282,7 +1282,7 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 		} else if (h264_ctx->canvas_pos_map & BIT(j)) {
 			dpb = get_dpb_by_timestamp(decode, canvas->timestamp);
 			if (dpb && (dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE)) {
-				info0 = 0xf480;
+				info0 = h264_buffer_info(canvas->structure, dpb->fields);
 				if (dpb->bottom_field_order_cnt <
 				    dpb->top_field_order_cnt)
 					info0 |= 0x100;
@@ -1317,7 +1317,7 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 	for (i = 0; i < h264_ctx->list_size[0]; i++) {
 		canvas_pos = h264_ctx->ref_list0[i].canvas_pos;
 		/* bit 0:3 canvas_pos bit 5:6 frame struct cfg */
-		ref_cfg_once = (canvas_pos & 0x1f) | (type_cfg << 5);
+		ref_cfg_once = (canvas_pos & 0x1f) | (h264_ctx->ref_list0[i].fields << 5);
 		ref_cfg <<= 8;
 		ref_cfg |= ref_cfg_once;
 		j++;
@@ -1355,7 +1355,7 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 
 	for (i = 0; i < h264_ctx->list_size[1]; i++) {
 		canvas_pos = h264_ctx->ref_list1[i].canvas_pos;
-		ref_cfg_once = (canvas_pos & 0x1f) | (type_cfg << 5);
+		ref_cfg_once = (canvas_pos & 0x1f) | (h264_ctx->ref_list1[i].fields << 5);
 		ref_cfg <<= 8;
 		ref_cfg |= ref_cfg_once;
 		j++;
@@ -1388,7 +1388,8 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 
 		if (index < 0 || index >= h264_ctx->colocated_buf_num)
 			return -EINVAL;
-		reference_structure = h264_ctx->colocated_structure[index];
+		reference_structure = h264_reference_structure(h264_ctx->colocated_structure[index],
+							       h264_ctx->ref_list1[0].fields);
 	}
 	ret = h264_mv_offsets(h264_ctx->curr_spec.structure, reference_structure,
 			      curr_slice->first_mb_in_slice,
