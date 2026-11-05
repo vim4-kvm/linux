@@ -2168,12 +2168,16 @@
 			 <&clkc_periphs CLKID_VDEC>,
 			 <&clkc_periphs CLKID_SYS_PCLK_SYS_APB>,
 			 <&clkc_periphs CLKID_SYS_A73PCLK_APB>,
-			 <&clkc_periphs CLKID_VDEC_0>;
-		clock-names = "vdec", "clk_vdec_mux", "sys-apb", "a73-apb", "vdec-p0";
+			 <&clkc_periphs CLKID_VDEC_0>,
+			 <&clkc_periphs CLKID_HEVCF>,
+			 <&clkc_periphs CLKID_HEVCF_0>;
+		clock-names = "vdec", "clk_vdec_mux", "sys-apb", "a73-apb", "vdec-p0",
+			      "clk_hevcf_mux", "hevc-p0";
 		/* Secure firmware owns VDEC RAM/isolation/reset; NIC3 is its parent. */
 		power-domains = <&pwrc PWRC_T7_DOS_VDEC_ID>,
-				<&pwrc PWRC_T7_NIC3_ID>;
-		power-domain-names = "vdec", "nic3";
+				<&pwrc PWRC_T7_NIC3_ID>,
+				<&pwrc PWRC_T7_DOS_HEVC_ID>;
+		power-domain-names = "vdec", "nic3", "hevc";
 		amlogic,canvas = <&canvas>;
 		status = "disabled";
 	};
