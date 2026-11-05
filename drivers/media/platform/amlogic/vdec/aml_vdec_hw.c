@@ -1080,6 +1080,7 @@ static int t7_hevc_power_off(struct aml_vdec_hw *hw)
 
 	if (!hw->hevc_powered)
 		return 0;
+	hw->hevc_fw_loaded = false;
 	clk_disable_unprepare(hw->hevcb);
 	clk_disable_unprepare(hw->gates[HEVCF_MUX].clk);
 	ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_HEVC].dev);
@@ -1221,7 +1222,7 @@ power_off:
 	return ret;
 }
 
-/* Caller keeps HEVC clocks and the DOS lease; this probe never enables its IRQ. */
+/* Caller keeps HEVC clocks and the DOS lease until every DMA path is idle. */
 static int t7_hevc_stop(struct aml_vdec_hw *hw)
 {
 	struct regmap *map = hw->map[DOS_BUS];
@@ -1230,6 +1231,10 @@ static int t7_hevc_stop(struct aml_vdec_hw *hw)
 	int ret;
 
 	ret = regmap_write(map, HEVC_ASSIST_MBOX0_MASK, 0);
+	if (hw->hevc_irq_enabled) {
+		disable_irq(hw->hevc_irq);
+		hw->hevc_irq_enabled = false;
+	}
 	if (ret)
 		return ret;
 	ret = regmap_write(map, HEVC_MPSR, 0);
@@ -1310,9 +1315,91 @@ static int t7_hevc_reset(struct aml_vdec_hw *hw)
 	return regmap_update_bits(map, HEVC_ASSIST_AXI_CTRL, BIT(6) | BIT(14), 0);
 }
 
-int aml_vdec_t7_hevc_core_test(struct aml_vdec_hw *hw)
+int aml_hevc_prepare_hw(struct aml_vdec_hw *hw)
 {
 	struct arm_smccc_res result;
+	int ret;
+
+	ret = t7_hevc_power_on(hw);
+	if (ret)
+		return ret;
+	ret = t7_hevc_stop(hw);
+	if (ret)
+		goto fault;
+	/* The HEVC DMC client is distinct from legacy VDEC's client 13. */
+	arm_smccc_smc(0xb200000e, 4, 0, 0, 0, 0, 0, 0, &result);
+	if (result.a0)
+		return -EACCES;
+	ret = t7_hevc_reset(hw);
+	if (ret)
+		goto fault;
+	/* Core resets retain IMEM. Never carry this cache across a PM reference release. */
+	if (hw->hevc_fw_loaded)
+		return 0;
+	/* HEVC_MMU, legacy core routing: secure firmware selects its HEVC target. */
+	arm_smccc_smc(0xb200000f, 17, 0, 0, 0, 0, 0, 0, &result);
+	dev_info(hw->dev, "HEVC secure firmware load: a0=%#lx\n", result.a0);
+	if (result.a0)
+		return -EIO;
+	hw->hevc_fw_loaded = true;
+	return 0;
+fault:
+	dev_err(hw->dev, "HEVC stop/reset failed: %d front=%#x back=%#x\n",
+		ret, hw->hevc_axi_front, hw->hevc_axi_back);
+	t7_power_fault(hw);
+	return ret;
+}
+
+int aml_hevc_enable_irq(struct aml_vdec_hw *hw,
+			irqreturn_t (*thread)(int irq, void *priv), void *priv)
+{
+	int ret;
+
+	if (!hw->hevc_powered || hw->faulted)
+		return -EHOSTDOWN;
+	if (hw->hevc_irq_enabled || !thread || !priv)
+		return -EINVAL;
+	ret = regmap_write(hw->map[DOS_BUS], HEVC_ASSIST_MBOX0_MASK, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(hw->map[DOS_BUS], HEVC_ASSIST_MBOX0_CLR_REG, 1);
+	if (ret)
+		return ret;
+	hw->hevc_irq_thread = thread;
+	hw->hevc_priv = priv;
+	hw->hevc_irq_enabled = true;
+	enable_irq(hw->hevc_irq);
+	return 0;
+}
+
+int aml_hevc_stop_hw(struct aml_vdec_hw *hw)
+{
+	int ret;
+
+	if (hw->faulted)
+		return -EIO;
+	if (!hw->hevc_powered)
+		return 0;
+	ret = t7_hevc_stop(hw);
+	if (ret) {
+		t7_power_fault(hw);
+		return ret;
+	}
+	/* disable_irq() has waited for the final callback before ownership changes. */
+	hw->hevc_irq_thread = NULL;
+	hw->hevc_priv = NULL;
+	return 0;
+}
+
+int aml_hevc_release_hw(struct aml_vdec_hw *hw)
+{
+	int ret = aml_hevc_stop_hw(hw);
+
+	return ret ?: t7_hevc_power_off(hw);
+}
+
+int aml_vdec_t7_hevc_core_test(struct aml_vdec_hw *hw)
+{
 	int ret, off_ret;
 
 	if (!hw->has_hevc)
@@ -1325,37 +1412,9 @@ int aml_vdec_t7_hevc_core_test(struct aml_vdec_hw *hw)
 	ret = vdec_enable(hw);
 	if (ret)
 		return ret;
-	ret = t7_hevc_power_on(hw);
-	if (ret)
-		goto power_off;
-	dev_info(hw->dev, "HEVC core test: initial stop begin\n");
-	ret = t7_hevc_stop(hw);
-	if (ret)
-		goto fault;
-	dev_info(hw->dev, "HEVC AXI idle: front=%#x back=%#x\n",
-		 hw->hevc_axi_front, hw->hevc_axi_back);
-	/* The HEVC DMC client is distinct from legacy VDEC's client 13. */
-	arm_smccc_smc(0xb200000e, 4, 0, 0, 0, 0, 0, 0, &result);
-	if (result.a0) {
-		ret = -EACCES;
-		goto power_off;
-	}
-	ret = t7_hevc_reset(hw);
-	if (ret)
-		goto fault;
-	/* HEVC_MMU, legacy core routing: secure firmware selects its HEVC target. */
-	dev_info(hw->dev, "HEVC core test: secure firmware load begin\n");
-	arm_smccc_smc(0xb200000f, 17, 0, 0, 0, 0, 0, 0, &result);
-	dev_info(hw->dev, "HEVC secure firmware load: a0=%#lx\n", result.a0);
-	ret = result.a0 ? -EIO : 0;
+	ret = aml_hevc_prepare_hw(hw);
 	/* Even a rejected load can have touched IMEM DMA; always drain it. */
-	off_ret = t7_hevc_stop(hw);
-	if (off_ret) {
-		ret = off_ret;
-		goto fault;
-	}
-power_off:
-	off_ret = t7_hevc_power_off(hw);
+	off_ret = aml_hevc_release_hw(hw);
 	if (!hw->faulted)
 		off_ret = vdec_disable(hw) ?: off_ret;
 	ret = ret ?: off_ret;
@@ -1364,11 +1423,19 @@ power_off:
 	else
 		hw->hevc_core_test_passed = true;
 	return ret;
-fault:
-	dev_err(hw->dev, "HEVC stop/reset failed: %d front=%#x back=%#x\n",
-		ret, hw->hevc_axi_front, hw->hevc_axi_back);
-	t7_power_fault(hw);
-	return ret;
+}
+
+static irqreturn_t hevc_threaded_isr_handler(int irq, void *priv)
+{
+	struct aml_vdec_hw *hw = priv;
+	int ret;
+
+	ret = regmap_read(hw->map[DOS_BUS], HEVC_ASSIST_SCRATCH_0, &hw->hevc_irq_status);
+	if (!ret)
+		ret = regmap_write(hw->map[DOS_BUS], HEVC_ASSIST_MBOX0_CLR_REG, 1);
+	if (ret)
+		hw->hevc_irq_status = U32_MAX;
+	return hw->hevc_irq_thread(irq, hw->hevc_priv);
 }
 
 static const struct power_manager_s pm[] = {
@@ -1465,6 +1532,16 @@ int dev_request_hw_resources(void *priv)
 		dev_err(&pdev->dev, "failed to install irq %d (%d)",
 			hw->dec_irq, ret);
 		return -1;
+	}
+	if (hw->has_hevc) {
+		hw->hevc_irq = platform_get_irq(pdev, 1);
+		if (hw->hevc_irq < 0)
+			return hw->hevc_irq;
+		ret = devm_request_threaded_irq(&pdev->dev, hw->hevc_irq, NULL,
+						hevc_threaded_isr_handler,
+						IRQF_ONESHOT | IRQF_NO_AUTOEN, "hevc", hw);
+		if (ret)
+			return ret;
 	}
 
 	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : MAX_REG_BUS); i++) {
