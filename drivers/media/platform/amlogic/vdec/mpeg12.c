@@ -111,11 +111,11 @@ static void *mpeg12_ctrl(struct aml_vdec_ctx *ctx, u32 id)
  * Rebuild sequence header + sequence extension + picture header + picture
  * coding extension. Matrix controls already use bitstream zigzag order.
  */
-static u32 mpeg12_write_headers(u8 *buf,
-				const struct v4l2_ctrl_mpeg2_sequence *seq,
-				const struct v4l2_ctrl_mpeg2_picture *pic,
-				const struct v4l2_ctrl_mpeg2_quantisation *quant,
-				bool with_seq)
+VISIBLE_IF_KUNIT u32 mpeg12_write_headers(u8 *buf,
+					  const struct v4l2_ctrl_mpeg2_sequence *seq,
+					  const struct v4l2_ctrl_mpeg2_picture *pic,
+					  const struct v4l2_ctrl_mpeg2_quantisation *quant,
+					  bool with_seq)
 {
 	struct bitw bw = { .buf = buf };
 	u32 vbv = seq->vbv_buffer_size;
@@ -209,6 +209,7 @@ picture:
 
 	return bw.bits >> 3;
 }
+EXPORT_SYMBOL_IF_KUNIT(mpeg12_write_headers);
 
 /* Stash the first field of a pair: headers and slices, for the next job. */
 static int mpeg12_stash_field(struct aml_vdec_ctx *ctx,
@@ -413,29 +414,50 @@ static void mpeg12_job_done(struct aml_vdec_ctx *ctx, int result)
 	wake_up_interruptible(&ctx->queue);
 }
 
-static int mpeg12_reference_canvases(struct aml_vdec_ctx *ctx,
-				     const struct v4l2_ctrl_mpeg2_picture *pic,
-				     bool pair, u32 *ref0, u32 *ref1)
+VISIBLE_IF_KUNIT unsigned int
+mpeg12_reference_timestamps(const struct v4l2_ctrl_mpeg2_picture *pic,
+			    const struct v4l2_ctrl_mpeg2_picture *first,
+			    bool pair, u64 refs[2])
 {
-	struct aml_mpeg12_ctx *m = ctx->codec_priv;
-	const struct v4l2_ctrl_mpeg2_picture *first = pair ? &m->fld_pic : pic;
-
 	/*
 	 * The microcode decodes both fields in one run. An I/P pair predicts
 	 * its second field from its first field, without an external anchor.
 	 * Selecting the second field here rejects the initial I/P pair before
 	 * any picture exists in the DPB.
 	 */
+	if (!pair)
+		first = pic;
+	if (first->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_P ||
+	    first->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_B) {
+		refs[0] = first->forward_ref_ts;
+		if (first->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_B) {
+			refs[1] = first->backward_ref_ts;
+			return 2;
+		}
+		return 1;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_IF_KUNIT(mpeg12_reference_timestamps);
+
+static int mpeg12_reference_canvases(struct aml_vdec_ctx *ctx,
+				     const struct v4l2_ctrl_mpeg2_picture *pic,
+				     bool pair, u32 *ref0, u32 *ref1)
+{
+	struct aml_mpeg12_ctx *m = ctx->codec_priv;
+	u64 refs[2];
+	unsigned int count = mpeg12_reference_timestamps(pic, &m->fld_pic, pair, refs);
+
 	*ref0 = ~0u;
 	*ref1 = ~0u;
-	if (first->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_P) {
-		*ref1 = mpeg12_ref_spec(ctx, &m->canvas[2], first->forward_ref_ts);
+	if (count == 1) {
+		*ref1 = mpeg12_ref_spec(ctx, &m->canvas[2], refs[0]);
 		*ref0 = *ref1;
 		if (*ref1 == ~0u)
 			return -EINVAL;
-	} else if (first->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_B) {
-		*ref0 = mpeg12_ref_spec(ctx, &m->canvas[1], first->forward_ref_ts);
-		*ref1 = mpeg12_ref_spec(ctx, &m->canvas[2], first->backward_ref_ts);
+	} else if (count == 2) {
+		*ref0 = mpeg12_ref_spec(ctx, &m->canvas[1], refs[0]);
+		*ref1 = mpeg12_ref_spec(ctx, &m->canvas[2], refs[1]);
 		if (*ref0 == ~0u || *ref1 == ~0u)
 			return -EINVAL;
 	}
