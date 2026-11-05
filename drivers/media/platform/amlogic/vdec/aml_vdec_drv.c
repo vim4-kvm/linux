@@ -252,6 +252,9 @@ static int fops_vcodec_open(struct file *file)
 	}
 	ctx->dev = dec_dev;
 	ctx->is_jpeg = video_devdata(file) == dec_dev->jpeg_vfd;
+	ctx->is_hevc = video_devdata(file) == dec_dev->hevc_vfd;
+	mutex_init(&ctx->hevc_lock);
+	ctx->hevc_min_capture = 1;
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
 	file->private_data = &ctx->fh;
 	v4l2_fh_add(&ctx->fh, file);
@@ -268,6 +271,10 @@ static int fops_vcodec_open(struct file *file)
 	}
 
 	ctx->fh.m2m_ctx = ctx->m2m_ctx;
+	if (ctx->is_hevc) {
+		v4l2_m2m_set_dst_buffered(ctx->m2m_ctx, true);
+		ctx->m2m_ctx->ignore_cap_streaming = true;
+	}
 	ret = aml_vdec_ctrls_setup(ctx);
 	if (ret) {
 		v4l2_err(&dec_dev->v4l2_dev, "Failed to init all ctrls (%d)", ret);
@@ -341,7 +348,9 @@ static const struct media_device_ops aml_m2m_media_ops = {
 	.req_queue = v4l2_m2m_request_queue,
 };
 
-static int aml_vdec_register_jpeg_interface(struct aml_vdec_dev *dev)
+static int aml_vdec_register_interface(struct aml_vdec_dev *dev,
+				       struct video_device *vfd,
+				       struct media_intf_devnode **result)
 {
 	struct media_intf_devnode *intf;
 	struct media_pad *processor, *sink;
@@ -355,7 +364,7 @@ static int aml_vdec_register_jpeg_interface(struct aml_vdec_dev *dev)
 	if (IS_ERR(sink))
 		return PTR_ERR(sink);
 	intf = media_devnode_create(&dev->mdev, MEDIA_INTF_T_V4L_VIDEO, 0,
-				    VIDEO_MAJOR, dev->jpeg_vfd->minor);
+				    VIDEO_MAJOR, vfd->minor);
 	if (!intf)
 		return -ENOMEM;
 	if (!media_create_intf_link(&dev->vfd->entity, &intf->intf, flags) ||
@@ -363,35 +372,37 @@ static int aml_vdec_register_jpeg_interface(struct aml_vdec_dev *dev)
 		media_devnode_remove(intf);
 		return -ENOMEM;
 	}
-	dev->jpeg_intf = intf;
+	*result = intf;
 	return 0;
 }
 
-static int aml_vdec_register_jpeg(struct aml_vdec_dev *dev)
+static int aml_vdec_register_stateful(struct aml_vdec_dev *dev, const char *name,
+				      struct video_device **result,
+				      struct media_intf_devnode **intf)
 {
 	struct video_device *vfd;
 	int ret;
 
-	/* JPEG has a different V4L2 codec contract and does not use media requests. */
+	/* Stateful codecs have separate queues from the media-request interface. */
 	vfd = video_device_alloc();
 	if (!vfd)
 		return -ENOMEM;
 	*vfd = dec_dev;
-	strscpy(vfd->name, "aml_jpeg_decoder", sizeof(vfd->name));
+	strscpy(vfd->name, name, sizeof(vfd->name));
 	vfd->v4l2_dev = &dev->v4l2_dev;
 	vfd->lock = &dev->dev_mutex;
 	video_set_drvdata(vfd, dev);
-	dev->jpeg_vfd = vfd;
+	*result = vfd;
 	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
 	if (!ret) {
-		ret = aml_vdec_register_jpeg_interface(dev);
+		ret = aml_vdec_register_interface(dev, vfd, intf);
 		if (!ret)
 			return 0;
 		video_unregister_device(vfd);
 	} else {
 		video_device_release(vfd);
 	}
-	dev->jpeg_vfd = NULL;
+	*result = NULL;
 	return ret;
 }
 
@@ -492,9 +503,17 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		goto err_media_dev_register;
 	}
 	if (pdata->has_dbus_ctrl) {
-		ret = aml_vdec_register_jpeg(dev);
+		ret = aml_vdec_register_stateful(dev, "aml_jpeg_decoder",
+						 &dev->jpeg_vfd, &dev->jpeg_intf);
+		if (!ret && hw->has_hevc)
+			ret = aml_vdec_register_stateful(dev, "aml_hevc_decoder",
+							 &dev->hevc_vfd, &dev->hevc_intf);
 		if (!ret)
 			return 0;
+		if (dev->jpeg_vfd) {
+			media_devnode_remove(dev->jpeg_intf);
+			video_unregister_device(dev->jpeg_vfd);
+		}
 		media_device_unregister(&dev->mdev);
 		goto err_media_dev_register;
 	}
@@ -544,6 +563,10 @@ static void aml_vdec_drv_remove(struct platform_device *pdev)
 	if (dev->jpeg_vfd) {
 		media_devnode_remove(dev->jpeg_intf);
 		video_unregister_device(dev->jpeg_vfd);
+	}
+	if (dev->hevc_vfd) {
+		media_devnode_remove(dev->hevc_intf);
+		video_unregister_device(dev->hevc_vfd);
 	}
 	if (media_devnode_is_registered(dev->mdev.devnode)) {
 		media_device_unregister(&dev->mdev);

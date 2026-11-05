@@ -41,6 +41,7 @@ enum aml_codec_type {
 	CODEC_TYPE_H264 = 0,
 	CODEC_TYPE_MPEG2,
 	CODEC_TYPE_MJPEG,
+	CODEC_TYPE_HEVC,
 	CODEC_TYPE_FRAME,
 };
 
@@ -93,6 +94,8 @@ struct aml_vdec_dev {
 	struct video_device *vfd;
 	struct video_device *jpeg_vfd;
 	struct media_intf_devnode *jpeg_intf;
+	struct video_device *hevc_vfd;
+	struct media_intf_devnode *hevc_intf;
 	struct media_device mdev;
 
 	unsigned int open_count;
@@ -168,10 +171,17 @@ struct aml_vdec_ctx {
 	bool buffers_held;
 	bool decode_failed;
 	bool is_jpeg;
+	bool is_hevc;
+	bool hevc_wait_capture;
+	u32 hevc_min_capture;
+	/* Serializes HEVC metadata and pending display buffers with ioctls. */
+	struct mutex hevc_lock;
 	bool diag_started;
 };
 
 void aml_vdec_fault(struct aml_vdec_ctx *ctx);
+int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx);
+void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx);
 
 static inline struct aml_vdec_ctx *fh_to_dec_ctx(struct file *file)
 {

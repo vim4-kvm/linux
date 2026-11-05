@@ -11,7 +11,7 @@ HERE = Path(__file__).resolve().parent
 
 class MJPEGTests(unittest.TestCase):
     def test_jpeg_interface_maps_shared_engines_and_cleans_partial_links(self):
-        code = function(HERE / 'aml_vdec_drv.c', 'aml_vdec_register_jpeg_interface')
+        code = function(HERE / 'aml_vdec_drv.c', 'aml_vdec_register_interface')
         run_c(COMMON + """
 #define MEDIA_LNK_FL_IMMUTABLE 1
 #define MEDIA_LNK_FL_ENABLED 2
@@ -53,11 +53,11 @@ int main(void)
     struct aml_vdec_dev dev = { .vfd = &video, .jpeg_vfd = &jpeg };
     for (fail_at = 1; fail_at <= 2; fail_at++) {
         calls = 0;
-        assert(aml_vdec_register_jpeg_interface(&dev) == -ENOMEM);
+        assert(aml_vdec_register_interface(&dev, &jpeg, &dev.jpeg_intf) == -ENOMEM);
         assert(!links && !dev.jpeg_intf && removed == fail_at);
     }
     calls = 0; fail_at = 0;
-    assert(!aml_vdec_register_jpeg_interface(&dev));
+    assert(!aml_vdec_register_interface(&dev, &jpeg, &dev.jpeg_intf));
     assert(links == 2 && dev.jpeg_intf == &intf);
     return 0;
 }
@@ -78,6 +78,7 @@ struct queue {
 };
 struct aml_vdec_ctx {
     unsigned int curr_dec_type;
+    bool is_jpeg, is_hevc;
     struct { unsigned int codec_type; } dec_fmt[1];
     struct queue *m2m_ctx;
 };
@@ -100,13 +101,15 @@ static int v4l2_m2m_ioctl_stateless_decoder_cmd(struct file *f, void *p,
 { return v4l2_m2m_ioctl_stateless_try_decoder_cmd(f, p, c); }
 static int v4l2_m2m_ioctl_decoder_cmd(struct file *f, void *p, struct v4l2_decoder_cmd *c)
 { return v4l2_m2m_ioctl_try_decoder_cmd(f, p, c); }
+static int aml_hevc_decoder_cmd(struct file *f, void *p, struct v4l2_decoder_cmd *c)
+{ assert(!"unexpected HEVC dispatch"); return -EINVAL; }
 """ + code + """
 int main(void)
 {
     struct vb2_v4l2_buffer src = {}, dst = { .vb2_buf.payload = 1000 }, next = {};
     struct queue q = { .src = &src, .dst = &dst, .last = &next, .draining = true };
     struct aml_vdec_ctx ctx = { .curr_dec_type = CODEC_TYPE_MJPEG,
-        .dec_fmt[0].codec_type = CODEC_TYPE_MJPEG, .m2m_ctx = &q };
+        .dec_fmt[0].codec_type = CODEC_TYPE_MJPEG, .m2m_ctx = &q, .is_jpeg = true };
     struct file file = { &ctx };
     struct v4l2_decoder_cmd cmd = { .cmd = V4L2_DEC_CMD_STOP };
     assert(!vdec_decoder_cmd(&file, NULL, &cmd));
@@ -123,6 +126,7 @@ int main(void)
     cmd.cmd = V4L2_DEC_CMD_FLUSH;
     assert(vdec_try_decoder_cmd(&file, NULL, &cmd) == -EINVAL);
     ctx.dec_fmt[0].codec_type = 0;
+    ctx.is_jpeg = false;
     assert(!vdec_decoder_cmd(&file, NULL, &cmd));
     cmd.cmd = V4L2_DEC_CMD_STOP;
     assert(vdec_decoder_cmd(&file, NULL, &cmd) == -EINVAL);

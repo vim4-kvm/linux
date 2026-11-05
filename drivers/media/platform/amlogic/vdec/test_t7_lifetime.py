@@ -129,6 +129,7 @@ int main(void)
 #define AML_FMT_DEC 0
 #define AML_FMT_FRAME 1
 #define CODEC_TYPE_MJPEG 2
+#define CODEC_TYPE_HEVC 3
 #define strscpy(d, s, n) ((void)0)
 #define ALIGN(v, a) (((v) + (a) - 1) / (a) * (a))
 #define dev_dbg(...) ((void)0)
@@ -143,7 +144,7 @@ struct vb2_queue { bool busy; };
 struct aml_vdec_ctx {
     struct aml_vdec_dev *dev;
     void *m2m_ctx;
-    bool is_jpeg;
+    bool is_jpeg, is_hevc;
     struct v4l2_rect compose;
     struct aml_video_fmt dec_fmt[2];
     struct v4l2_pix_format_mplane pix_fmt[2];
@@ -171,6 +172,11 @@ static struct vb2_queue *v4l2_m2m_get_vq(void *p, unsigned int type)
 static bool vb2_is_busy(struct vb2_queue *q) { return q->busy; }
 struct file { struct aml_vdec_ctx *ctx; };
 static struct aml_vdec_ctx *fh_to_dec_ctx(struct file *f) { return f->ctx; }
+static int aml_hevc_try_fmt(struct aml_vdec_ctx *c, enum v4l2_buf_type t,
+                            struct v4l2_pix_format_mplane *p)
+{ assert(!"unexpected HEVC dispatch"); return -EINVAL; }
+static int aml_hevc_get_selection(struct aml_vdec_ctx *c, struct v4l2_selection *s)
+{ assert(!"unexpected HEVC dispatch"); return -EINVAL; }
 """ + code + """
 int main(void)
 {
@@ -891,7 +897,7 @@ struct aml_vdec_ctx {
     const struct codec_ops *codec_ops;
     int curr_dec_type, ctrl_handler, dos_clk_en;
     void *codec_priv, *m2m_ctx;
-    bool decode_failed;
+    bool decode_failed, is_hevc;
 };
 static struct vb2_v4l2_buffer buffer;
 static int jobs, stops, firmware_error, pin_error;
@@ -923,6 +929,8 @@ static void aml_vdec_stop_job(struct aml_vdec_ctx *ctx)
 }
 static void v4l2_m2m_buf_copy_metadata(void *src, void *dst) {}
 static void vdec_mark_last(struct aml_vdec_ctx *ctx) {}
+static void aml_hevc_device_run(struct aml_vdec_ctx *ctx)
+{ assert(!"unexpected HEVC dispatch"); }
 static void v4l2_m2m_buf_done_and_job_finish(int device, void *ctx, int result)
 {
     assert(ctx == owner->m2m_ctx);
@@ -984,24 +992,27 @@ struct aml_vdec_dev {
     struct aml_vdec_hw *dec_hw;
     struct platform *plat_dev;
     struct platform_data *pvdec_data;
-    void *jpeg_vfd;
+    void *jpeg_vfd, *hevc_vfd;
     unsigned int open_count;
     int dev_mutex, m2m_dev_dec;
 };
 struct fh { void *m2m_ctx; };
+struct m2m { bool ignore_cap_streaming; };
 struct aml_vdec_ctx {
     struct aml_vdec_dev *dev;
     struct fh fh;
-    void *m2m_ctx;
+    struct m2m *m2m_ctx;
     int v4l2_intf_lock, queue, int_cond, ctrl_handler;
-    bool is_jpeg;
+    int hevc_lock, hevc_min_capture;
+    bool is_jpeg, is_hevc;
 };
 struct file { void *private_data, *node; };
 static struct aml_vdec_hw hw = { .power_test_passed = true, .mdec_test_passed = true };
 static struct platform platform;
 static struct platform_data data = { true };
 static struct aml_vdec_dev dev = { .dec_hw = &hw, .plat_dev = &platform,
-                                 .pvdec_data = &data, .jpeg_vfd = (void *)1 };
+                                 .pvdec_data = &data, .jpeg_vfd = (void *)1,
+                                 .hevc_vfd = (void *)2 };
 static bool t7_snapshot_only, allow_t7_power = true, fail_queue, fail_controls;
 static int pm_refs, contexts, handles;
 static struct aml_vdec_dev *video_drvdata(struct file *f) { return &dev; }
@@ -1020,7 +1031,8 @@ static void v4l2_fh_del(struct fh *fh, struct file *f) {}
 static void v4l2_fh_exit(struct fh *fh) { handles--; }
 static void aml_vdec_queue_init(void) {}
 static void *v4l2_m2m_ctx_init(int device, void *ctx, void (*init)(void))
-{ if (fail_queue) return (void *)-ENOMEM; contexts++; return malloc(1); }
+{ if (fail_queue) return (void *)-ENOMEM; contexts++; return calloc(1, sizeof(struct m2m)); }
+static void v4l2_m2m_set_dst_buffered(struct m2m *ctx, bool buffered) {}
 static void v4l2_m2m_ctx_release(void *ctx) { contexts--; free(ctx); }
 static int aml_vdec_ctrls_setup(struct aml_vdec_ctx *ctx) { return fail_controls ? -ENOMEM : 0; }
 static void aml_vdec_reset_fmts(struct aml_vdec_ctx *ctx) {}
