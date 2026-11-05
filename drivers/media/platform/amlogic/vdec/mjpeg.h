@@ -6,6 +6,9 @@
 #ifndef _AML_MJPEG_H_
 #define _AML_MJPEG_H_
 
+#include <kunit/visibility.h>
+#include <linux/types.h>
+
 /* Scratch register meanings for the mjpeg_multi microcode (vmjpeg_multi.c). */
 #define MJPEG_DECODE_PARAM	AV_SCRATCH_2	/* height << 4 | 0x8000 */
 #define MJPEG_TO_AMRISC		AV_SCRATCH_8
@@ -32,5 +35,9 @@ void aml_mjpeg_prepare(void *priv);
 void aml_mjpeg_finish(void *priv);
 void aml_mjpeg_exit(void *priv);
 int aml_mjpeg_dec_run(void *priv);
+
+#if IS_ENABLED(CONFIG_KUNIT)
+bool mjpeg_supported(const u8 *p, u32 len, u32 max_width, u32 max_height);
+#endif
 
 #endif
