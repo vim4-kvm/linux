@@ -49,6 +49,16 @@ void aml_vdec_fault(struct aml_vdec_ctx *ctx)
 
 static const struct aml_vdec_v4l2_ctrl controls[] = {
 	{
+		.codec_type = CODEC_TYPE_MPEG2,
+		.cfg = { .id = V4L2_CID_STATELESS_MPEG2_SEQUENCE },
+	}, {
+		.codec_type = CODEC_TYPE_MPEG2,
+		.cfg = { .id = V4L2_CID_STATELESS_MPEG2_PICTURE },
+	}, {
+		.codec_type = CODEC_TYPE_MPEG2,
+		.cfg = { .id = V4L2_CID_STATELESS_MPEG2_QUANTISATION },
+	},
+	{
 		.codec_type = CODEC_TYPE_H264,
 		.cfg = {
 			.id = V4L2_CID_STATELESS_H264_DECODE_PARAMS,
@@ -102,6 +112,10 @@ static const struct aml_vdec_v4l2_ctrl controls[] = {
 
 static const struct aml_dec_type dec_type_name[] = {
 	{
+		.codec_type = CODEC_TYPE_MPEG2,
+		.name = "MPEG2",
+	},
+	{
 		.codec_type = CODEC_TYPE_H264,
 		.name = "H264",
 	},
@@ -127,6 +141,9 @@ int aml_vdec_ctrls_setup(struct aml_vdec_ctx *ctx)
 
 	v4l2_ctrl_handler_init(&ctx->ctrl_handler, ctrls_size);
 	for (i = 0; i < ctrls_size; i++) {
+		if (controls[i].codec_type == CODEC_TYPE_MPEG2 &&
+		    !ctx->dev->pvdec_data->has_internal_canvas)
+			continue;
 		v4l2_ctrl_new_custom(&ctx->ctrl_handler, &controls[i].cfg, NULL);
 		if (ctx->ctrl_handler.error) {
 			dev_info(&ctx->dev->plat_dev->dev, "add ctrl for (%d) failed%d\n",
@@ -183,10 +200,12 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 		goto complete_request;
 	/* m2m owns the hardware until stop has drained IRQ and DMA activity. */
 	WRITE_ONCE(dev->dec_hw->curr_ctx, ctx->codec_priv);
+	if (ctx->codec_ops->prepare)
+		ctx->codec_ops->prepare(ctx);
 	dos_enable(dev->dec_hw);
 	/* incase of bus hang in stop_streaming */
 	ctx->dos_clk_en = 1;
-	ret = aml_vdec_reset_core(dev->dec_hw);
+	ret = aml_vdec_reset_core(dev->dec_hw, ctx->curr_dec_type);
 	if (ret) {
 		/* Isolation/reset failed: do not retry MMIO or return DMA ownership. */
 		aml_vdec_fault(ctx);
@@ -312,6 +331,9 @@ static void set_pic_info(struct aml_vdec_ctx *ctx,
 		    ctx->pic_info.coded_width * ctx->pic_info.coded_height;
 		ctx->pic_info.fb_size[1] = ctx->pic_info.fb_size[0] / 2;
 		ctx->pic_info.plane_num = 1;
+	} else {
+		ctx->pic_info.plane_num = pix_mp->num_planes;
+		ctx->pic_info.cap_pix_fmt = pix_mp->pixelformat;
 	}
 }
 
@@ -337,13 +359,18 @@ static int vidioc_vdec_enum_framesizes(struct file *file, void *priv,
 static int vdec_try_fmt_mp(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 			   struct v4l2_pix_format_mplane *pix_mp)
 {
-	struct aml_video_fmt *dec_fmt;
+	const struct aml_video_fmt *dec_fmt;
+	const struct aml_video_fmt *requested;
 	int i, align;
 
 	if (V4L2_TYPE_IS_OUTPUT(type))
 		dec_fmt = &ctx->dec_fmt[AML_FMT_SRC];
 	else
 		dec_fmt = &ctx->dec_fmt[AML_FMT_DST];
+	requested = aml_vdec_get_video_fmt(ctx->dev, pix_mp->pixelformat);
+	if (requested && requested->type ==
+	    (V4L2_TYPE_IS_OUTPUT(type) ? AML_FMT_DEC : AML_FMT_FRAME))
+		dec_fmt = requested;
 
 	pix_mp->field = V4L2_FIELD_NONE;
 
@@ -391,12 +418,12 @@ static int vdec_s_fmt_output(struct aml_vdec_ctx *ctx, struct v4l2_format *f)
 	int ret;
 
 	vq = v4l2_m2m_get_vq(ctx->m2m_ctx, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-	if (vb2_is_busy(vq) &&
-	    pix_mp->pixelformat != ctx->pix_fmt[AML_FMT_SRC].pixelformat)
+	if (vb2_is_busy(vq) ||
+	    vb2_is_busy(v4l2_m2m_get_vq(ctx->m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)))
 		return -EBUSY;
 
 	out_fmt = aml_vdec_get_video_fmt(ctx->dev, pix_mp->pixelformat);
-	if (out_fmt)
+	if (out_fmt && out_fmt->type == AML_FMT_DEC)
 		ctx->dec_fmt[AML_FMT_SRC] = *out_fmt;
 	else
 		dev_dbg(&ctx->dev->plat_dev->dev,
@@ -408,6 +435,9 @@ static int vdec_s_fmt_output(struct aml_vdec_ctx *ctx, struct v4l2_format *f)
 
 	ctx->pix_fmt[AML_FMT_SRC] = *pix_mp;
 	ctx->pix_fmt[AML_FMT_DST] = *pix_mp;
+	vdec_try_fmt_mp(ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+			&ctx->pix_fmt[AML_FMT_DST]);
+	set_pic_info(ctx, &ctx->pix_fmt[AML_FMT_DST], V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 
 	return ret;
 }
@@ -424,15 +454,18 @@ static int vdec_s_fmt_capture(struct aml_vdec_ctx *ctx, struct v4l2_format *f)
 		return -EBUSY;
 
 	cap_fmt = aml_vdec_get_video_fmt(ctx->dev, pix_mp->pixelformat);
-	if (cap_fmt)
+	if (cap_fmt && cap_fmt->type == AML_FMT_FRAME)
 		ctx->dec_fmt[AML_FMT_DST] = *cap_fmt;
 	else
 		dev_dbg(&ctx->dev->plat_dev->dev,
 			"%s fmt %d not supported, use default\n", __func__,
 			pix_mp->pixelformat);
 
+	/* Capture storage must cover the dimensions selected on OUTPUT. */
+	pix_mp->width = ctx->pic_info.coded_width;
+	pix_mp->height = ctx->pic_info.coded_height;
 	ret = vdec_try_fmt_mp(ctx, f->type, pix_mp);
-
+	set_pic_info(ctx, pix_mp, f->type);
 	ctx->pix_fmt[AML_FMT_DST] = *pix_mp;
 
 	return ret;
@@ -876,6 +909,8 @@ int aml_vdec_queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->lock = &ctx->v4l2_intf_lock;
 	src_vq->buf_struct_size = sizeof(struct aml_vdec_buffer);
 	src_vq->supports_requests = true;
+	if (dev->pvdec_data->has_internal_canvas)
+		src_vq->subsystem_flags = VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF;
 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	ret = vb2_queue_init(src_vq);
 	if (ret) {
