@@ -26,3 +26,14 @@ config VIDEO_MESON_T7_VDIN_TEST
 	  Owns the VPU register window; only the split-resource profile permits
 	  coexistence with the fixed OSD1 display handoff. This experimental
 	  resource and DMA ownership model still needs upstream integration.
+
+config VIDEO_MESON_T7_HDMIRX_KUNIT_TEST
+	tristate "T7 HDMI receiver pure logic tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	depends on VIDEO_MESON_T7_VDIN_TEST
+	default KUNIT_ALL_TESTS
+	help
+	  Test the production EDID, audio and HDR validation functions.
+	  Check VDIN ring ownership selection without accessing hardware.
+	  Run under KUnit; no receiver or capture device is required.
+	  Streaming and physical DMA recovery still require board tests.

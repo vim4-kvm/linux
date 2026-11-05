@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Amlogic T7 HDMI receiver resource and cable detection bring-up. */
 /* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
+#include <kunit/visibility.h>
 #include <linux/bitfield.h>
 #include <linux/arm-smccc.h>
 #include <linux/clk.h>
@@ -25,6 +26,7 @@
 
 #include "t7-hdmirx.h"
 #include "t7-hlg-state.h"
+#include "t7-hdmirx-kunit.h"
 
 /* TOP register indices use 32-bit words; EDID RAM uses byte offsets. */
 #define T7_RX_TOP_SW_RESET	(0x000 * 4)
@@ -320,7 +322,7 @@ struct t7_hdmirx {
 	u8 audio_settings_saved[ARRAY_SIZE(t7_hdmirx_audio_core_settings)];
 };
 
-static int t7_hdmirx_validate_edid(const u8 *edid, size_t size)
+VISIBLE_IF_KUNIT int t7_hdmirx_validate_edid(const u8 *edid, size_t size)
 {
 	static const u8 header[] = { 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0 };
 	unsigned int block, i;
@@ -342,6 +344,7 @@ static int t7_hdmirx_validate_edid(const u8 *edid, size_t size)
 	}
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(t7_hdmirx_validate_edid);
 
 static void t7_hdmirx_set_hpd(struct t7_hdmirx *rx, bool high)
 {
@@ -1497,9 +1500,9 @@ static unsigned int t7_hdmirx_audio_rate(u32 tmds, u32 n, u32 cts)
 	return 0;
 }
 
-static int t7_hdmirx_validate_audio(u32 tmds, u32 n, u32 cts,
-				  u8 info, u8 packet, u8 channel_status,
-				  unsigned int rate)
+VISIBLE_IF_KUNIT int t7_hdmirx_validate_audio(u32 tmds, u32 n, u32 cts,
+					      u8 info, u8 packet, u8 channel_status,
+					      unsigned int rate)
 {
 	u64 measured;
 
@@ -1517,6 +1520,7 @@ static int t7_hdmirx_validate_audio(u32 tmds, u32 n, u32 cts,
 		return -ERANGE;
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(t7_hdmirx_validate_audio);
 
 static bool t7_hdmirx_audio_same(const struct t7_hdmirx_audio_format *a,
 				const struct t7_hdmirx_audio_format *b)
