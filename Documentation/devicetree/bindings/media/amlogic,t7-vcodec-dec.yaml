@@ -11,8 +11,8 @@ maintainers:
 
 description: |
   T7 VDEC uses DOS DBUS isolation and a secure power domain, without the S4
-  DMC request register. This describes the VDEC engine only, not HEVC or
-  HCODEC. The DOS mapping overlaps HCODEC, so both engines need a shared
+  DMC request register. HEVC has a separate secure domain and functional
+  front/back clock pair. The DOS mapping overlaps HCODEC, so the engines need a shared
   register owner before concurrent operation can be supported. Normal board
   device trees keep this node disabled pending decoder validation.
 
@@ -27,28 +27,41 @@ properties:
     const: dos
 
   interrupts:
-    maxItems: 1
+    minItems: 1
+    items:
+      - description: VDEC mailbox 1
+      - description: HEVC mailbox 0
 
   clocks:
-    maxItems: 5
+    minItems: 5
+    maxItems: 9
 
   clock-names:
+    minItems: 5
     items:
       - const: vdec
       - const: clk_vdec_mux
       - const: sys-apb
       - const: a73-apb
       - const: vdec-p0
+      - const: clk_hevcf_mux
+      - const: hevc-p0
+      - const: clk_hevcb_mux
+      - const: hevcb-p0
 
   power-domains:
+    minItems: 2
     items:
       - description: VDEC core, with secure memory/isolation/reset control
       - description: NIC3 parent, held for DOS-top access before core power-on
+      - description: HEVC core, with secure memory/isolation/reset control
 
   power-domain-names:
+    minItems: 2
     items:
       - const: vdec
       - const: nic3
+      - const: hevc
 
   amlogic,canvas:
     description: Canvas lookup table provider.
@@ -64,6 +77,32 @@ required:
   - power-domains
   - power-domain-names
   - amlogic,canvas
+
+allOf:
+  - if:
+      properties:
+        power-domain-names:
+          minItems: 3
+    then:
+      properties:
+        interrupts:
+          minItems: 2
+        clocks:
+          minItems: 9
+        clock-names:
+          minItems: 9
+        power-domains:
+          minItems: 3
+    else:
+      properties:
+        interrupts:
+          maxItems: 1
+        clocks:
+          maxItems: 5
+        clock-names:
+          maxItems: 5
+        power-domains:
+          maxItems: 2
 
 additionalProperties: false
 
