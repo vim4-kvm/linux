@@ -40,11 +40,13 @@ enum aml_fmt_type {
  * enum aml_codec_type - Type of codec format
  * @CODEC_TYPE_H264: Stateless H.264 decoder.
  * @CODEC_TYPE_MPEG2: Stateless MPEG-2 decoder.
+ * @CODEC_TYPE_MJPEG: Stateful JPEG decoder.
  * @CODEC_TYPE_FRAME: Uncompressed frame format.
  */
 enum aml_codec_type {
 	CODEC_TYPE_H264 = 0,
 	CODEC_TYPE_MPEG2,
+	CODEC_TYPE_MJPEG,
 	CODEC_TYPE_FRAME,
 };
 
@@ -91,12 +93,16 @@ struct aml_video_fmt {
  * @dec_hw: Decoder hardware resources. See struct aml_vdec_hw.
  * @pvdec_data: Decoder platform data. See struct aml_dev_platform_data.
  * @dev_mutex: video_device lock.
+ * @jpeg_vfd: Independent JPEG video node.
+ * @jpeg_intf: JPEG media interface.
  */
 struct aml_vdec_dev {
 	struct platform_device *plat_dev;
 	struct v4l2_device v4l2_dev;
 	struct v4l2_m2m_dev *m2m_dev_dec;
 	struct video_device *vfd;
+	struct video_device *jpeg_vfd;
+	struct media_intf_devnode *jpeg_intf;
 	struct media_device mdev;
 
 	unsigned int open_count;
@@ -146,6 +152,8 @@ struct dec_pic_info {
  * @buffers_held: Queue mmap locks and per-job DMA pins are held.
  * @decode_failed: A timed-out context rejects further jobs until close.
  * @diag_started: The initial T7 decode snapshot has been recorded.
+ * @compose: Visible image rectangle within CAPTURE storage.
+ * @is_jpeg: Context belongs to the JPEG node.
  */
 struct aml_vdec_ctx {
 	struct aml_vdec_dev *dev;
@@ -158,6 +166,7 @@ struct aml_vdec_ctx {
 	int int_cond;
 	wait_queue_head_t queue;
 	struct v4l2_pix_format_mplane pix_fmt[2];
+	struct v4l2_rect compose;
 	struct aml_video_fmt dec_fmt[2];
 
 	bool is_cap_streamon;
@@ -170,6 +179,7 @@ struct aml_vdec_ctx {
 	int decode_result;
 	bool buffers_held;
 	bool decode_failed;
+	bool is_jpeg;
 	bool diag_started;
 };
 

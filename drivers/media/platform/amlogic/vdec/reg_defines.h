@@ -36,6 +36,7 @@
 #define WRRSP_LMEM                   REG_ALIGN(0x0353)
 
 #define PSCALE_CTRL                  REG_ALIGN(0x0911)
+#define PSCALE_CTRL2                 REG_ALIGN(0x092e)
 #define GCLK_EN                      REG_ALIGN(0x0983)
 #define MDEC_PIC_DC_CTRL             REG_ALIGN(0x098e)
 #define MDEC_PIC_DC_MUX_CTRL         REG_ALIGN(0x098d)
