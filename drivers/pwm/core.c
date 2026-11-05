@@ -14,6 +14,7 @@
 #include <linux/of.h>
 #include <linux/pwm.h>
 #include <linux/list.h>
+#include <linux/lockdep.h>
 #include <linux/mutex.h>
 #include <linux/err.h>
 #include <linux/slab.h>
@@ -1612,6 +1613,7 @@ void pwmchip_release(struct device *pwmchip_dev)
 {
 	struct pwm_chip *chip = pwmchip_from_dev(pwmchip_dev);
 
+	lockdep_unregister_key(&chip->nonatomic_lock_key);
 	kfree(chip);
 }
 EXPORT_SYMBOL_GPL(pwmchip_release);
@@ -1633,6 +1635,7 @@ struct pwm_chip *pwmchip_alloc(struct device *parent, unsigned int npwm, size_t 
 	chip->npwm = npwm;
 	chip->uses_pwmchip_alloc = true;
 	chip->operational = false;
+	lockdep_register_key(&chip->nonatomic_lock_key);
 
 	pwmchip_dev = &chip->dev;
 	device_initialize(pwmchip_dev);
@@ -2469,10 +2472,13 @@ int __pwmchip_add(struct pwm_chip *chip, struct module *owner)
 
 	chip->owner = owner;
 
-	if (chip->atomic)
+	if (chip->atomic) {
 		spin_lock_init(&chip->atomic_lock);
-	else
+	} else {
 		mutex_init(&chip->nonatomic_lock);
+		/* Clock consumers and regulators can use different controllers. */
+		lockdep_set_class(&chip->nonatomic_lock, &chip->nonatomic_lock_key);
+	}
 
 	guard(mutex)(&pwm_lock);
 

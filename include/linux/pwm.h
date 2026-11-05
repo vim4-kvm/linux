@@ -6,6 +6,7 @@
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/gpio/driver.h>
+#include <linux/lockdep_types.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -326,6 +327,7 @@ struct pwm_ops {
  * @uses_pwmchip_alloc: signals if pwmchip_allow was used to allocate this chip
  * @operational: signals if the chip can be used (or is already deregistered)
  * @nonatomic_lock: mutex for nonatomic chips
+ * @nonatomic_lock_key: lockdep class for this controller's mutex
  * @atomic_lock: mutex for atomic chips
  * @pwms: array of PWM devices allocated by the framework
  */
@@ -345,6 +347,7 @@ struct pwm_chip {
 	struct gpio_chip gpio;
 	bool uses_pwmchip_alloc;
 	bool operational;
+	struct lock_class_key nonatomic_lock_key;
 	union {
 		/*
 		 * depending on the chip being atomic or not either the mutex or
