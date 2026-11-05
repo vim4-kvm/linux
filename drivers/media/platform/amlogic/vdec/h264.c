@@ -580,74 +580,40 @@ h264_mv_offsets(enum h264_picture_structure current_structure,
 }
 EXPORT_SYMBOL_IF_KUNIT(h264_mv_offsets);
 
-static int allocate_colocate_buf(struct aml_h264_ctx *h264_ctx, int poc)
+static int get_col_buf_index(struct aml_h264_ctx *h264_ctx, u64 timestamp)
 {
 	int i;
-	struct aml_vdec_ctx *ctx = h264_ctx->v4l2_ctx;
 
 	for (i = 0; i < h264_ctx->colocated_buf_num; i++) {
-		if (((h264_ctx->colocated_buf_map >> i) & 0x1) == 0) {
-			h264_ctx->colocated_buf_map |= (1 << i);
-			break;
-		}
+		if ((h264_ctx->colocated_buf_map & BIT(i)) &&
+		    h264_ctx->colocated_timestamp[i] == timestamp)
+			return i;
 	}
-
-	if (i == h264_ctx->colocated_buf_num)
-		return -1;
-
-	h264_ctx->colocated_buf_poc[i] = poc;
-	h264_ctx->colocated_structure[i] = h264_ctx->curr_spec.structure;
-	dev_dbg(&ctx->dev->plat_dev->dev, "%s colocated_buf_index %d poc %d\n",
-		__func__, i, h264_ctx->colocated_buf_poc[i]);
-
-	return i;
+	return -ENOENT;
 }
 
-static void release_colocate_buf(struct aml_h264_ctx *h264_ctx, int index)
+static int allocate_colocate_buf(struct aml_h264_ctx *h264_ctx, u64 timestamp)
 {
-	struct aml_vdec_ctx *ctx = h264_ctx->v4l2_ctx;
+	int i = get_col_buf_index(h264_ctx, timestamp);
 
-	if (index >= 0) {
-		if (index >= h264_ctx->colocated_buf_num) {
-			dev_dbg
-			    (&ctx->dev->plat_dev->dev,
-				 "%s error, index %d is bigger than buf count %d\n",
-			     __func__, index, h264_ctx->max_num_ref_frames);
-		} else {
-			if (h264_ctx->colocated_buf_poc[index] != INVALID_POC &&
-			    ((h264_ctx->colocated_buf_map >> index) & 0x1) == 0x1) {
-				h264_ctx->colocated_buf_map &= (~(1 << index));
-				dev_dbg
-				    (&ctx->dev->plat_dev->dev,
-				     "%s colocated_buf_index %d released poc %d\n",
-				     __func__, index,
-				     h264_ctx->colocated_buf_poc[index]);
-			}
-			h264_ctx->colocated_buf_poc[index] = INVALID_POC;
-		}
-	}
-}
-
-static int get_col_buf_index_by_poc(struct aml_h264_ctx *h264_ctx, int poc)
-{
-	int idx;
-
-	for (idx = 0; idx < h264_ctx->colocated_buf_num; idx++) {
-		if (h264_ctx->colocated_buf_poc[idx] == poc)
-			break;
+	if (i >= 0)
+		return i;
+	for (i = 0; i < h264_ctx->colocated_buf_num; i++) {
+		if (h264_ctx->colocated_buf_map & BIT(i))
+			continue;
+		h264_ctx->colocated_buf_map |= BIT(i);
+		h264_ctx->colocated_timestamp[i] = timestamp;
+		h264_ctx->colocated_structure[i] = h264_ctx->curr_spec.structure;
+		return i;
 	}
 
-	if (idx == h264_ctx->colocated_buf_num)
-		idx = -1;
-
-	return idx;
+	return -ENOSPC;
 }
 
 static int alloc_colocate_cma(struct aml_h264_ctx *h264_ctx,
 			      struct aml_vdec_ctx *ctx)
 {
 	int alloc_size = 0;
-	int i;
 	struct aml_vdec_hw *hw;
 
 	if (h264_ctx->collated_cma_vaddr)
@@ -677,9 +643,6 @@ static int alloc_colocate_cma(struct aml_h264_ctx *h264_ctx,
 	h264_ctx->col_buf_alloc_size = alloc_size;
 	h264_ctx->colocated_buf_map = 0;
 	h264_ctx->colocated_buf_num = h264_ctx->max_num_ref_frames + COL_BUFFER_MARGIN;
-
-	for (i = 0; i < H264_MAX_COL_BUF; i++)
-		h264_ctx->colocated_buf_poc[i] = INVALID_POC;
 
 	return 0;
 }
@@ -738,7 +701,7 @@ static void config_b_reflist(struct aml_h264_ctx *h264_ctx,
 		index = v4l2_b0_reflist[i].index;
 		h264_set_reference(&h264_ctx->ref_list0[i], dpb, &v4l2_b0_reflist[i]);
 		h264_ctx->ref_list0[i].col_buf_index =
-		    get_col_buf_index_by_poc(h264_ctx, dpb[index].top_field_order_cnt);
+		    get_col_buf_index(h264_ctx, dpb[index].reference_ts);
 	}
 
 	h264_ctx->list_size[1] = list_size;
@@ -746,7 +709,7 @@ static void config_b_reflist(struct aml_h264_ctx *h264_ctx,
 		index = v4l2_b1_reflist[j].index;
 		h264_set_reference(&h264_ctx->ref_list1[j], dpb, &v4l2_b1_reflist[j]);
 		h264_ctx->ref_list1[j].col_buf_index =
-			get_col_buf_index_by_poc(h264_ctx, dpb[index].top_field_order_cnt);
+			get_col_buf_index(h264_ctx, dpb[index].reference_ts);
 	}
 
 	if ((h264_ctx->list_size[1] + h264_ctx->list_size[0]) < list_size)
@@ -754,19 +717,17 @@ static void config_b_reflist(struct aml_h264_ctx *h264_ctx,
 			 h264_ctx->list_size[0], h264_ctx->list_size[1], list_size);
 }
 
-static int poc_is_in_dpb(int poc, const struct v4l2_h264_dpb_entry *dpb)
+static const struct v4l2_h264_dpb_entry *
+get_dpb_by_timestamp(const struct v4l2_ctrl_h264_decode_params *decode, u64 timestamp)
 {
 	int i;
-	int ret = 0;
 
 	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
-		if (poc == dpb[i].top_field_order_cnt) {
-			ret = 1;
-			break;
-		}
+		if ((decode->dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE) &&
+		    decode->dpb[i].reference_ts == timestamp)
+			return &decode->dpb[i];
 	}
-
-	return ret;
+	return NULL;
 }
 
 VISIBLE_IF_KUNIT int h264_ref_list_size(struct aml_h264_ctx *h264_ctx, int cur_list)
@@ -1112,103 +1073,95 @@ VISIBLE_IF_KUNIT void h264_config_ref_lists(struct aml_vdec_ctx *ctx)
 }
 EXPORT_SYMBOL_IF_KUNIT(h264_config_ref_lists);
 
-static int allocate_canvas_pos(struct aml_h264_ctx *h264_ctx, int poc)
+static int get_canvas_pos(struct aml_h264_ctx *h264_ctx, u64 timestamp)
 {
 	int i;
-	int ret = -1;
-	struct aml_vdec_ctx *ctx = h264_ctx->v4l2_ctx;
 
-	for (i = 0; i < (V4L2_H264_NUM_DPB_ENTRIES + 1); i++) {
-		if (((h264_ctx->canvas_pos_map >> i) & 0x1) == 0) {
-			h264_ctx->canvas_pos_map |= (1 << i);
-			h264_ctx->ref_canvas[i].poc = poc;
-			h264_ctx->ref_canvas[i].canvas_pos = i;
-			ret = i;
-
-			dev_dbg(&ctx->dev->plat_dev->dev,
-				"%s i %d pos_poc %d\n", __func__, i,
-				h264_ctx->ref_canvas[i].poc);
-			break;
-		}
+	for (i = 0; i < ARRAY_SIZE(h264_ctx->ref_canvas); i++) {
+		if ((h264_ctx->canvas_pos_map & BIT(i)) &&
+		    h264_ctx->ref_canvas[i].timestamp == timestamp)
+			return i;
 	}
-
-	return ret;
+	return -ENOENT;
 }
 
-static void release_canvas_pos(struct aml_h264_ctx *h264_ctx, int index)
+static int allocate_canvas_pos(struct aml_h264_ctx *h264_ctx, u64 timestamp)
 {
-	struct aml_vdec_ctx *ctx = h264_ctx->v4l2_ctx;
+	int i = get_canvas_pos(h264_ctx, timestamp);
 
-	if (index >= 0) {
-		if (index > V4L2_H264_NUM_DPB_ENTRIES) {
-			dev_dbg(&ctx->dev->plat_dev->dev,
-				"%s error, index %d is bigger than buf count %d\n",
-				__func__, index, h264_ctx->max_num_ref_frames);
-		} else {
-			if (h264_ctx->ref_canvas[index].poc != INVALID_POC &&
-			    ((h264_ctx->canvas_pos_map >> index) & 0x1) ==
-			    0x1) {
-				h264_ctx->canvas_pos_map &= (~(1 << index));
-				dev_dbg(&ctx->dev->plat_dev->dev,
-					"%s canvas_pos index %d released poc %d, canvas_pos_map 0x%x\n",
-					__func__, index, h264_ctx->ref_canvas[index].poc,
-					h264_ctx->canvas_pos_map);
-				h264_ctx->ref_canvas[index].poc = INVALID_POC;
-				h264_ctx->ref_canvas[index].canvas_pos = -1;
-			}
-		}
+	if (i >= 0)
+		return i;
+	for (i = 0; i < ARRAY_SIZE(h264_ctx->ref_canvas); i++) {
+		if (h264_ctx->canvas_pos_map & BIT(i))
+			continue;
+		h264_ctx->canvas_pos_map |= BIT(i);
+		h264_ctx->ref_canvas[i].timestamp = timestamp;
+		h264_ctx->ref_canvas[i].structure = h264_ctx->curr_spec.structure;
+		return i;
 	}
+	return -ENOSPC;
 }
 
-static int get_canvas_pos_by_poc(struct aml_h264_ctx *h264_ctx, int poc)
+VISIBLE_IF_KUNIT void
+h264_prune_picture_slots(struct aml_h264_ctx *h264_ctx, u64 timestamp, bool held)
 {
+	const struct v4l2_ctrl_h264_decode_params *decode = h264_ctx->ctrl_ref.decode;
+	bool idr = decode->flags & V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC;
 	int i;
-	struct aml_vdec_ctx *ctx = h264_ctx->v4l2_ctx;
-	int ret_pos = -1;
 
-	for (i = 0; i < (V4L2_H264_NUM_DPB_ENTRIES + 1); i++) {
-		if (h264_ctx->ref_canvas[i].poc == poc) {
-			ret_pos = h264_ctx->ref_canvas[i].canvas_pos;
-			dev_dbg(&ctx->dev->plat_dev->dev, "%s canvas_pos %d\n",
-				__func__, ret_pos);
-			return ret_pos;
-		}
-	}
-
-	dev_dbg(&ctx->dev->plat_dev->dev,
-		"%s error, no find canvas pos %d, poc %d\n", __func__, ret_pos, poc);
-
-	return ret_pos;
-}
-
-static void clear_unused_col_buf(struct aml_h264_ctx *h264_ctx,
-				 struct v4l2_ctrl_h264_decode_params *decode)
-{
-	int i, col_poc;
-
-	/* flush all col buffers when IDR */
-	if (decode->flags == V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC) {
-		/* 32 : max index of co-locate buffer */
-		for (i = 0; i < 32; i++)
-			release_colocate_buf(h264_ctx, i);
-		for (i = 0; i < (V4L2_H264_NUM_DPB_ENTRIES + 1); i++)
-			release_canvas_pos(h264_ctx, i);
+	/* An IDR second field still owns the first field's CAPTURE storage. */
+	if (idr && !held) {
+		h264_ctx->colocated_buf_map = 0;
+		h264_ctx->canvas_pos_map = 0;
 		return;
 	}
 
 	for (i = 0; i < h264_ctx->colocated_buf_num; i++) {
-		col_poc = h264_ctx->colocated_buf_poc[i];
-		if (col_poc != INVALID_POC &&
-		    (poc_is_in_dpb(col_poc, decode->dpb) != 1))
-			release_colocate_buf(h264_ctx, i);
+		u64 reference_ts = h264_ctx->colocated_timestamp[i];
+
+		if (held && reference_ts == timestamp)
+			continue;
+		if (!get_dpb_by_timestamp(decode, reference_ts))
+			h264_ctx->colocated_buf_map &= ~BIT(i);
 	}
 
-	for (i = 0; i < (V4L2_H264_NUM_DPB_ENTRIES + 1); i++) {
-		col_poc = h264_ctx->ref_canvas[i].poc;
-		if (col_poc != INVALID_POC &&
-		    (poc_is_in_dpb(col_poc, decode->dpb) != 1))
-			release_canvas_pos(h264_ctx, i);
+	for (i = 0; i < ARRAY_SIZE(h264_ctx->ref_canvas); i++) {
+		u64 reference_ts = h264_ctx->ref_canvas[i].timestamp;
+
+		if (held && reference_ts == timestamp)
+			continue;
+		if (!get_dpb_by_timestamp(decode, reference_ts))
+			h264_ctx->canvas_pos_map &= ~BIT(i);
 	}
+}
+EXPORT_SYMBOL_IF_KUNIT(h264_prune_picture_slots);
+
+VISIBLE_IF_KUNIT int h264_get_picture_slots(struct aml_h264_ctx *h264, u64 timestamp)
+{
+	struct h264_decode_buf_spec *spec = &h264->curr_spec;
+
+	spec->canvas_pos = allocate_canvas_pos(h264, timestamp);
+	if (spec->canvas_pos < 0)
+		return spec->canvas_pos;
+	spec->col_buf_index = -1;
+	if (h264->ctrl_ref.decode->nal_ref_idc) {
+		spec->col_buf_index = allocate_colocate_buf(h264, timestamp);
+		if (spec->col_buf_index < 0)
+			return spec->col_buf_index;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_IF_KUNIT(h264_get_picture_slots);
+
+static void h264_set_buffer_address(struct aml_vdec_ctx *ctx,
+				    struct h264_decode_buf_spec *spec,
+				    struct vb2_buffer *vb)
+{
+	spec->y_dma_addr = vb2_dma_contig_plane_dma_addr(vb, 0);
+	if (ctx->pic_info.plane_num > 1)
+		spec->c_dma_addr = vb2_dma_contig_plane_dma_addr(vb, 1);
+	else
+		spec->c_dma_addr = spec->y_dma_addr + ctx->pic_info.fb_size[0];
 }
 
 static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
@@ -1217,41 +1170,23 @@ static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *
 	struct vdec_h264_stateless_ctrl_ref *ctrls = &h264_ctx->ctrl_ref;
 	struct v4l2_ctrl_h264_decode_params *decode =
 	    (struct v4l2_ctrl_h264_decode_params *)ctrls->decode;
-	struct h264_decode_buf_spec *buf_spec_l0, *buf_spec_l1;
 	struct vb2_buffer *vb;
 	struct vb2_v4l2_buffer *vb2_v4l2;
 	struct vb2_queue *vq;
-	int i;
+	int i, ret;
 
 	if (hw->has_internal_canvas && !h264_ctx->new_pic_flag)
 		goto references;
 
-	clear_unused_col_buf(h264_ctx, decode);
-	h264_ctx->curr_spec.structure = h264_picture_structure(decode, ctrls->sps);
-
 	vb2_v4l2 = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
 	vb = &vb2_v4l2->vb2_buf;
+	h264_prune_picture_slots(h264_ctx, vb->timestamp, vb2_v4l2->is_held);
+	h264_ctx->curr_spec.structure = h264_picture_structure(decode, ctrls->sps);
+	h264_set_buffer_address(ctx, &h264_ctx->curr_spec, vb);
 
-	h264_ctx->curr_spec.y_dma_addr = vb2_dma_contig_plane_dma_addr(vb, 0);
-	if (ctx->pic_info.plane_num > 1)
-		h264_ctx->curr_spec.c_dma_addr =
-		    vb2_dma_contig_plane_dma_addr(vb, 1);
-	else
-		h264_ctx->curr_spec.c_dma_addr =
-		    h264_ctx->curr_spec.y_dma_addr + ctx->pic_info.fb_size[0];
-	h264_ctx->curr_spec.canvas_pos =
-	    allocate_canvas_pos(h264_ctx, decode->top_field_order_cnt);
-	if (h264_ctx->curr_spec.canvas_pos < 0)
-		return -EINVAL;
-
-	if (decode->nal_ref_idc)
-		h264_ctx->curr_spec.col_buf_index =
-		    allocate_colocate_buf(h264_ctx,
-					  decode->top_field_order_cnt);
-	else
-		h264_ctx->curr_spec.col_buf_index = -1;
-	if (decode->nal_ref_idc && h264_ctx->curr_spec.col_buf_index < 0)
-		return -EINVAL;
+	ret = h264_get_picture_slots(h264_ctx, vb->timestamp);
+	if (ret)
+		return ret;
 
 references:
 	/* Slice types and list modifications may change within one picture. */
@@ -1268,113 +1203,24 @@ references:
 
 	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
 		struct v4l2_h264_dpb_entry *dpb = &decode->dpb[i];
+		struct h264_decode_buf_spec *l0, *l1, *spec;
 
 		if (!(dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE))
 			continue;
-
-		buf_spec_l0 = find_spec_by_dpb_index(h264_ctx, i, 0);
-		if (buf_spec_l0) {
-			buf_spec_l0->canvas_pos =
-			    get_canvas_pos_by_poc(h264_ctx,
-						  dpb->top_field_order_cnt);
-			if (buf_spec_l0->canvas_pos < 0) {
-				dev_err(&ctx->dev->plat_dev->dev,
-					"l0 canvas_pos %d error\n",
-					buf_spec_l0->canvas_pos);
-				return -EINVAL;
-			}
-			vb = vb2_find_buffer(vq, dpb->reference_ts);
-			if (!vb) {
-				dev_err(&ctx->dev->plat_dev->dev,
-					"ref pic for ts %llu lost\n", dpb->reference_ts);
-				return -EINVAL;
-			}
-
-			buf_spec_l0->y_dma_addr =
-				vb2_dma_contig_plane_dma_addr(vb, 0);
-			if (ctx->pic_info.plane_num > 1)
-				buf_spec_l0->c_dma_addr =
-				    vb2_dma_contig_plane_dma_addr(vb, 1);
-			else
-				buf_spec_l0->c_dma_addr =
-				    buf_spec_l0->y_dma_addr +
-				    ctx->pic_info.fb_size[0];
-			dev_dbg(&ctx->dev->plat_dev->dev,
-				"config canvas for poc %d canvas %d y_dma_addr %pad c_dma_addr %pad\n",
-				buf_spec_l0->dpb->top_field_order_cnt,
-				buf_spec_l0->canvas_pos,
-				&buf_spec_l0->y_dma_addr,
-				&buf_spec_l0->c_dma_addr);
-		}
-
-		buf_spec_l1 = find_spec_by_dpb_index(h264_ctx, i, 1);
-		if (!buf_spec_l0 && buf_spec_l1) {
-			buf_spec_l1->canvas_pos =
-			    get_canvas_pos_by_poc(h264_ctx,
-						  dpb->top_field_order_cnt);
-			if (buf_spec_l1->canvas_pos < 0) {
-				dev_err(&ctx->dev->plat_dev->dev,
-					"l1 canvas_pos %d error\n",
-					buf_spec_l1->canvas_pos);
-				return -EINVAL;
-			}
-			vb = vb2_find_buffer(vq, dpb->reference_ts);
-			if (!vb) {
-				dev_err(&ctx->dev->plat_dev->dev,
-					"ref pic for ts %llu lost\n", dpb->reference_ts);
-				return -EINVAL;
-			}
-
-			buf_spec_l1->y_dma_addr =
-			    vb2_dma_contig_plane_dma_addr(vb, 0);
-			if (ctx->pic_info.plane_num > 1)
-				buf_spec_l1->c_dma_addr =
-				    vb2_dma_contig_plane_dma_addr(vb, 1);
-			else
-				buf_spec_l1->c_dma_addr =
-				    buf_spec_l1->y_dma_addr +
-				    ctx->pic_info.fb_size[0];
-			dev_dbg(&ctx->dev->plat_dev->dev,
-				"config canvas for poc %d canvas %d y_dma_addr %pad c_dma_addr %pad\n",
-				buf_spec_l1->dpb->top_field_order_cnt,
-				buf_spec_l1->canvas_pos,
-				&buf_spec_l1->y_dma_addr,
-				&buf_spec_l1->c_dma_addr);
-		} else if (buf_spec_l0 && buf_spec_l1) {
-			memcpy(buf_spec_l1, buf_spec_l0,
-			       sizeof(struct h264_decode_buf_spec));
-			dev_dbg(&ctx->dev->plat_dev->dev,
-				"config canvas for poc %d canvas %d y_dma_addr %pad c_dma_addr %pad\n",
-				buf_spec_l1->dpb->top_field_order_cnt,
-				buf_spec_l1->canvas_pos,
-				&buf_spec_l1->y_dma_addr,
-				&buf_spec_l1->c_dma_addr);
-		}
+		l0 = find_spec_by_dpb_index(h264_ctx, i, 0);
+		l1 = find_spec_by_dpb_index(h264_ctx, i, 1);
+		spec = l0 ? l0 : l1;
+		if (!spec)
+			continue;
+		spec->canvas_pos = get_canvas_pos(h264_ctx, dpb->reference_ts);
+		vb = vb2_find_buffer(vq, dpb->reference_ts);
+		if (spec->canvas_pos < 0 || !vb)
+			return -EINVAL;
+		h264_set_buffer_address(ctx, spec, vb);
+		if (l0 && l1)
+			memcpy(l1, l0, sizeof(*l1));
 	}
 	return 0;
-}
-
-static int get_poc_by_canvas_pos(struct aml_h264_ctx *h264_ctx, int canvas_pos)
-{
-	int i;
-
-	for (i = 0; i < (V4L2_H264_NUM_DPB_ENTRIES + 1); i++) {
-		if (h264_ctx->ref_canvas[i].canvas_pos == canvas_pos)
-			return h264_ctx->ref_canvas[i].poc;
-	}
-	return -1;
-}
-
-static struct v4l2_h264_dpb_entry *get_dpb_by_poc(struct v4l2_ctrl_h264_decode_params *decode,
-						  int poc)
-{
-	int i;
-
-	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
-		if (decode->dpb[i].top_field_order_cnt == poc)
-			return &decode->dpb[i];
-	}
-	return NULL;
 }
 
 static int h264_config_decode_buf(struct aml_vdec_hw *hw,
@@ -1419,23 +1265,22 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 	regmap_write(hw->map[DOS_BUS], H264_BUFFER_INFO_INDEX, 16);
 
 	for (j = 0; j < (V4L2_H264_NUM_DPB_ENTRIES + 1); j++) {
-		int poc;
-		struct v4l2_h264_dpb_entry *dpb = NULL;
+		const struct h264_canvas *canvas = &h264_ctx->ref_canvas[j];
+		const struct v4l2_h264_dpb_entry *dpb = NULL;
 
 		info0 = 0;
 		info1 = 0;
 		info2 = 0;
 
-		poc = get_poc_by_canvas_pos(h264_ctx, j);
-		if (poc == decode->top_field_order_cnt) {
+		if (j == h264_ctx->curr_spec.canvas_pos) {
 			info0 = 0xf480 | 0xf;
 			info1 = decode->top_field_order_cnt;
 			info2 = decode->bottom_field_order_cnt;
 			if (decode->bottom_field_order_cnt <
 			    decode->top_field_order_cnt)
 				info0 |= 0x100;
-		} else {
-			dpb = get_dpb_by_poc(decode, poc);
+		} else if (h264_ctx->canvas_pos_map & BIT(j)) {
+			dpb = get_dpb_by_timestamp(decode, canvas->timestamp);
 			if (dpb && (dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE)) {
 				info0 = 0xf480;
 				if (dpb->bottom_field_order_cnt <
@@ -2077,12 +1922,6 @@ int aml_h264_init(void *priv)
 		h264_ctx->ref_list1[i].u_canvas_index = -1;
 		h264_ctx->ref_list1[i].v_canvas_index = -1;
 	}
-	for (i = 0; i < ARRAY_SIZE(h264_ctx->ref_canvas); i++) {
-		h264_ctx->ref_canvas[i].poc = INVALID_POC;
-		h264_ctx->ref_canvas[i].canvas_pos = -1;
-	}
-	for (i = 0; i < ARRAY_SIZE(h264_ctx->colocated_buf_poc); i++)
-		h264_ctx->colocated_buf_poc[i] = INVALID_POC;
 
 	h264_ctx->lmem_addr = dma_alloc_coherent(dec_hw->dev, LMEM_DUMP_SIZE,
 						 &h264_ctx->lmem_phy_addr,
