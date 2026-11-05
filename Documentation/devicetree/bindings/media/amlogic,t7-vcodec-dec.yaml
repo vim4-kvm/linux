@@ -27,7 +27,10 @@ properties:
     const: dos
 
   interrupts:
-    maxItems: 1
+    minItems: 1
+    items:
+      - description: VDEC mailbox 1
+      - description: HEVC mailbox 0
 
   clocks:
     minItems: 5
@@ -82,6 +85,8 @@ allOf:
           minItems: 3
     then:
       properties:
+        interrupts:
+          minItems: 2
         clocks:
           minItems: 9
         clock-names:
@@ -90,6 +95,8 @@ allOf:
           minItems: 3
     else:
       properties:
+        interrupts:
+          maxItems: 1
         clocks:
           maxItems: 5
         clock-names:
