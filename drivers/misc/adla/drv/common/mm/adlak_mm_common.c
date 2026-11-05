@@ -19,6 +19,8 @@
  ******************************************************************************/
 
 /***************************** Include Files *********************************/
+#include <kunit/visibility.h>
+
 #include "adlak_mm_common.h"
 
 #include "adlak_mm_mbd.h"
@@ -81,6 +83,7 @@ int adlak_bitmap_pool_init(struct adlak_mm_pool_priv *pool, size_t pool_size,
     adlak_os_mutex_init(&pool->lock);
     return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(adlak_bitmap_pool_init);
 
 void adlak_bitmap_pool_deinit(struct adlak_mm_pool_priv *pool) {
     adlak_os_mutex_lock(&pool->lock);
@@ -91,6 +94,7 @@ void adlak_bitmap_pool_deinit(struct adlak_mm_pool_priv *pool) {
         pool->bitmap = NULL;
     }
 }
+EXPORT_SYMBOL_IF_KUNIT(adlak_bitmap_pool_deinit);
 
 void adlak_bitmap_dump(struct adlak_mm_pool_priv *pool) {
 #if ADLAK_DEBUG
@@ -158,6 +162,7 @@ ret:
 
     return addr_offset;
 }
+EXPORT_SYMBOL_IF_KUNIT(adlak_alloc_from_bitmap_pool);
 
 void adlak_free_to_bitmap_pool(struct adlak_mm_pool_priv *pool, dma_addr_t addr_offset,
                                size_t size) {
@@ -177,6 +182,7 @@ void adlak_free_to_bitmap_pool(struct adlak_mm_pool_priv *pool, dma_addr_t addr_
     pool->used_count -= bitmap_count;
     adlak_os_mutex_unlock(&pool->lock);
 }
+EXPORT_SYMBOL_IF_KUNIT(adlak_free_to_bitmap_pool);
 
 void adlak_set_bitmap_pool(struct adlak_mm_pool_priv *pool, dma_addr_t addr_offset, size_t size) {
     int bitmap_count;

@@ -30,6 +30,7 @@ EXTRA_CFLAGS+= -Wno-error -Wno-unused-variable
 EXTRA_CFLAGS += $(EXTRA_INCLUDE) $(EXTRA_CFLAGS1)
 
 obj-$(CONFIG_AMLOGIC_ADLA_COMPAT) += adla_core.o
+obj-$(CONFIG_AMLOGIC_ADLA_KUNIT_TEST) += adlak_kunit.o
 #NPU_DIR := $(shell dirname $(lastword $(MAKEFILE_LIST)))
 adla_core-objs += drv/port/platform/linux/adlak_debugfs.o
 adla_core-objs += drv/port/platform/linux/adlak_interrupt.o
