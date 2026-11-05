@@ -144,6 +144,7 @@ struct h264_decode_buf_spec {
 	int v_canvas_index;
 	u8 used;
 	u8 long_term_flag;
+	u8 fields;
 	dma_addr_t y_dma_addr;
 	dma_addr_t c_dma_addr;
 };
@@ -182,10 +183,10 @@ struct aml_h264_ctx {
 	u32 dec_status;
 	struct slice mslice;
 	struct h264_decode_buf_spec curr_spec;
-	struct h264_decode_buf_spec ref_list0[V4L2_H264_NUM_DPB_ENTRIES + 1];
-	struct h264_decode_buf_spec ref_list1[V4L2_H264_NUM_DPB_ENTRIES + 1];
-	struct h264_decode_buf_spec ref_list0_unreordered[V4L2_H264_NUM_DPB_ENTRIES + 1];
-	struct h264_decode_buf_spec ref_list1_unreordered[V4L2_H264_NUM_DPB_ENTRIES + 1];
+	struct h264_decode_buf_spec ref_list0[V4L2_H264_REF_LIST_LEN + 1];
+	struct h264_decode_buf_spec ref_list1[V4L2_H264_REF_LIST_LEN + 1];
+	struct h264_decode_buf_spec ref_list0_unreordered[V4L2_H264_REF_LIST_LEN + 1];
+	struct h264_decode_buf_spec ref_list1_unreordered[V4L2_H264_REF_LIST_LEN + 1];
 	u8 list_size[2];
 	u32 canvas_pos_map;
 	u32 configured_canvas_map;
@@ -230,6 +231,9 @@ void h264_build_pps_params(struct aml_h264_ctx *h264_ctx,
 int h264_pad_input(void *input, u32 payload_size, u32 buffer_size);
 int h264_ref_list_size(struct aml_h264_ctx *h264_ctx, int cur_list);
 void h264_copy_ref_list(struct aml_h264_ctx *h264_ctx, int curr_list);
+void h264_config_p_reflist(struct aml_h264_ctx *h264_ctx,
+			   const struct v4l2_h264_reference *reflist,
+			   u32 list_size);
 void h264_reorder_short_term(struct slice *curr_slice, int cur_list,
 			     int pic_num_lx, int *ref_idx_lx);
 #endif

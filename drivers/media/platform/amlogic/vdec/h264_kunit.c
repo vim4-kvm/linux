@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <kunit/test.h>
 #include <linux/module.h>
+#include <media/v4l2-h264.h>
 
 #include "aml_vdec_drv.h"
 #include "aml_vdec_hw.h"
@@ -79,6 +80,62 @@ static void independent_b_reference_lists(struct kunit *test)
 	h264_copy_ref_list(h, 1);
 	KUNIT_EXPECT_MEMEQ(test, h->ref_list0_unreordered, h->ref_list0, sizeof(h->ref_list0));
 	KUNIT_EXPECT_MEMEQ(test, h->ref_list1_unreordered, h->ref_list1, sizeof(h->ref_list1));
+}
+
+static void field_reference_metadata(struct kunit *test)
+{
+	static const struct v4l2_ctrl_h264_sps sps = {};
+	struct aml_h264_ctx *h = test->priv;
+	struct v4l2_ctrl_h264_decode_params *decode;
+	struct v4l2_h264_reflist_builder builder;
+	struct v4l2_h264_reference refs[V4L2_H264_REF_LIST_LEN];
+	unsigned int i;
+
+	decode = kunit_kzalloc(test, sizeof(*decode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, decode);
+	h->ctrl_ref.decode = decode;
+	decode->flags = V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC;
+	decode->frame_num = 15;
+	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
+		struct v4l2_h264_dpb_entry *entry = &decode->dpb[i];
+
+		entry->frame_num = i;
+		entry->fields = V4L2_H264_FRAME_REF;
+		entry->flags = V4L2_H264_DPB_ENTRY_FLAG_VALID |
+			       V4L2_H264_DPB_ENTRY_FLAG_ACTIVE;
+		entry->top_field_order_cnt = i * 2;
+		entry->bottom_field_order_cnt = (int)i * 2 - 1;
+	}
+	decode->dpb[0].flags |= V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM;
+	v4l2_h264_init_reflist_builder(&builder, decode, &sps, decode->dpb);
+	KUNIT_ASSERT_EQ(test, builder.num_valid, V4L2_H264_REF_LIST_LEN);
+	v4l2_h264_build_p_ref_list(&builder, refs);
+	h->ref_list0[V4L2_H264_REF_LIST_LEN].poc = 123456;
+	h264_config_p_reflist(h, refs, builder.num_valid);
+	KUNIT_EXPECT_EQ(test, h->list_size[0], V4L2_H264_REF_LIST_LEN);
+	KUNIT_EXPECT_EQ(test, h->ref_list0[V4L2_H264_REF_LIST_LEN].poc, 123456);
+	for (i = 0; i < builder.num_valid; i++) {
+		struct v4l2_h264_dpb_entry *entry = &decode->dpb[refs[i].index];
+		int poc = refs[i].fields == V4L2_H264_TOP_FIELD_REF ?
+			  entry->top_field_order_cnt : entry->bottom_field_order_cnt;
+
+		KUNIT_EXPECT_EQ(test, h->ref_list0[i].fields, refs[i].fields);
+		KUNIT_EXPECT_EQ(test, h->ref_list0[i].poc, poc);
+		KUNIT_EXPECT_EQ(test, h->ref_list0[i].long_term_flag,
+				refs[i].index == 0);
+	}
+
+	/* A frame reference uses the earlier POC, including a negative bottom POC. */
+	decode->flags = 0;
+	v4l2_h264_init_reflist_builder(&builder, decode, &sps, decode->dpb);
+	KUNIT_ASSERT_EQ(test, builder.num_valid, V4L2_H264_NUM_DPB_ENTRIES);
+	v4l2_h264_build_p_ref_list(&builder, refs);
+	h264_config_p_reflist(h, refs, builder.num_valid);
+	for (i = 0; i < builder.num_valid; i++) {
+		KUNIT_EXPECT_EQ(test, h->ref_list0[i].fields, V4L2_H264_FRAME_REF);
+		KUNIT_EXPECT_EQ(test, h->ref_list0[i].poc,
+				decode->dpb[refs[i].index].bottom_field_order_cnt);
+	}
 }
 
 static int signed_field(u8 code)
@@ -226,6 +283,7 @@ static void canvas_address_layout(struct kunit *test)
 static struct kunit_case h264_test_cases[] = {
 	KUNIT_CASE(duplicate_weighted_references),
 	KUNIT_CASE(independent_b_reference_lists),
+	KUNIT_CASE(field_reference_metadata),
 	KUNIT_CASE(parameter_slots_and_signed_fields),
 	KUNIT_CASE(interlaced_frame_dimensions),
 	KUNIT_CASE(input_padding_boundaries),
