@@ -174,6 +174,9 @@ struct aml_vdec_hw {
 	bool hevc_powered;
 	bool hevc_test_passed;
 	u32 hevc_parser_version;
+	bool hevc_core_test_passed;
+	u32 hevc_axi_front;
+	u32 hevc_axi_back;
 };
 
 /**
@@ -204,6 +207,7 @@ int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3);
 int aml_vdec_t7_power_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_hevc_test(struct aml_vdec_hw *hw);
+int aml_vdec_t7_hevc_core_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
