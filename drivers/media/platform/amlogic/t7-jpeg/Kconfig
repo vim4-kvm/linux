@@ -7,3 +7,14 @@ config VIDEO_MESON_T7_JPEG
 	help
 	  JPEG 4:2:0 hardware encoding of linear NV12/NV21 buffers on T7.
 	  Provides the jpegenc DMA import ABI used by vim4jpegenc.
+
+config VIDEO_MESON_T7_JPEG_KUNIT_TEST
+	tristate "T7 JPEG pure logic tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	depends on VIDEO_MESON_T7_JPEG
+	default KUNIT_ALL_TESTS
+	help
+	  Check the production quality tables and JPEG header serializer.
+	  Run these tests with KUnit without touching HCODEC hardware.
+	  DMA ownership and actual image output require board validation.
+	  The tests can also be built as an independent module.

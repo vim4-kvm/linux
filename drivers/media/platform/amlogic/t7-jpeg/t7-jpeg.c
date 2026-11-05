@@ -21,7 +21,10 @@
 #include <linux/uaccess.h>
 #include <media/meson-t7-dos.h>
 
+#include <kunit/visibility.h>
+
 #include "jpeg-tables.h"
+#include "t7-jpeg-kunit.h"
 
 /* DOS register numbers are word addresses within the fe320000 window. */
 #define ASSIST_MMC_CTRL1 0x1002
@@ -287,7 +290,7 @@ static u8 *put16(u8 *p, u16 value)
 	return p;
 }
 
-static u32 make_header(u8 *header, u32 width, u32 height, u16 quant[2][64])
+VISIBLE_IF_KUNIT u32 make_header(u8 *header, u32 width, u32 height, u16 quant[2][64])
 {
 	u8 *p = header;
 	int table, i;
@@ -339,6 +342,7 @@ static u32 make_header(u8 *header, u32 width, u32 height, u16 quant[2][64])
 	*p++ = 0;
 	return p - header;
 }
+EXPORT_SYMBOL_IF_KUNIT(make_header);
 
 static void write_huffman(struct t7_jpeg *j, const u8 *table, bool ac)
 {
@@ -364,18 +368,27 @@ static void write_huffman(struct t7_jpeg *j, const u8 *table, bool ac)
 		wr(j, HUFFMAN_DATA, lut[i]);
 }
 
+VISIBLE_IF_KUNIT void t7_jpeg_quantize(u16 quant[2][64], u32 quality)
+{
+	u32 scale = quality < 50 ? 5000 / quality : 200 - quality * 2;
+	int table, i;
+
+	for (table = 0; table < 2; table++)
+		for (i = 0; i < 64; i++)
+			quant[table][i] = clamp((jpeg_quant[table][i] * scale + 50) / 100,
+						1u, 255u);
+}
+EXPORT_SYMBOL_IF_KUNIT(t7_jpeg_quantize);
+
 static void configure_jpeg(struct t7_jpeg_file *f, const u32 cmd[30])
 {
 	struct t7_jpeg *j = f->jpeg;
 	u32 width = cmd[3], height = cmd[4], quality = cmd[7];
-	u32 scale = quality < 50 ? 5000 / quality : 200 - quality * 2;
 	u16 quant[2][64];
 	int table, i;
 	u32 lo, hi;
 
-	for (table = 0; table < 2; table++)
-		for (i = 0; i < 64; i++)
-			quant[table][i] = clamp((jpeg_quant[table][i] * scale + 50) / 100, 1u, 255u);
+	t7_jpeg_quantize(quant, quality);
 	f->header_bytes = make_header(f->mapping + HEADER_OFFSET, width, height, quant);
 	wr(j, PIC_SIZE, width | height << 16);
 	wr(j, PIC_POSITION, 3 | BIT(4));
