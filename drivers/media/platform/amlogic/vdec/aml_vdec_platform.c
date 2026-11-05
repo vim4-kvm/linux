@@ -161,7 +161,7 @@ static struct aml_video_fmt aml_t7_video_formats[] = {
 	},
 };
 
-const struct aml_codec_ops aml_S4_dec_ops[] = {
+static const struct aml_codec_ops aml_S4_dec_ops[] = {
 	[CODEC_TYPE_HEVC] = {
 		.init = aml_hevc_init,
 		.exit = aml_hevc_exit,
