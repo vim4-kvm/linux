@@ -84,3 +84,4 @@ kunit_test_suite(brcmf_nvram_suite);
 
 MODULE_IMPORT_NS("EXPORTED_FOR_KUNIT_TESTING");
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Broadcom FullMAC NVRAM parser tests");
