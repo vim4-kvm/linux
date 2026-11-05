@@ -150,6 +150,8 @@ struct dec_pic_info {
  * @dec_fmt: To describe the decoding format supported by hardware platform.
  * @is_cap_streamon: indicates if the current capture stream is on.
  * @is_output_streamon: indicates if the current output stream is on.
+ * @sequence_out: Next OUTPUT buffer sequence number.
+ * @sequence_cap: Next CAPTURE buffer sequence number for stateless/JPEG jobs.
  * @dos_clk_en: indicates if dos clk is enabled.
  * @pic_info: Pic information for curr decoder context. See struct dec_pic_info.
  * @curr_dec_type: Current decoder type. (CODEC_TYPE_H264, etc.)
@@ -181,6 +183,8 @@ struct aml_vdec_ctx {
 
 	bool is_cap_streamon;
 	bool is_output_streamon;
+	u32 sequence_out;
+	u32 sequence_cap;
 	bool dos_clk_en;
 
 	struct dec_pic_info pic_info;
