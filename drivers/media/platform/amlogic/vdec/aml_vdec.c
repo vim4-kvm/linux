@@ -213,7 +213,8 @@ static void vdec_job_finish(struct aml_vdec_ctx *ctx,
 	src = v4l2_m2m_next_src_buf(ctx->m2m_ctx);
 	dst = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
 	src->sequence = ctx->sequence_out++;
-	dst->sequence = ctx->sequence_cap++;
+	if (state == VB2_BUF_STATE_ERROR)
+		src->flags &= ~V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF;
 	if (ctx->is_jpeg &&
 	    v4l2_m2m_is_last_draining_src_buf(ctx->m2m_ctx, src)) {
 		dst->flags |= V4L2_BUF_FLAG_LAST;
@@ -236,10 +237,14 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 		aml_hevc_device_run(ctx);
 		return;
 	}
-	if (dev->dec_hw->faulted || ctx->decode_failed)
-		goto err_cancel_job;
 	src_buf = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	dst_buf = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
+	/* The core may release a held buffer on timestamp change or FLUSH. */
+	if (!dst_buf->is_held)
+		dst_buf->sequence = ctx->sequence_cap++;
+	v4l2_m2m_buf_copy_metadata(src_buf, dst_buf);
+	if (dev->dec_hw->faulted || ctx->decode_failed)
+		goto err_cancel_job;
 	dev_dbg(&dev->plat_dev->dev, "device run : src buf : %d dst buf %d\n",
 		src_buf->vb2_buf.index, dst_buf->vb2_buf.index);
 	if (WARN_ON_ONCE(!ctx->codec_ops->run))
@@ -274,7 +279,6 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 
 	ret = ctx->codec_ops->run(ctx);
 
-	v4l2_m2m_buf_copy_metadata(src_buf, dst_buf);
 stop_job:
 	/*
 	 * IRQ only signals completion. Successful completion and canvas release
