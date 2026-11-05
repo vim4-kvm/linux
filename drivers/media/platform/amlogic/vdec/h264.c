@@ -636,28 +636,41 @@ static int alloc_colocate_cma(struct aml_h264_ctx *h264_ctx,
 	return 0;
 }
 
-static void config_p_reflist(struct aml_h264_ctx *h264_ctx,
-			     struct v4l2_h264_reference *v4l2_p0_reflist,
-			     u32 list_size)
+static void h264_set_reference(struct h264_decode_buf_spec *spec,
+			       struct v4l2_h264_dpb_entry *dpb,
+			       const struct v4l2_h264_reference *ref)
+{
+	const struct v4l2_h264_dpb_entry *entry = &dpb[ref->index];
+
+	spec->used = 1;
+	spec->dpb = &dpb[ref->index];
+	spec->dpb_index = ref->index;
+	spec->fields = ref->fields;
+	if (ref->fields == V4L2_H264_TOP_FIELD_REF)
+		spec->poc = entry->top_field_order_cnt;
+	else if (ref->fields == V4L2_H264_BOTTOM_FIELD_REF)
+		spec->poc = entry->bottom_field_order_cnt;
+	else
+		spec->poc = min(entry->top_field_order_cnt,
+				entry->bottom_field_order_cnt);
+	spec->long_term_flag = !!(entry->flags & V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM);
+}
+
+VISIBLE_IF_KUNIT void h264_config_p_reflist(struct aml_h264_ctx *h264_ctx,
+					    const struct v4l2_h264_reference *reflist,
+					    u32 list_size)
 {
 	struct vdec_h264_stateless_ctrl_ref *ctrls = &h264_ctx->ctrl_ref;
 	struct v4l2_ctrl_h264_decode_params *decode =
 	    (struct v4l2_ctrl_h264_decode_params *)ctrls->decode;
 	struct v4l2_h264_dpb_entry *dpb = decode->dpb;
-	u8 index;
 	int i;
 
-	for (i = 0; i < list_size; i++) {
-		index = v4l2_p0_reflist[i].index;
-		h264_ctx->ref_list0[i].used = 1;
-		h264_ctx->ref_list0[i].dpb = &dpb[index];
-		h264_ctx->ref_list0[i].poc = dpb[index].top_field_order_cnt;
-		h264_ctx->ref_list0[i].long_term_flag =
-		    dpb[index].flags & V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM ? true : false;
-		h264_ctx->ref_list0[i].dpb_index = index;
-	}
+	for (i = 0; i < list_size; i++)
+		h264_set_reference(&h264_ctx->ref_list0[i], dpb, &reflist[i]);
 	h264_ctx->list_size[0] = list_size;
 }
+EXPORT_SYMBOL_IF_KUNIT(h264_config_p_reflist);
 
 static void config_b_reflist(struct aml_h264_ctx *h264_ctx,
 			     struct v4l2_h264_reference *v4l2_b0_reflist,
@@ -675,27 +688,17 @@ static void config_b_reflist(struct aml_h264_ctx *h264_ctx,
 	h264_ctx->list_size[0] = list_size;
 	for (i = 0; i < list_size; i++) {
 		index = v4l2_b0_reflist[i].index;
-		h264_ctx->ref_list0[i].used = 1;
-		h264_ctx->ref_list0[i].dpb = &dpb[index];
-		h264_ctx->ref_list0[i].poc = dpb[index].top_field_order_cnt;
-		h264_ctx->ref_list0[i].long_term_flag =
-		    dpb[index].flags & V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM ? true : false;
+		h264_set_reference(&h264_ctx->ref_list0[i], dpb, &v4l2_b0_reflist[i]);
 		h264_ctx->ref_list0[i].col_buf_index =
 		    get_col_buf_index_by_poc(h264_ctx, dpb[index].top_field_order_cnt);
-		h264_ctx->ref_list0[i].dpb_index = index;
 	}
 
 	h264_ctx->list_size[1] = list_size;
 	for (j = 0; j < list_size; j++) {
 		index = v4l2_b1_reflist[j].index;
-		h264_ctx->ref_list1[j].used = 1;
-		h264_ctx->ref_list1[j].dpb = &dpb[index];
-		h264_ctx->ref_list1[j].poc = dpb[index].top_field_order_cnt;
-		h264_ctx->ref_list1[j].long_term_flag =
-		    dpb[index].flags & V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM ? true : false;
+		h264_set_reference(&h264_ctx->ref_list1[j], dpb, &v4l2_b1_reflist[j]);
 		h264_ctx->ref_list1[j].col_buf_index =
 			get_col_buf_index_by_poc(h264_ctx, dpb[index].top_field_order_cnt);
-		h264_ctx->ref_list1[j].dpb_index = index;
 	}
 
 	if ((h264_ctx->list_size[1] + h264_ctx->list_size[0]) < list_size)
@@ -1051,7 +1054,7 @@ static void h264_config_ref_lists(struct aml_vdec_ctx *ctx)
 
 	if (curr_slice->slice_type == P_SLICE) {
 		v4l2_h264_build_p_ref_list(&builder, v4l2_p0_reflist);
-		config_p_reflist(h264_ctx, v4l2_p0_reflist, builder.num_valid);
+		h264_config_p_reflist(h264_ctx, v4l2_p0_reflist, builder.num_valid);
 	} else if (curr_slice->slice_type == B_SLICE) {
 		v4l2_h264_build_b_ref_lists(&builder, v4l2_b0_reflist, v4l2_b1_reflist);
 		config_b_reflist(h264_ctx, v4l2_b0_reflist, v4l2_b1_reflist,
@@ -2011,6 +2014,8 @@ int aml_h264_init(void *priv)
 		h264_ctx->ref_list1[i].y_canvas_index = -1;
 		h264_ctx->ref_list1[i].u_canvas_index = -1;
 		h264_ctx->ref_list1[i].v_canvas_index = -1;
+	}
+	for (i = 0; i < ARRAY_SIZE(h264_ctx->ref_canvas); i++) {
 		h264_ctx->ref_canvas[i].poc = INVALID_POC;
 		h264_ctx->ref_canvas[i].canvas_pos = -1;
 	}
