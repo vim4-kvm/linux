@@ -186,6 +186,7 @@ static int fops_vcodec_open(struct file *file)
 			goto err_open;
 	}
 	ctx->dev = dec_dev;
+	ctx->is_jpeg = video_devdata(file) == dec_dev->jpeg_vfd;
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
 	file->private_data = &ctx->fh;
 	v4l2_fh_add(&ctx->fh, file);
@@ -274,6 +275,36 @@ static const struct media_device_ops aml_m2m_media_ops = {
 	.req_validate = vb2_request_validate,
 	.req_queue = v4l2_m2m_request_queue,
 };
+
+static int aml_vdec_register_jpeg(struct aml_vdec_dev *dev)
+{
+	struct video_device *vfd;
+	int ret;
+
+	/* JPEG has a different V4L2 codec contract and does not use media requests. */
+	ret = v4l2_device_register(&dev->plat_dev->dev, &dev->jpeg_v4l2_dev);
+	if (ret)
+		return ret;
+	vfd = video_device_alloc();
+	if (!vfd) {
+		ret = -ENOMEM;
+		goto unregister;
+	}
+	*vfd = dec_dev;
+	strscpy(vfd->name, "aml_jpeg_decoder", sizeof(vfd->name));
+	vfd->v4l2_dev = &dev->jpeg_v4l2_dev;
+	vfd->lock = &dev->dev_mutex;
+	video_set_drvdata(vfd, dev);
+	dev->jpeg_vfd = vfd;
+	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
+	if (!ret)
+		return 0;
+	dev->jpeg_vfd = NULL;
+	video_device_release(vfd);
+unregister:
+	v4l2_device_unregister(&dev->jpeg_v4l2_dev);
+	return ret;
+}
 
 static int aml_vdec_drv_probe(struct platform_device *pdev)
 {
@@ -371,8 +402,13 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		v4l2_err(&dev->v4l2_dev, "Failed to register media device");
 		goto err_media_dev_register;
 	}
-	if (pdata->has_dbus_ctrl)
-		return 0;
+	if (pdata->has_dbus_ctrl) {
+		ret = aml_vdec_register_jpeg(dev);
+		if (!ret)
+			return 0;
+		media_device_unregister(&dev->mdev);
+		goto err_media_dev_register;
+	}
 	ret = vdec_enable(dev->dec_hw);
 	if (ret) {
 		media_device_unregister(&dev->mdev);
@@ -416,6 +452,10 @@ static void aml_vdec_drv_remove(struct platform_device *pdev)
 		vdec_disable(dev->dec_hw);
 	}
 
+	if (dev->jpeg_vfd) {
+		video_unregister_device(dev->jpeg_vfd);
+		v4l2_device_unregister(&dev->jpeg_v4l2_dev);
+	}
 	if (media_devnode_is_registered(dev->mdev.devnode)) {
 		media_device_unregister(&dev->mdev);
 		media_device_cleanup(&dev->mdev);
