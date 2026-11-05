@@ -169,8 +169,10 @@ static int adlak_dma_map_of_discontiguous(struct adlak_mem *mm, struct adlak_mem
 
     sgt = (struct sg_table *)mm_info->sgt;
 
-    result = sg_alloc_table_from_pages(sgt, (struct page **)mm_info->pages, mm_info->nr_pages,
-                                       offset, flush_size, ADLAK_GFP_KERNEL | __GFP_NOWARN);
+	result = sg_alloc_table_from_pages_segment(sgt, (struct page **)mm_info->pages,
+						   mm_info->nr_pages, offset, flush_size,
+						   dma_get_max_seg_size(mm->dev),
+						   ADLAK_GFP_KERNEL | __GFP_NOWARN);
     if (unlikely(result < 0)) {
         AML_LOG_ERR("sg_alloc_table_from_pages failed");
         ret = -1;
