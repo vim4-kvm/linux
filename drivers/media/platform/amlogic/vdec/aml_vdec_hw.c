@@ -362,7 +362,8 @@ static int vdec_clock_gate_init(struct aml_vdec_hw *hw)
 	hw->gates[VDEC_MUX].id = "clk_vdec_mux";
 	hw->gates[HEVCF_MUX].id = "clk_hevcf_mux";
 
-	ret = devm_clk_bulk_get(hw->dev, hw->has_dbus_ctrl ? 2 : DOS_CLK_MAX, hw->gates);
+	ret = devm_clk_bulk_get(hw->dev, hw->has_dbus_ctrl && !hw->has_hevc ?
+			       2 : DOS_CLK_MAX, hw->gates);
 	if (ret || !hw->has_dbus_ctrl)
 		return ret;
 	hw->apb_gates[0].id = "sys-apb";
@@ -373,6 +374,11 @@ static int vdec_clock_gate_init(struct aml_vdec_hw *hw)
 	hw->vdec_p0 = devm_clk_get(hw->dev, "vdec-p0");
 	if (IS_ERR(hw->vdec_p0))
 		return PTR_ERR(hw->vdec_p0);
+	if (hw->has_hevc) {
+		hw->hevc_p0 = devm_clk_get(hw->dev, "hevc-p0");
+		if (IS_ERR(hw->hevc_p0))
+			return PTR_ERR(hw->hevc_p0);
+	}
 	return t7_clock_provider_init(hw);
 }
 
@@ -398,7 +404,7 @@ static int pm_vdec_power_domain_init(struct aml_vdec_hw *hw)
 
 	mutex_init(&hw->pm_mutex);
 
-	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : VDEC_MAX); i++) {
+	for (i = 0; i < (hw->has_dbus_ctrl && !hw->has_hevc ? 1 : VDEC_MAX); i++) {
 		pd[i].dev = dev_pm_domain_attach_by_name(hw->dev, pd[i].name);
 		if (IS_ERR_OR_NULL(pd[i].dev)) {
 			err = pd[i].dev ? PTR_ERR(pd[i].dev) : -ENODEV;
@@ -439,7 +445,7 @@ static void pm_vdec_power_domain_release(struct aml_vdec_hw *hw)
 	if (!IS_ERR_OR_NULL(hw->nic3_dev))
 		dev_pm_domain_detach(hw->nic3_dev, true);
 
-	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : VDEC_MAX); i++) {
+	for (i = 0; i < (hw->has_dbus_ctrl && !hw->has_hevc ? 1 : VDEC_MAX); i++) {
 		if (!IS_ERR_OR_NULL(pd[i].link))
 			device_link_del(pd[i].link);
 
@@ -1061,6 +1067,135 @@ int vdec_disable(struct aml_vdec_hw *hw)
 	return vdec_poweroff(hw, VDEC_1);
 }
 
+static int t7_hevc_power_off(struct aml_vdec_hw *hw)
+{
+	s32 state;
+	int ret;
+
+	if (!hw->hevc_powered)
+		return 0;
+	clk_disable_unprepare(hw->gates[HEVCF_MUX].clk);
+	ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_HEVC].dev);
+	hw->hevc_powered = false;
+	if (ret < 0 || t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state) || state != 1) {
+		t7_power_fault(hw);
+		return -EIO;
+	}
+	return 0;
+}
+
+static int t7_hevc_power_on(struct aml_vdec_hw *hw)
+{
+	struct clk *clock = hw->gates[HEVCF_MUX].clk;
+	u32 p0, p1, gates;
+	s32 state;
+	int ret;
+
+	/* VDEC runtime PM owns DOS, NIC3 and CPU bridges during this transition. */
+	if (!hw->has_hevc || !hw->powered || hw->faulted)
+		return -EHOSTDOWN;
+	if (hw->hevc_powered)
+		return 0;
+	ret = t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state);
+	if (ret || state != 1)
+		return ret ?: -EBUSY;
+
+	/* DOS-top is accessible with VDEC on; the HEVC-local gate precedes secure PM. */
+	ret = regmap_write(hw->map[DOS_BUS], DOS_GCLK_EN3, U32_MAX);
+	if (ret)
+		return ret;
+	ret = clk_set_parent(clock, hw->hevc_p0);
+	if (ret)
+		return ret;
+	ret = clk_set_rate(hw->hevc_p0, 800000000);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(clock);
+	if (ret)
+		return ret;
+	ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_HEVC].dev);
+	if (ret < 0) {
+		clk_disable_unprepare(clock);
+		return ret;
+	}
+	hw->hevc_powered = true;
+	ret = t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state);
+	if (ret || state) {
+		ret = ret ?: -EHOSTDOWN;
+		goto power_off;
+	}
+	/* Verify the physical p0 path before touching any internal HEVC register. */
+	ret = regmap_read(hw->clkctrl, 0x144, &p0);
+	if (ret)
+		goto power_off;
+	ret = regmap_read(hw->clkctrl, 0x14c, &p1);
+	if (ret)
+		goto power_off;
+	dev_info(hw->dev, "HEVC clock: p0=%#x p1=%#x\n", p0, p1);
+	if ((p0 & 0xf7f) != BIT(8) || (p1 & BIT(15))) {
+		ret = -EHOSTDOWN;
+		goto power_off;
+	}
+	ret = regmap_read(hw->map[DOS_BUS], DOS_GCLK_EN3, &gates);
+	if (ret)
+		goto power_off;
+	if (gates != U32_MAX) {
+		ret = -EHOSTDOWN;
+		goto power_off;
+	}
+	return 0;
+
+power_off:
+	t7_hevc_power_off(hw);
+	return ret;
+}
+
+int aml_vdec_t7_hevc_test(struct aml_vdec_hw *hw)
+{
+	u32 value;
+	int ret, off_ret;
+
+	if (!hw->has_hevc)
+		return -EOPNOTSUPP;
+	if (hw->faulted || hw->probe_failed)
+		return -EIO;
+	if (!hw->mdec_test_passed || hw->powered || hw->probe_step)
+		return -EBUSY;
+	hw->hevc_test_passed = false;
+	ret = vdec_enable(hw);
+	if (ret)
+		return ret;
+	ret = t7_hevc_power_on(hw);
+	if (ret)
+		goto power_off;
+	/* No microcode, CPU start or DMA: only the audited reset/status registers. */
+	dev_info(hw->dev, "HEVC test: MPSR read begin\n");
+	ret = regmap_read(hw->map[DOS_BUS], HEVC_MPSR, &value);
+	if (ret)
+		goto power_off;
+	if (value) {
+		ret = -EBUSY;
+		goto power_off;
+	}
+	dev_info(hw->dev, "HEVC test: parser version read begin\n");
+	ret = regmap_read(hw->map[DOS_BUS], HEVC_PARSER_VERSION, &value);
+	if (!ret) {
+		hw->hevc_parser_version = value;
+		dev_info(hw->dev, "HEVC test: parser version=%#x\n", value);
+	}
+
+power_off:
+	off_ret = t7_hevc_power_off(hw);
+	if (!hw->faulted)
+		off_ret = vdec_disable(hw) ?: off_ret;
+	ret = ret ?: off_ret;
+	if (ret)
+		hw->probe_failed = true;
+	else
+		hw->hevc_test_passed = true;
+	return ret;
+}
+
 static const struct power_manager_s pm[] = {
 	[AML_PM_PD] = {
 		.pd_data    = vdec_domain_data,
@@ -1136,6 +1271,8 @@ int dev_request_hw_resources(void *priv)
 	hw = dev->dec_hw;
 	hw->dev = &pdev->dev;
 	hw->has_dbus_ctrl = dev->pvdec_data->has_dbus_ctrl;
+	hw->has_hevc = hw->has_dbus_ctrl &&
+		of_property_match_string(pdev->dev.of_node, "power-domain-names", "hevc") >= 0;
 	hw->has_internal_canvas = dev->pvdec_data->has_internal_canvas;
 	hw->canvas_endian_remap = hw->has_internal_canvas &&
 				 soc_device_match(canvas_endian_quirks);
