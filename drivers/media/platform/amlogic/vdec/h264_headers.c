@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR MIT)
 /* Serialize stateless parameter sets for the firmware's native NAL parser. */
 #include <linux/bitops.h>
+#include <kunit/visibility.h>
 #include <linux/errno.h>
+#include <linux/export.h>
 #include <linux/string.h>
 
 #include "h264_headers.h"
@@ -206,3 +208,4 @@ int aml_h264_build_headers(void *buffer, size_t capacity,
 		h264_header_pps(&writer, pps, matrix);
 	return writer.error ? writer.error : writer.length;
 }
+EXPORT_SYMBOL_IF_KUNIT(aml_h264_build_headers);
