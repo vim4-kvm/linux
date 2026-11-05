@@ -89,7 +89,7 @@
 #define CROPPING_LEFT_RIGHT						0X6A
 #define CROPPING_TOP_BOTTOM						0X6B
 /**
- * sps_flags2:
+ * SPS_FLAGS2 - Firmware SPS constraint flags
  * bit 3, bitstream_restriction_flag
  * bit 2, pic_struct_present_flag
  * bit 1, vcl_hrd_parameters_present_flag
@@ -293,6 +293,7 @@
 #define GET_PPS_GET_SECOND_CHROMA_QP_OFFSET(x)        (x)
 
 int aml_h264_init(void *priv);
+void aml_h264_prepare(void *priv);
 void aml_h264_exit(void *priv);
 int aml_h264_dec_run(void *priv);
 void aml_h264_finish(void *priv);
