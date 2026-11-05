@@ -1097,8 +1097,10 @@ static int t7_hevc_power_on(struct aml_vdec_hw *hw)
 	if (hw->hevc_powered)
 		return 0;
 	ret = t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state);
-	if (ret || state != 1)
-		return ret ?: -EBUSY;
+	if (ret)
+		return ret;
+	/* Firmware may leave this domain on; genpd still owns the runtime reference. */
+	dev_info(hw->dev, "HEVC initial power: HEVC[3]=%d\n", state);
 
 	/* DOS-top is accessible with VDEC on; the HEVC-local gate precedes secure PM. */
 	ret = regmap_write(hw->map[DOS_BUS], DOS_GCLK_EN3, U32_MAX);

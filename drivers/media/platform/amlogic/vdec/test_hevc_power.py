@@ -40,7 +40,7 @@ struct aml_vdec_hw {
 };
 static unsigned int calls, fail_at, last_calls, internal_reads;
 static unsigned int clock_refs, domain_refs, bus_refs, frequency;
-static u32 local_gates, bad_clock, busy_cpu;
+static u32 local_gates, bad_clock, busy_cpu, inherited_on;
 static struct clk parent = { 0 }, mux = { 1 };
 static struct pm pm;
 static struct aml_vdec_hw hw;
@@ -49,7 +49,7 @@ static int t7_domain_state(unsigned int id, s32 *state)
 {
     assert(id == PWRC_T7_DOS_HEVC_ID);
     if (backend()) return -EIO;
-    *state = !domain_refs;
+    *state = !domain_refs && !inherited_on;
     return 0;
 }
 static void t7_power_fault(struct aml_vdec_hw *h) { h->faulted = true; }
@@ -82,7 +82,7 @@ static int pm_runtime_put_sync_suspend(void *dev)
 {
     assert(!clock_refs && domain_refs == 1);
     if (backend()) return -EIO;
-    domain_refs--; return 0;
+    domain_refs--; inherited_on = 0; return 0;
 }
 static int regmap_write(void *map, u32 reg, u32 value)
 {
@@ -124,7 +124,7 @@ static void reset(unsigned int failure)
     hw.has_hevc = hw.mdec_test_passed = true;
     hw.gates[HEVCF_MUX].clk = &mux; hw.hevc_p0 = &parent; hw.pm = &pm;
     calls = internal_reads = clock_refs = domain_refs = bus_refs = 0;
-    local_gates = frequency = bad_clock = busy_cpu = 0;
+    local_gates = frequency = bad_clock = busy_cpu = inherited_on = 0;
     fail_at = failure;
 }
 int main(void)
@@ -149,6 +149,10 @@ int main(void)
     reset(0); busy_cpu = 1;
     assert(aml_vdec_t7_hevc_test(&hw) == -EBUSY);
     assert(internal_reads == 1 && !clock_refs && !domain_refs && !bus_refs);
+    reset(0); inherited_on = 1;
+    assert(!aml_vdec_t7_hevc_test(&hw));
+    assert(hw.hevc_test_passed && internal_reads == 2);
+    assert(!inherited_on && !clock_refs && !domain_refs && !bus_refs);
     reset(0); hw.has_hevc = false;
     assert(aml_vdec_t7_hevc_test(&hw) == -EOPNOTSUPP && !calls);
     reset(0); hw.mdec_test_passed = false;
