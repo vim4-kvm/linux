@@ -1688,8 +1688,8 @@ static irqreturn_t h264_threaded_isr_func(int irq, void *priv)
 		save_reg_status(h264_ctx);
 		h264_get_slice_params(h264_ctx);
 		if (h264_ctx->mslice.first_mb_in_slice >= h264_ctx->mb_total ||
-		    h264_ctx->mslice.num_ref_idx_l0 > V4L2_H264_NUM_DPB_ENTRIES ||
-		    h264_ctx->mslice.num_ref_idx_l1 > V4L2_H264_NUM_DPB_ENTRIES)
+		    h264_ctx->mslice.num_ref_idx_l0 > V4L2_H264_REF_LIST_LEN ||
+		    h264_ctx->mslice.num_ref_idx_l1 > V4L2_H264_REF_LIST_LEN)
 			goto header_error;
 		if (!hw->has_internal_canvas &&
 		    h264_ctx->mslice.first_mb_in_slice != 0)
@@ -1824,7 +1824,6 @@ static int aml_h264_get_stateless_ctrl_ref(struct aml_h264_ctx *h264_ctx)
 	if (ctrls->sps->bit_depth_luma_minus8 ||
 	    ctrls->sps->bit_depth_chroma_minus8 ||
 	    ctrls->sps->chroma_format_idc != 1 ||
-	    !(ctrls->sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) ||
 	    ctrls->sps->max_num_ref_frames > V4L2_H264_NUM_DPB_ENTRIES ||
 	    (ctrls->sps->pic_width_in_mbs_minus1 + 1) * 16 > ctx->pic_info.coded_width ||
 	    h264_sps_frame_height(ctrls->sps) > ctx->pic_info.coded_height)
@@ -1836,8 +1835,8 @@ static int aml_h264_get_stateless_ctrl_ref(struct aml_h264_ctx *h264_ctx)
 	if (WARN_ON(!ctrls->pps))
 		return -EINVAL;
 	if (ctrls->pps->seq_parameter_set_id != ctrls->sps->seq_parameter_set_id ||
-	    ctrls->pps->num_ref_idx_l0_default_active_minus1 +
-	    ctrls->pps->num_ref_idx_l1_default_active_minus1 + 2 > V4L2_H264_NUM_DPB_ENTRIES)
+	    ctrls->pps->num_ref_idx_l0_default_active_minus1 >= V4L2_H264_REF_LIST_LEN ||
+	    ctrls->pps->num_ref_idx_l1_default_active_minus1 >= V4L2_H264_REF_LIST_LEN)
 		return -EINVAL;
 
 	ctrls->decode =
