@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Amlogic T7 stereo audio effects engine. */
 
-#include <linux/bitfield.h>
 #include <kunit/visibility.h>
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
