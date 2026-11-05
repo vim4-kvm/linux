@@ -169,6 +169,11 @@ struct aml_vdec_hw {
 	struct clk_bulk_data apb_gates[2];
 	bool apb_held;
 	struct clk *vdec_p0;
+	struct clk *hevc_p0;
+	bool has_hevc;
+	bool hevc_powered;
+	bool hevc_test_passed;
+	u32 hevc_parser_version;
 };
 
 /**
@@ -198,6 +203,7 @@ int vdec_disable(struct aml_vdec_hw *hw);
 int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3);
 int aml_vdec_t7_power_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw);
+int aml_vdec_t7_hevc_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
