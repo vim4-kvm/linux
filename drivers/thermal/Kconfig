@@ -531,14 +531,3 @@ config LOONGSON2_THERMAL
 	  temperature threshold, the interrupt will occur.
 
 endif
-
-config KHADAS_MCU_FAN_KUNIT_TEST
-	tristate "Khadas MCU fan policy tests" if !KUNIT_ALL_TESTS
-	depends on KUNIT
-	depends on KHADAS_MCU_FAN_THERMAL
-	default KUNIT_ALL_TESTS
-	help
-	  Check production temperature curves and bounded speed changes.
-	  Test fault minimum and emergency cooling without hardware.
-	  Sensor, worker and regulator lifetimes require board validation.
-	  This suite may also be built as a separate KUnit module.
