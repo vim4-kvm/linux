@@ -7,8 +7,8 @@
 #include <linux/module.h>
 #include <linux/of_platform.h>
 #include <sound/pcm_params.h>
-#include <sound/soc-dai.h>
 #include <sound/soc.h>
+#include <sound/soc-dai.h>
 
 #include "axg-card-params.h"
 #include "axg-tdm.h"
