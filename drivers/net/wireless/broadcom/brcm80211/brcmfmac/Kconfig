@@ -11,6 +11,16 @@ config BRCMFMAC
 config BRCMFMAC_PROTO_BCDC
 	bool
 
+config BRCMFMAC_KUNIT_TEST
+	tristate "KUnit tests for brcmfmac NVRAM parsing" if !KUNIT_ALL_TESTS
+	depends on KUNIT && BRCMFMAC
+	default KUNIT_ALL_TESTS
+	help
+	  Exercise the firmware NVRAM parser with bounded firmware buffers.
+	  Cover unterminated trailing comments, embedded NUL terminators,
+	  and comments larger than the output buffer limit. Tests invoke
+	  the production parser without requesting firmware or a Wi-Fi bus.
+
 config BRCMFMAC_PROTO_MSGBUF
 	bool
 

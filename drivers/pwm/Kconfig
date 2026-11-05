@@ -29,6 +29,16 @@ menuconfig PWM
 
 if PWM
 
+config PWM_KUNIT_TEST
+	tristate "KUnit tests for PWM clock lock dependencies" if !KUNIT_ALL_TESTS
+	depends on KUNIT && COMMON_CLK && PROVE_LOCKING
+	default KUNIT_ALL_TESTS
+	help
+	  Exercise PWM controller locking through real PWM and clock APIs.
+	  Verify that separate controllers can have different ordering
+	  against the clock prepare lock, as on systems with both PWM
+	  regulators and PWM clocks. No physical PWM hardware is required.
+
 config PWM_DEBUG
 	bool "PWM lowlevel drivers additional checks and debug messages"
 	depends on DEBUG_KERNEL
