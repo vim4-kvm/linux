@@ -16,6 +16,7 @@
  * @init: Used for decoder initialization.
  * @exit: If needed, can be used to undo the .init phase.
  * @run: Execute a single decoding job in sleepable context.
+ * @prepare: Select codec callbacks before loading firmware for a job.
  * @finish: Release per-job canvas ownership after hardware stop.
  * Caller should ensure that a pair of buffers is ready and the
  * hardware is powered on and clk is enabled. Returns zero if OK,
@@ -24,6 +25,7 @@
 struct aml_codec_ops {
 	int (*init)(void *priv);
 	void (*exit)(void *priv);
+	void (*prepare)(void *priv);
 	int (*run)(void *priv);
 	void (*finish)(void *priv);
 };
