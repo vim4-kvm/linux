@@ -6,6 +6,8 @@
 #ifndef _AML_VDEC_HW_H_
 #define _AML_VDEC_HW_H_
 
+#include <kunit/visibility.h>
+
 #include <linux/module.h>
 #include <linux/clk.h>
 #include <linux/platform_device.h>
@@ -20,6 +22,10 @@
 
 #define VDEC_FIFO_ALIGN     8
 #define VLD_PADDING_SIZE    1024
+
+#if IS_ENABLED(CONFIG_KUNIT)
+u64 aml_vdec_canvas_layout(dma_addr_t addr, u32 stride, u32 height);
+#endif
 
 /**
  * struct aml_vdec_hw_ops - codec mode specific operations for hw
@@ -43,6 +49,9 @@ struct aml_vdec_hw_ops {
 
 /**
  * enum vdec_type_e - Type of decoder hardware.
+ * @VDEC_1: Legacy decoder core.
+ * @VDEC_HEVC: HEVC decoder core.
+ * @VDEC_MAX: Number of decoder cores.
  */
 enum vdec_type_e {
 	VDEC_1 = 0,
@@ -52,6 +61,10 @@ enum vdec_type_e {
 
 /**
  * enum vdec_irq_num - Definition of the irq.
+ * @VDEC_IRQ_0: First mailbox interrupt.
+ * @VDEC_IRQ_1: Second mailbox interrupt.
+ * @VDEC_IRQ_2: Third mailbox interrupt.
+ * @VDEC_IRQ_MAX: Number of interrupt slots.
  */
 enum vdec_irq_num {
 	VDEC_IRQ_0 = 0,
@@ -61,7 +74,11 @@ enum vdec_irq_num {
 };
 
 /**
- * enum vdec_type_e - Type of decoder clock.
+ * enum clk_type_e - Type of decoder clock.
+ * @VDEC: Decoder bus clock.
+ * @VDEC_MUX: Legacy decoder functional clock.
+ * @HEVCF_MUX: HEVC front-end functional clock.
+ * @DOS_CLK_MAX: Number of shared clock slots.
  */
 enum clk_type_e {
 	VDEC = 0,
@@ -72,6 +89,7 @@ enum clk_type_e {
 
 /**
  * enum aml_power_type_e - Type of decoder power.
+ * @AML_PM_PD: Generic power-domain management.
  */
 enum aml_power_type_e {
 	AML_PM_PD = 0,
@@ -79,6 +97,9 @@ enum aml_power_type_e {
 
 /**
  * enum mm_bus_e - Type of decoder hardware bus.
+ * @DOS_BUS: Decoder register bank.
+ * @DMC_BUS: Memory request control register bank.
+ * @MAX_REG_BUS: Number of register banks.
  */
 enum mm_bus_e {
 	DOS_BUS = 0,
@@ -90,7 +111,7 @@ enum mm_bus_e {
  * struct pm_pd_s - power domain definition
  * @name: Power domain name.
  * @dev: Pointer to device structure.
- * @mutex: Pointer to device_link structure.
+ * @link: Link retaining the power-domain supplier.
  * @ref_count: Curr power domain instance ref count.
  */
 struct pm_pd_s {
@@ -104,14 +125,17 @@ struct pm_pd_s {
  * struct aml_vdec_hw - decoder hardware resources definition
  * @pdev: Pointer to struct platform_device.
  * @dev: Pointer to struct device.
- * @regs: Reg base for dos/dmc hardware.
+ * @map: Regmaps for the decoder and memory request register banks.
  * @pm_mutex: Mutex for pm->pd_data.
+ * @canvas: External canvas provider on hardware without an internal LUT.
  * @pm: Pointer to struct power_manager_s.
  * @hw_ops: Hardware resource operation functions. See struct aml_vdec_hw_ops.
  * @gates: Clk instance used by curr decoder context.
  * @dec_irq: Irq registered.
  * @curr_ctx: Pointer to curr decoder context.
  * @has_dbus_ctrl: Isolate VDEC through DOS instead of DMC; no local PD writes.
+ * @has_internal_canvas: Use the decoder's private canvas LUT.
+ * @canvas_endian_remap: Revision requires byte-switch remap with LUT endian bits.
  * @faulted: DMA ownership could not be returned; reset the system to recover.
  * @powered: Domain and functional clocks are held.
  * @power_test_passed: Explicit read-only DOS access and power-off succeeded.
@@ -146,6 +170,8 @@ struct aml_vdec_hw {
 	int dec_irq;
 	void *curr_ctx;
 	bool has_dbus_ctrl;
+	bool has_internal_canvas;
+	bool canvas_endian_remap;
 	bool faulted;
 	bool powered;
 	bool power_test_passed;
@@ -200,7 +226,9 @@ int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
 int aml_stop_vdec_hw(struct aml_vdec_hw *hw);
-int load_firmware(struct aml_vdec_hw *hw, const char *path);
+int load_firmware(struct aml_vdec_hw *hw, const char *path, unsigned int codec);
+int aml_vdec_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
+				   dma_addr_t addr, u32 stride, u32 height);
 int aml_vdec_reset_core(struct aml_vdec_hw *hw);
 
 #endif
