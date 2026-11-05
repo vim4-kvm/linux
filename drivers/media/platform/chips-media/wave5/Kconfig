@@ -14,3 +14,14 @@ config VIDEO_WAVE_VPU
 	  The driver supports HEVC and H264 formats.
 	  To compile this driver as modules, choose M here: the
 	  modules will be called wave5.
+
+config VIDEO_WAVE_VPU_KUNIT_TEST
+	tristate "Wave5 pure logic tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	depends on VIDEO_WAVE_VPU
+	default KUNIT_ALL_TESTS
+	help
+	  Test Wave5 encoder parameter serialization without hardware.
+	  Run these tests under KUnit to check bitstream colour metadata.
+	  The suite calls the production serializer and requires no device.
+	  Hardware encoding still needs standard stream validation.
