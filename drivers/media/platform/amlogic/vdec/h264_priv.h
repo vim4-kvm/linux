@@ -13,6 +13,14 @@
 
 #define H264_MAX_COL_BUF 32
 
+/* H264_CO_MB_RD_ADDR[31:30] describes the reference's original layout. */
+enum h264_picture_structure {
+	H264_PICTURE_TOP,
+	H264_PICTURE_BOTTOM,
+	H264_PICTURE_FRAME,
+	H264_PICTURE_MBAFF,
+};
+
 struct vdec_h264_stateless_ctrl_ref {
 	const struct v4l2_ctrl_h264_decode_params *decode;
 	const struct v4l2_ctrl_h264_scaling_matrix *scaling;
@@ -145,6 +153,7 @@ struct h264_decode_buf_spec {
 	u8 used;
 	u8 long_term_flag;
 	u8 fields;
+	enum h264_picture_structure structure;
 	dma_addr_t y_dma_addr;
 	dma_addr_t c_dma_addr;
 };
@@ -206,6 +215,7 @@ struct aml_h264_ctx {
 	u32 one_col_buf_size;
 	u32 colocated_buf_map;
 	int colocated_buf_poc[H264_MAX_COL_BUF];
+	enum h264_picture_structure colocated_structure[H264_MAX_COL_BUF];
 
 	u32 frame_width;
 	u32 frame_height;
@@ -222,6 +232,13 @@ struct aml_h264_ctx {
 };
 
 #if IS_ENABLED(CONFIG_KUNIT)
+enum h264_picture_structure
+h264_picture_structure(const struct v4l2_ctrl_h264_decode_params *decode,
+		       const struct v4l2_ctrl_h264_sps *sps);
+int h264_mv_offsets(enum h264_picture_structure current_structure,
+		    enum h264_picture_structure reference, u32 first_mb,
+		    u32 mb_width, u32 buffer_size, bool compact,
+		    u32 *write_offset, u32 *read_offset);
 void h264_build_sps_params(struct aml_h264_ctx *h264_ctx,
 			   unsigned short *sps_base,
 			   const struct v4l2_ctrl_h264_sps *sps);
