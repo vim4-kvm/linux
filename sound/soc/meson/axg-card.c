@@ -3,30 +3,16 @@
 // Copyright (c) 2018 BayLibre, SAS.
 // Author: Jerome Brunet <jbrunet@baylibre.com>
 
+#include <kunit/visibility.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/soc-dai.h>
 
+#include "axg-card-params.h"
 #include "axg-tdm.h"
 #include "meson-card.h"
-
-struct axg_dai_link_tdm_mask {
-	u32 tx;
-	u32 rx;
-};
-
-struct axg_dai_link_tdm_data {
-	unsigned int convert_rate;
-	unsigned int convert_channels;
-	unsigned int mclk_fs;
-	unsigned int slots;
-	unsigned int slot_width;
-	u32 *tx_mask;
-	u32 *rx_mask;
-	struct axg_dai_link_tdm_mask *codec_masks;
-};
 
 /*
  * Base params for the codec to codec links
@@ -309,8 +295,8 @@ static int axg_card_cpu_is_codec(struct device_node *np)
 		of_device_is_compatible(np, DT_PREFIX "g12a-toacodec");
 }
 
-static int axg_card_be_fixup(struct snd_soc_pcm_runtime *rtd,
-			     struct snd_pcm_hw_params *params)
+VISIBLE_IF_KUNIT int axg_card_be_fixup(struct snd_soc_pcm_runtime *rtd,
+				       struct snd_pcm_hw_params *params)
 {
 	struct meson_card *priv = snd_soc_card_get_drvdata(rtd->card);
 	struct axg_dai_link_tdm_data *be = priv->link_data[rtd->id];
@@ -327,8 +313,9 @@ static int axg_card_be_fixup(struct snd_soc_pcm_runtime *rtd,
 	}
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(axg_card_be_fixup);
 
-static void axg_card_update_frontends(struct snd_soc_card *card)
+VISIBLE_IF_KUNIT void axg_card_update_frontends(struct snd_soc_card *card)
 {
 	struct meson_card *priv = snd_soc_card_get_drvdata(card);
 	bool rate = true, channels = true;
@@ -350,6 +337,7 @@ static void axg_card_update_frontends(struct snd_soc_card *card)
 		}
 	}
 }
+EXPORT_SYMBOL_IF_KUNIT(axg_card_update_frontends);
 
 static int axg_card_add_link(struct snd_soc_card *card, struct device_node *np,
 			     int *index)
