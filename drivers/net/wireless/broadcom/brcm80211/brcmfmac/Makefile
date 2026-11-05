@@ -11,6 +11,7 @@ ccflags-y += \
 
 obj-$(CONFIG_BRCMFMAC) += brcmfmac.o
 obj-$(CONFIG_BRCMFMAC_KUNIT_TEST) += firmware_kunit.o
+obj-$(CONFIG_BRCMFMAC_P2P_KUNIT_TEST) += p2p_kunit.o
 brcmfmac-objs += \
 		cfg80211.o \
 		chip.o \
