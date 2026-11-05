@@ -19,6 +19,9 @@
  ******************************************************************************/
 
 /***************************** Include Files *********************************/
+#include <kunit/visibility.h>
+
+#include "adlak_kunit.h"
 #include "adlak_submit.h"
 
 #include "adlak_api.h"
@@ -1093,8 +1096,10 @@ static int adlak_invoke_del_from_sch_list(struct list_head *hd, int32_t net_id, 
     }
     return ret;
 }
-static int adlak_invoke_del_with_invokeid(struct adlak_device *padlak, int32_t net_id,
-                                          int32_t invoke_id) {
+
+VISIBLE_IF_KUNIT int adlak_invoke_del_with_invokeid(struct adlak_device *padlak,
+						    s32 net_id, s32 invoke_id)
+{
     /*
    - if in pendding list,
      - mutex lock;
@@ -1136,6 +1141,7 @@ end:
     adlak_os_mutex_unlock(&pwq->wq_mutex);
     return ret;
 }
+EXPORT_SYMBOL_IF_KUNIT(adlak_invoke_del_with_invokeid);
 
 int adlak_invoke_del_all(struct adlak_device *padlak, int32_t net_id) {
     AML_LOG_DEBUG("%s", __func__);

@@ -20,6 +20,8 @@
 
 /***************************** Include Files *********************************/
 
+#include <kunit/visibility.h>
+
 #include "adlak_os.h"
 
 #include "adlak_common.h"
@@ -217,6 +219,7 @@ int adlak_os_mutex_init(adlak_os_mutex_t *mutex) {
     AML_LOG_DEBUG("mutex_init success!\n");
     return ERR(NONE);
 }
+EXPORT_SYMBOL_IF_KUNIT(adlak_os_mutex_init);
 
 int adlak_os_mutex_destroy(adlak_os_mutex_t *mutex) {
     adlak_os_mutex_inner_t *pmutex_inner = (adlak_os_mutex_inner_t *)*mutex;
@@ -230,6 +233,7 @@ int adlak_os_mutex_destroy(adlak_os_mutex_t *mutex) {
     }
     return ERR(EINVAL);
 }
+EXPORT_SYMBOL_IF_KUNIT(adlak_os_mutex_destroy);
 
 int adlak_os_mutex_lock(adlak_os_mutex_t *mutex) {
     adlak_os_mutex_inner_t *pmutex_inner = (adlak_os_mutex_inner_t *)*mutex;

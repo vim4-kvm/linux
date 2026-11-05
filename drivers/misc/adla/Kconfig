@@ -8,3 +8,13 @@ config AMLOGIC_ADLA_COMPAT
 	  Exposes /dev/adla0 and the vendor ioctl, mmap and sysfs contracts.
 	  This is not a DRM accelerator interface. Hardware validation is
 	  required before use on T7C boards.
+
+config AMLOGIC_ADLA_KUNIT_TEST
+	tristate "KUnit tests for ADLA memory and cancellation" if !KUNIT_ALL_TESTS
+	depends on KUNIT && AMLOGIC_ADLA_COMPAT
+	default KUNIT_ALL_TESTS
+	help
+	  Test the production bitmap allocator, queued cancellation and
+	  untrusted command bounds using real driver types and kernel lists.
+	  DMA, recovery, power and ioctl lifetimes require board validation.
+	  This suite may also be built as a separate KUnit module.
