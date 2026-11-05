@@ -55,3 +55,14 @@ config DRM_MESON_DW_MIPI_DSI
 	default y if DRM_MESON
 	select DRM_DW_MIPI_DSI
 	select GENERIC_PHY_MIPI_DPHY
+
+config DRM_MESON_T7_KUNIT_TEST
+	tristate "Meson T7 pure display logic tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	depends on DRM_MESON_T7_HANDOFF
+	default KUNIT_ALL_TESTS
+	help
+	  Test production framebuffer bounds, clocks and display descriptors.
+	  These tests require no display controller or MMIO emulation.
+	  DMA ownership, atomic lifecycle and display output need board tests.
+	  The test suite may be built as a separate KUnit module.

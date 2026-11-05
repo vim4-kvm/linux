@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
 /* ENC2 timing and clocks. No VDIN, canvas or global VPU initialization. */
+#include <kunit/visibility.h>
 #include <linux/arm-smccc.h>
 #include <linux/delay.h>
 #include <linux/io.h>
@@ -51,6 +52,7 @@ int meson_t7_clock_calculate(unsigned int pixel_khz, struct meson_t7_clock *cloc
 		clock->frac = 0x8168;
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_clock_calculate);
 
 /* T7 hw_clk.c: deep colour changes the serializer PLL and VID_PLL divider.
  * 420 runs ENC at the full pixel rate, with half-rate PNX/pixel clocks.
@@ -95,6 +97,7 @@ int meson_t7_link_clock_calculate(unsigned int pixel_khz, unsigned int bpc,
 	link->shift_sel = bpc == 10 ? 3 : 2;
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_link_clock_calculate);
 
 enum drm_mode_status meson_t7_mode_valid(const struct drm_display_mode *mode)
 {
@@ -125,6 +128,7 @@ enum drm_mode_status meson_t7_mode_valid(const struct drm_display_mode *mode)
 		return MODE_VSYNC;
 	return MODE_OK;
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_mode_valid);
 
 static void meson_t7_write(struct meson_t7_modeset *hw, u32 reg, u32 value)
 {

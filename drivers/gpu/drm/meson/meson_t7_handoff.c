@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Fixed T7 OSD1 handoff. The normal meson initialization is deliberately absent. */
+#include <kunit/visibility.h>
 #include <linux/clk.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
@@ -36,6 +37,7 @@
 
 #include "meson_registers.h"
 #include "meson_t7_handoff.h"
+#include "meson_t7_kunit.h"
 #include "meson_t7_modeset.h"
 #include "meson_t7_scanout.h"
 #include "meson_t7_layers.h"
@@ -110,7 +112,7 @@ unsigned long meson_t7_display_clock_rate(struct drm_crtc *crtc)
 }
 EXPORT_SYMBOL_GPL(meson_t7_display_clock_rate);
 
-static u32 meson_t7_osd_alpha(u32 ctrl, u16 alpha)
+VISIBLE_IF_KUNIT u32 meson_t7_osd_alpha(u32 ctrl, u16 alpha)
 {
 	u32 value = alpha >> 8;
 
@@ -119,8 +121,9 @@ static u32 meson_t7_osd_alpha(u32 ctrl, u16 alpha)
 		value = 0x100;
 	return (ctrl & ~GENMASK(20, 12)) | value << 12;
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_osd_alpha);
 
-static u32 meson_t7_osd_reflect(u32 format, unsigned int rotation)
+VISIBLE_IF_KUNIT u32 meson_t7_osd_reflect(u32 format, unsigned int rotation)
 {
 	format &= ~(BIT(28) | BIT(29));
 	if (rotation & DRM_MODE_REFLECT_X)
@@ -129,6 +132,7 @@ static u32 meson_t7_osd_reflect(u32 format, unsigned int rotation)
 		format |= BIT(29);
 	return format;
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_osd_reflect);
 
 static void meson_t7_handoff_fault(struct meson_t7_handoff *display)
 {

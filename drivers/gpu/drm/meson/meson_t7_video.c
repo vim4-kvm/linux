@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* T7 video input parameters. No MMIO or fetch enable is performed here. */
+#include <kunit/visibility.h>
 #include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -31,6 +32,7 @@ int meson_t7_video_phase_prepare(u32 width, u32 height, u32 output_width,
 	*phase = next;
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_video_phase_prepare);
 
 int meson_t7_video_mif_prepare(const struct meson_t7_video_frame *frame,
 			       unsigned int index, struct meson_t7_video_mif *mif)
@@ -94,3 +96,4 @@ int meson_t7_video_mif_prepare(const struct meson_t7_video_frame *frame,
 	*mif = next;
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_video_mif_prepare);

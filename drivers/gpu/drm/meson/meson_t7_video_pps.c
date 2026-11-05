@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
+#include <kunit/visibility.h>
 #include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -81,3 +82,4 @@ int meson_t7_video_pps_build(u32 *table, unsigned int pairs, unsigned int index,
 			   BIT(24) | BIT(18) | BIT(17) | BIT(16) | BIT(15) | 4 << 8 | 4);
 	return (next - table) * sizeof(*table);
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_video_pps_build);
