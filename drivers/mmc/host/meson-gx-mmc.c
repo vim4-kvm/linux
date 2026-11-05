@@ -182,7 +182,8 @@ struct meson_host {
 
 	bool needs_pre_post_req;
 
-	spinlock_t lock;
+	/* SDIO IRQ masking is also accessed by the IRQF_ONESHOT primary handler. */
+	raw_spinlock_t lock;
 };
 
 #define CMD_CFG_LENGTH_MASK GENMASK(8, 0)
@@ -1074,10 +1075,10 @@ static irqreturn_t meson_mmc_irq(int irq, void *dev_id)
 	cmd = host->cmd;
 
 	if (status & IRQ_SDIO) {
-		spin_lock(&host->lock);
+		raw_spin_lock(&host->lock);
 		__meson_mmc_enable_sdio_irq(host->mmc, 0);
 		sdio_signal_irq(host->mmc);
-		spin_unlock(&host->lock);
+		raw_spin_unlock(&host->lock);
 		status &= ~IRQ_SDIO;
 		if (!status)
 			return IRQ_HANDLED;
@@ -1109,14 +1110,8 @@ static irqreturn_t meson_mmc_irq(int irq, void *dev_id)
 		if (data && !cmd->error)
 			data->bytes_xfered = data->blksz * data->blocks;
 
-		/* Keep the potentially large bounce read copy in the thread. */
-		if ((data && data->error) || meson_mmc_bounce_buf_read(data) ||
-		    meson_mmc_get_next_command(cmd))
-			return IRQ_WAKE_THREAD;
-
-		meson_mmc_bounce_sync_for_cpu(host, data);
-		meson_mmc_request_done(host->mmc, cmd->mrq);
-		return IRQ_HANDLED;
+		/* DMA sync/unmap can acquire sleepable locks on PREEMPT_RT. */
+		return IRQ_WAKE_THREAD;
 	}
 
 out:
@@ -1242,9 +1237,9 @@ static void meson_mmc_enable_sdio_irq(struct mmc_host *mmc, int enable)
 	struct meson_host *host = mmc_priv(mmc);
 	unsigned long flags;
 
-	spin_lock_irqsave(&host->lock, flags);
+	raw_spin_lock_irqsave(&host->lock, flags);
 	__meson_mmc_enable_sdio_irq(mmc, enable);
-	spin_unlock_irqrestore(&host->lock, flags);
+	raw_spin_unlock_irqrestore(&host->lock, flags);
 }
 
 static void meson_mmc_ack_sdio_irq(struct mmc_host *mmc)
@@ -1373,7 +1368,7 @@ static int meson_mmc_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_init_clk;
 
-	spin_lock_init(&host->lock);
+	raw_spin_lock_init(&host->lock);
 
 	if (host->dram_access_quirk) {
 		/* Limit segments to 1 due to low available sram memory */
