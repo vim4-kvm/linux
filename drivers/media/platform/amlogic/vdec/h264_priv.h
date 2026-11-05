@@ -231,6 +231,7 @@ void h264_build_pps_params(struct aml_h264_ctx *h264_ctx,
 int h264_pad_input(void *input, u32 payload_size, u32 buffer_size);
 int h264_ref_list_size(struct aml_h264_ctx *h264_ctx, int cur_list);
 void h264_copy_ref_list(struct aml_h264_ctx *h264_ctx, int curr_list);
+void h264_config_ref_lists(struct aml_vdec_ctx *ctx);
 void h264_config_p_reflist(struct aml_h264_ctx *h264_ctx,
 			   const struct v4l2_h264_reference *reflist,
 			   u32 list_size);
