@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Amlogic T7 stereo audio effects engine. */
 
+#include <kunit/visibility.h>
 #include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/module.h>
@@ -12,6 +13,7 @@
 #include <sound/tlv.h>
 
 #include "t7-aed-coeff.h"
+#include "t7-audio-kunit.h"
 
 #define AED_EQ_EN		0x08
 #define AED_VOLUME		0x10
@@ -38,7 +40,7 @@ struct t7_aed {
 };
 
 /* Q3.23, encoded in 26 bits. The denominator is 1 + a1 z^-1 + a2 z^-2. */
-static bool t7_aed_biquad_valid(const u32 *coeff)
+VISIBLE_IF_KUNIT bool t7_aed_biquad_valid(const u32 *coeff)
 {
 	s32 a1 = sign_extend32(coeff[3], 25);
 	s32 a2 = sign_extend32(coeff[4], 25);
@@ -50,6 +52,7 @@ static bool t7_aed_biquad_valid(const u32 *coeff)
 	return a2 > -AED_Q23_ONE && a2 < AED_Q23_ONE &&
 		AED_Q23_ONE + a1 + a2 > 0 && AED_Q23_ONE - a1 + a2 > 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(t7_aed_biquad_valid);
 
 static int t7_aed_load_eq(struct regmap *map, const u32 *eq)
 {
@@ -84,7 +87,7 @@ static int t7_aed_stop(struct regmap *map)
 	return ret ?: gate_ret;
 }
 
-static bool t7_aed_drc_valid(const u32 *drc, unsigned int words)
+VISIBLE_IF_KUNIT bool t7_aed_drc_valid(const u32 *drc, unsigned int words)
 {
 	unsigned int i, j;
 	static const unsigned int pairs[] = { 0, 2, 6, 8, 12 };
@@ -111,6 +114,7 @@ static bool t7_aed_drc_valid(const u32 *drc, unsigned int words)
 	}
 	return true;
 }
+EXPORT_SYMBOL_IF_KUNIT(t7_aed_drc_valid);
 
 static int t7_aed_start(struct regmap *map, unsigned int width, const u32 *eq,
 			const u32 *drc, const u32 *mdrc)
