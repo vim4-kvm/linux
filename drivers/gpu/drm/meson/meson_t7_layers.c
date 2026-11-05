@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2019 Amlogic, Inc. All rights reserved. */
 /* T7 OSD MIF, scalers and mixer. All changes share one hardware RDMA latch. */
+#include <kunit/visibility.h>
 #include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -191,6 +192,7 @@ int meson_t7_osd_layers_flip(u32 *table, unsigned int pairs,
 	/* At most three writes: shorter than the five-pair M2 address update. */
 	return rdma.used * 8;
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_osd_layers_flip);
 
 int meson_t7_osd_layers_build(u32 *table, unsigned int pairs,
 			      const struct meson_t7_osd_layer *layers,
@@ -249,3 +251,4 @@ int meson_t7_osd_layers_build(u32 *table, unsigned int pairs,
 		return -ENOSPC;
 	return rdma.used * 8;
 }
+EXPORT_SYMBOL_IF_KUNIT(meson_t7_osd_layers_build);
