@@ -6,17 +6,20 @@
  * Author(s): Neil Armstrong <narmstrong@baylibre.com>
  */
 
+#include <kunit/visibility.h>
+#include <linux/limits.h>
+#include <linux/mfd/khadas-mcu.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/mfd/khadas-mcu.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/sysfs.h>
 #include <linux/thermal.h>
-#include <linux/regulator/consumer.h>
-#include <linux/limits.h>
 #include <linux/workqueue.h>
-#include <linux/mutex.h>
+
+#include "khadas_mcu_fan_kunit.h"
 
 static bool quiet_auto = true;
 module_param(quiet_auto, bool, 0444);
@@ -54,8 +57,8 @@ static int khadas_vim4_fan_lerp(int temp, int low, int high,
 		(high - low);
 }
 
-static int khadas_vim4_fan_target_curve(int temp, bool sensor_fault,
-				      int low, int mid, int high)
+VISIBLE_IF_KUNIT int khadas_vim4_fan_target_curve(int temp, bool sensor_fault,
+						  int low, int mid, int high)
 {
 	int target;
 	int start = low - 15000;
@@ -77,14 +80,16 @@ static int khadas_vim4_fan_target_curve(int temp, bool sensor_fault,
 	/* Unknown sensors must not override another sensor's valid hot reading. */
 	return sensor_fault ? max(target, 15) : target;
 }
+EXPORT_SYMBOL_IF_KUNIT(khadas_vim4_fan_target_curve);
 
-static int khadas_vim4_fan_target(int temp, bool sensor_fault)
+VISIBLE_IF_KUNIT int khadas_vim4_fan_target(int temp, bool sensor_fault)
 {
 	return khadas_vim4_fan_target_curve(temp, sensor_fault, 60000, 80000, 100000);
 }
+EXPORT_SYMBOL_IF_KUNIT(khadas_vim4_fan_target);
 
-static unsigned int khadas_vim4_fan_next(unsigned int current_speed,
-				       unsigned int target)
+VISIBLE_IF_KUNIT unsigned int khadas_vim4_fan_next(unsigned int current_speed,
+						   unsigned int target)
 {
 	/* Stop/start and emergency cooling bypass the normal 5% ramp. */
 	if (!target || target == 100 || !current_speed)
@@ -95,6 +100,7 @@ static unsigned int khadas_vim4_fan_next(unsigned int current_speed,
 		return current_speed - 5;
 	return target;
 }
+EXPORT_SYMBOL_IF_KUNIT(khadas_vim4_fan_next);
 
 static int khadas_mcu_fan_set_level(struct khadas_mcu_fan_ctx *ctx,
 				    unsigned int level)
