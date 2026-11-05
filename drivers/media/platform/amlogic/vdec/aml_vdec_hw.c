@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/firmware.h>
 #include <linux/iopoll.h>
+#include <linux/sys_soc.h>
 #include <media/meson-t7-dos.h>
 #include <dt-bindings/power/amlogic,t7-pwrc.h>
 
@@ -22,6 +23,11 @@
 
 #define MHz     (1000000)
 #define MC_SIZE (4096 * 16)
+
+static const struct soc_device_attribute canvas_endian_quirks[] = {
+	{ .family = "Amlogic Meson", .revision = "36:c - *" },
+	{ /* sentinel */ }
+};
 
 static struct pm_pd_s vdec_domain_data[] = {
 	[VDEC_1] = {.name = "vdec", },
@@ -187,7 +193,32 @@ int aml_stop_vdec_hw(struct aml_vdec_hw *hw)
 	return 0;
 }
 
-int load_firmware(struct aml_vdec_hw *hw, const char *path)
+VISIBLE_IF_KUNIT u64 aml_vdec_canvas_layout(dma_addr_t addr, u32 stride, u32 height)
+{
+	u32 low = (u32)(addr >> 3) | ((stride >> 3) << 29);
+	u32 high = (stride >> 6) | (height << 9) | (MESON_CANVAS_ENDIAN_SWAP64 << 26);
+
+	return low | ((u64)high << 32);
+}
+EXPORT_SYMBOL_IF_KUNIT(aml_vdec_canvas_layout);
+
+int aml_vdec_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
+				   dma_addr_t addr, u32 stride, u32 height)
+{
+	u64 layout = aml_vdec_canvas_layout(addr, stride, height);
+
+	/* Revision C needs both the LUT endian field and byte-switch remap. */
+	const struct reg_sequence regs[] = {
+		{ MDEC_CAV_CFG0, hw->canvas_endian_remap ? GENMASK(25, 17) : 0 },
+		{ MDEC_CAV_LUT_DATAL, lower_32_bits(layout) },
+		{ MDEC_CAV_LUT_DATAH, upper_32_bits(layout) },
+		{ MDEC_CAV_LUT_ADDR, index },
+	};
+
+	return regmap_multi_reg_write(hw->map[DOS_BUS], regs, ARRAY_SIZE(regs));
+}
+
+int load_firmware(struct aml_vdec_hw *hw, const char *path, unsigned int codec)
 {
 	const struct firmware *fw;
 	struct device *dev = hw->dev;
@@ -199,13 +230,25 @@ int load_firmware(struct aml_vdec_hw *hw, const char *path)
 
 	if (hw->has_dbus_ctrl) {
 		struct arm_smccc_res result;
+		u32 format;
 
-		/* Vendor tee_load_video_fw(H264_MULTI=15, VDEC_LEGENCY=0). */
-		arm_smccc_smc(0xb200000f, 15, 0, 0, 0, 0, 0, 0, &result);
+		switch (codec) {
+		case CODEC_TYPE_H264:
+			format = 15;
+			break;
+		case CODEC_TYPE_MPEG2:
+			format = 0x4d31324d; /* MPEG12_MULTI: tag M12M. */
+			break;
+		default:
+			return -EINVAL;
+		}
+		arm_smccc_smc(0xb200000f, format, 0, 0, 0, 0, 0, 0, &result);
 		if ((s32)result.a0) {
-			dev_err(dev, "secure H264 load failed: %#lx\n", result.a0);
+			dev_err(dev, "secure firmware %#x load failed: %#lx\n", format, result.a0);
 			return -EIO;
 		}
+		if (codec != CODEC_TYPE_H264)
+			return 0;
 		ret = regmap_read(hw->map[DOS_BUS], AV_SCRATCH_G, &hw->secure_swap);
 		if (ret)
 			return ret;
@@ -1088,6 +1131,9 @@ int dev_request_hw_resources(void *priv)
 	hw = dev->dec_hw;
 	hw->dev = &pdev->dev;
 	hw->has_dbus_ctrl = dev->pvdec_data->has_dbus_ctrl;
+	hw->has_internal_canvas = dev->pvdec_data->has_internal_canvas;
+	hw->canvas_endian_remap = hw->has_internal_canvas &&
+				 soc_device_match(canvas_endian_quirks);
 
 	hw->dec_irq = platform_get_irq(pdev, hw->has_dbus_ctrl ? 0 : VDEC_IRQ_1);
 	if (hw->dec_irq < 0) {
@@ -1129,9 +1175,11 @@ int dev_request_hw_resources(void *priv)
 			__func__, (unsigned long long)res.start,
 			(unsigned long long)res.end, reg_base[i]);
 	}
-	hw->canvas = meson_canvas_get(&pdev->dev);
-	if (IS_ERR(hw->canvas))
-		return PTR_ERR(hw->canvas);
+	if (!hw->has_internal_canvas) {
+		hw->canvas = meson_canvas_get(&pdev->dev);
+		if (IS_ERR(hw->canvas))
+			return PTR_ERR(hw->canvas);
+	}
 
 	hw->pm = &pm[dev->pvdec_data->power_type];
 	if (hw->pm->init) {

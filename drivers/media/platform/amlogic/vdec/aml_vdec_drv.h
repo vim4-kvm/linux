@@ -22,10 +22,14 @@
 #define AML_VDEC_MIN_H    64U
 #define AML_VDEC_1080P_MAX_H  1088U
 #define AML_VDEC_1080P_MAX_W  1920U
+#define AML_VDEC_4K_MAX_H    2304U
+#define AML_VDEC_4K_MAX_W    4096U
 
 struct aml_vdec_ctx;
 /**
  * enum aml_fmt_type - Type of format type
+ * @AML_FMT_DEC: Compressed OUTPUT format.
+ * @AML_FMT_FRAME: Decoded CAPTURE format.
  */
 enum aml_fmt_type {
 	AML_FMT_DEC = 0,
@@ -34,14 +38,20 @@ enum aml_fmt_type {
 
 /**
  * enum aml_codec_type - Type of codec format
+ * @CODEC_TYPE_H264: Stateless H.264 decoder.
+ * @CODEC_TYPE_MPEG2: Stateless MPEG-2 decoder.
+ * @CODEC_TYPE_FRAME: Uncompressed frame format.
  */
 enum aml_codec_type {
 	CODEC_TYPE_H264 = 0,
+	CODEC_TYPE_MPEG2,
 	CODEC_TYPE_FRAME,
 };
 
 /**
  * enum aml_queue_type - Type of queue : cap or output
+ * @AML_FMT_SRC: OUTPUT queue.
+ * @AML_FMT_DST: CAPTURE queue.
  */
 enum aml_queue_type {
 	AML_FMT_SRC = 0,

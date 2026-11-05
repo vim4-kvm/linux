@@ -37,6 +37,8 @@ struct aml_codec_ops {
  * @power_type: Type of power that the current chip need. See aml_power_type_e.
  * @fw_path: Path of the firmware.bin.
  * @has_dbus_ctrl: Use DOS DBUS isolation instead of a DMC request bit.
+ * @num_fmts: Number of formats in dec_fmt.
+ * @has_internal_canvas: Use the internal DOS canvas lookup table.
  */
 struct aml_dev_platform_data {
 	const struct aml_codec_ops *codec_ops;
@@ -47,6 +49,7 @@ struct aml_dev_platform_data {
 	int power_type;
 	const char *fw_path[MAX_DEC_FORMAT];
 	bool has_dbus_ctrl;
+	bool has_internal_canvas;
 };
 
 extern const struct aml_dev_platform_data aml_vdec_s4_pdata;

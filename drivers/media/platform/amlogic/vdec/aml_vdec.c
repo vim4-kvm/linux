@@ -193,7 +193,7 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 		goto complete_request;
 	}
 
-	ret = load_firmware(dev->dec_hw, fw_path);
+	ret = load_firmware(dev->dec_hw, fw_path, ctx->curr_dec_type);
 	if (ret)
 		goto stop_job;
 
