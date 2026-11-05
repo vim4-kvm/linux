@@ -32,7 +32,7 @@ struct pm { struct pd pd_data[2]; };
 struct aml_vdec_hw {
     void *dev, *map[1], *clkctrl;
     struct gate gates[3];
-    struct clk *hevc_p0;
+    struct clk *hevc_p0, *hevcb, *hevcb_p0;
     struct pm *pm;
     bool has_hevc, powered, faulted, hevc_powered, probe_failed;
     bool hevc_test_passed, mdec_test_passed;
@@ -41,7 +41,7 @@ struct aml_vdec_hw {
 static unsigned int calls, fail_at, last_calls, internal_reads;
 static unsigned int clock_refs, domain_refs, bus_refs, frequency;
 static u32 local_gates, bad_clock, busy_cpu, inherited_on, other_users;
-static struct clk parent = { 0 }, mux = { 1 };
+static struct clk parent = { 0 }, mux = { 1 }, back_parent = { 2 }, back_mux = { 3 };
 static struct pm pm;
 static struct aml_vdec_hw hw;
 static int backend(void) { return ++calls == fail_at ? -EIO : 0; }
@@ -55,26 +55,27 @@ static int t7_domain_state(unsigned int id, s32 *state)
 static void t7_power_fault(struct aml_vdec_hw *h) { h->faulted = true; }
 static int clk_set_parent(struct clk *c, struct clk *p)
 {
-    assert(bus_refs == 1 && local_gates == U32_MAX && c == &mux && p == &parent);
+    assert(bus_refs == 1 && local_gates == U32_MAX);
+    assert((c == &mux && p == &parent) || (c == &back_mux && p == &back_parent));
     return backend();
 }
 static int clk_set_rate(struct clk *p, unsigned long rate)
 {
-    assert(p == &parent);
+    assert(p == &parent || p == &back_parent);
     if (backend()) return -EIO;
     frequency = rate; return 0;
 }
 static int clk_prepare_enable(struct clk *c)
 {
-    assert(c == &mux && frequency == 800000000);
+    assert((c == &mux || c == &back_mux) && frequency == 800000000);
     if (backend()) return -EIO;
     clock_refs++; return 0;
 }
 static void clk_disable_unprepare(struct clk *c)
-{ assert(c == &mux && clock_refs == 1); clock_refs--; }
+{ assert((c == &mux || c == &back_mux) && clock_refs > 0); clock_refs--; }
 static int pm_runtime_resume_and_get(void *dev)
 {
-    assert(clock_refs == 1 && bus_refs == 1);
+    assert(clock_refs == 2 && bus_refs == 1);
     if (backend()) return -EIO;
     domain_refs++; return 0;
 }
@@ -94,8 +95,8 @@ static int regmap_write(void *map, u32 reg, u32 value)
 static int regmap_read(void *map, u32 reg, u32 *value)
 {
     if (backend()) return -EIO;
-    assert(domain_refs == 1 && clock_refs == 1 && bus_refs == 1);
-    if (reg == 0x144) *value = BIT(8) ^ bad_clock;
+    assert(domain_refs == 1 && clock_refs == 2 && bus_refs == 1);
+    if (reg == 0x144) *value = (BIT(24) | BIT(8)) ^ bad_clock;
     else if (reg == 0x14c) *value = 0;
     else if (reg == DOS_GCLK_EN3) *value = local_gates;
     else {
@@ -124,6 +125,7 @@ static void reset(unsigned int failure)
     memset(&hw, 0, sizeof(hw));
     hw.has_hevc = hw.mdec_test_passed = true;
     hw.gates[HEVCF_MUX].clk = &mux; hw.hevc_p0 = &parent; hw.pm = &pm;
+    hw.hevcb = &back_mux; hw.hevcb_p0 = &back_parent;
     calls = internal_reads = clock_refs = domain_refs = bus_refs = 0;
     local_gates = frequency = bad_clock = busy_cpu = inherited_on = other_users = 0;
     fail_at = failure;
@@ -145,6 +147,9 @@ int main(void)
         else assert(!bus_refs && !domain_refs);
     }
     reset(0); bad_clock = BIT(8);
+    assert(aml_vdec_t7_hevc_test(&hw) == -EHOSTDOWN);
+    assert(!internal_reads && !clock_refs && !domain_refs && !bus_refs);
+    reset(0); bad_clock = BIT(24);
     assert(aml_vdec_t7_hevc_test(&hw) == -EHOSTDOWN);
     assert(!internal_reads && !clock_refs && !domain_refs && !bus_refs);
     reset(0); busy_cpu = 1;

@@ -170,6 +170,8 @@ struct aml_vdec_hw {
 	bool apb_held;
 	struct clk *vdec_p0;
 	struct clk *hevc_p0;
+	struct clk *hevcb;
+	struct clk *hevcb_p0;
 	bool has_hevc;
 	bool hevc_powered;
 	bool hevc_test_passed;

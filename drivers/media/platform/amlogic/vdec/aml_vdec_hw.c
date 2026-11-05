@@ -378,6 +378,12 @@ static int vdec_clock_gate_init(struct aml_vdec_hw *hw)
 		hw->hevc_p0 = devm_clk_get(hw->dev, "hevc-p0");
 		if (IS_ERR(hw->hevc_p0))
 			return PTR_ERR(hw->hevc_p0);
+		hw->hevcb = devm_clk_get(hw->dev, "clk_hevcb_mux");
+		if (IS_ERR(hw->hevcb))
+			return PTR_ERR(hw->hevcb);
+		hw->hevcb_p0 = devm_clk_get(hw->dev, "hevcb-p0");
+		if (IS_ERR(hw->hevcb_p0))
+			return PTR_ERR(hw->hevcb_p0);
 	}
 	return t7_clock_provider_init(hw);
 }
@@ -1074,6 +1080,7 @@ static int t7_hevc_power_off(struct aml_vdec_hw *hw)
 
 	if (!hw->hevc_powered)
 		return 0;
+	clk_disable_unprepare(hw->hevcb);
 	clk_disable_unprepare(hw->gates[HEVCF_MUX].clk);
 	ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_HEVC].dev);
 	hw->hevc_powered = false;
@@ -1115,11 +1122,24 @@ static int t7_hevc_power_on(struct aml_vdec_hw *hw)
 	ret = clk_set_rate(hw->hevc_p0, 800000000);
 	if (ret)
 		return ret;
+	/* T7 has one decoder core, but separate front and back functional clocks. */
+	ret = clk_set_parent(hw->hevcb, hw->hevcb_p0);
+	if (ret)
+		return ret;
+	ret = clk_set_rate(hw->hevcb_p0, 800000000);
+	if (ret)
+		return ret;
 	ret = clk_prepare_enable(clock);
 	if (ret)
 		return ret;
+	ret = clk_prepare_enable(hw->hevcb);
+	if (ret) {
+		clk_disable_unprepare(clock);
+		return ret;
+	}
 	ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_HEVC].dev);
 	if (ret < 0) {
+		clk_disable_unprepare(hw->hevcb);
 		clk_disable_unprepare(clock);
 		return ret;
 	}
@@ -1137,7 +1157,7 @@ static int t7_hevc_power_on(struct aml_vdec_hw *hw)
 	if (ret)
 		goto power_off;
 	dev_info(hw->dev, "HEVC clock: p0=%#x p1=%#x\n", p0, p1);
-	if ((p0 & 0xf7f) != BIT(8) || (p1 & BIT(15))) {
+	if ((p0 & 0x0f7f0f7f) != (BIT(24) | BIT(8)) || (p1 & (BIT(31) | BIT(15)))) {
 		ret = -EHOSTDOWN;
 		goto power_off;
 	}
