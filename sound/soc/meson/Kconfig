@@ -172,3 +172,14 @@ config SND_MESON_T7_VAD
 	  read-only ALSA control without depending on a speech recognition SDK.
 
 endmenu
+
+config SND_MESON_T7_KUNIT_TEST
+	tristate "Meson T7 audio parameter tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	depends on SND_MESON_T7_AED && SND_MESON_AXG_SOUND_CARD
+	default KUNIT_ALL_TESTS
+	help
+	  Check production EQ/DRC validation and FE/BE parameter negotiation.
+	  These tests use real ASoC types without registering audio hardware.
+	  Clock, regmap and stream lifetime faults require board validation.
+	  The suite may also be built as an independent KUnit module.
