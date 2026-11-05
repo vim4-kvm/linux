@@ -20,6 +20,7 @@ static void release_device(void *data)
 
 static int h264_test_init(struct kunit *test)
 {
+	static const struct v4l2_ctrl_h264_decode_params decode;
 	struct h264_test_ctx *ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
 	int ret;
 
@@ -35,6 +36,7 @@ static int h264_test_init(struct kunit *test)
 	ctx->ctx.dev = &ctx->dev;
 	ctx->ctx.codec_priv = &ctx->h264;
 	ctx->h264.v4l2_ctx = &ctx->ctx;
+	ctx->h264.ctrl_ref.decode = &decode;
 	test->priv = &ctx->h264;
 	return 0;
 }
@@ -441,7 +443,45 @@ static void paired_field_reference_view(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, view, H264_PICTURE_MBAFF);
 }
 
+static void field_picture_numbers(struct kunit *test)
+{
+	static const struct v4l2_ctrl_h264_sps sps = {};
+	static const struct v4l2_h264_reference refs[] = {
+		{ .index = 0, .fields = V4L2_H264_TOP_FIELD_REF },
+		{ .index = 0, .fields = V4L2_H264_BOTTOM_FIELD_REF },
+	};
+	struct aml_h264_ctx *h = test->priv;
+	struct v4l2_ctrl_h264_decode_params *decode;
+	int index = 0;
+
+	decode = kunit_kzalloc(test, sizeof(*decode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, decode);
+	h->ctrl_ref.decode = decode;
+	h->ctrl_ref.sps = &sps;
+	decode->flags = V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC;
+	decode->frame_num = 1;
+	decode->dpb[0].frame_num = 15;
+	h264_config_p_reflist(h, refs, ARRAY_SIZE(refs));
+	KUNIT_EXPECT_EQ(test, h264_reference_pic_num(h, &h->ref_list0[0]), -1);
+	KUNIT_EXPECT_EQ(test, h264_reference_pic_num(h, &h->ref_list0[1]), -2);
+	h->mslice.num_ref_idx_l0 = 2;
+	h264_copy_ref_list(h, 0);
+	h264_reorder_short_term(&h->mslice, 0, -2, &index);
+	KUNIT_EXPECT_EQ(test, index, 1);
+	KUNIT_EXPECT_EQ(test, h->ref_list0[0].fields, V4L2_H264_BOTTOM_FIELD_REF);
+	KUNIT_EXPECT_EQ(test, h->ref_list0[1].fields, V4L2_H264_TOP_FIELD_REF);
+
+	decode->flags |= V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD;
+	KUNIT_EXPECT_EQ(test, h264_reference_pic_num(h, &h->ref_list0[0]), -1);
+	KUNIT_EXPECT_EQ(test, h264_reference_pic_num(h, &h->ref_list0[1]), -2);
+	h->ref_list0[0].long_term_flag = 1;
+	h->ref_list0[1].long_term_flag = 1;
+	KUNIT_EXPECT_EQ(test, h264_reference_pic_num(h, &h->ref_list0[0]), 31);
+	KUNIT_EXPECT_EQ(test, h264_reference_pic_num(h, &h->ref_list0[1]), 30);
+}
+
 static struct kunit_case h264_test_cases[] = {
+	KUNIT_CASE(field_picture_numbers),
 	KUNIT_CASE(timestamp_picture_slots),
 	KUNIT_CASE(paired_field_reference_view),
 	KUNIT_CASE(original_picture_structure),
