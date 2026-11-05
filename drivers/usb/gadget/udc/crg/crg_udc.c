@@ -128,8 +128,6 @@ enum TRB_CMPL_CODES_E {
 	CMPL_CODE_DISABLED_LENGTH_INVALID = 197,
 };
 
-static const char driver_name[] = "crg_udc";
-
 struct buffer_info {
 	void *vaddr;
 	dma_addr_t dma;
@@ -1916,8 +1914,6 @@ static int crg_udc_ep_enable(struct usb_ep *ep,
 	struct crg_gadget_dev *crg_udc;
 	u32 param0;
 	unsigned long flags = 0;
-	struct ep_cx_s *epcx;
-	struct crg_uccr *uccr;
 
 	if  (!ep || !desc || desc->bDescriptorType != USB_DT_ENDPOINT)
 		return -EINVAL;
@@ -1933,7 +1929,6 @@ static int crg_udc_ep_enable(struct usb_ep *ep,
 	crg_udc = udc_ep->crg_udc;
 	if (!crg_udc)
 		return -EINVAL;
-	uccr = crg_udc->uccr;
 
 	if (!crg_udc->gadget_driver)
 		return -ESHUTDOWN;
@@ -2002,8 +1997,6 @@ static int crg_udc_ep_enable(struct usb_ep *ep,
 	}
 
 	CRG_DEBUG("num_enabled_eps = %d\n", crg_udc->num_enabled_eps);
-
-	epcx = (struct ep_cx_s *)(crg_udc->p_epcx + udc_ep->DCI - 2);
 
 	param0 = (0x1 << udc_ep->DCI);
 	{
@@ -3856,7 +3849,7 @@ static int crg_handle_xfer_event(struct crg_gadget_dev *crg_udc,
 			if (udc_req_ptr->usb_req.actual != 512 &&
 				udc_req_ptr->usb_req.actual != 31) {
 				u64 trb_pt;
-				struct transfer_trb_s *p_trb;
+				struct transfer_trb_s *p_trb __maybe_unused;
 
 				CRG_DEBUG("Actual Data transferred = %d\n",
 					udc_req_ptr->usb_req.actual);
@@ -4457,9 +4450,7 @@ static int crg_gadget_handle_interrupt(struct crg_gadget_dev *crg_udc)
 
 static irqreturn_t crg_udc_common_irq(int irq, void *dev)
 {
-	int retval = 0;
-
-	retval = crg_gadget_handle_interrupt(dev);
+	crg_gadget_handle_interrupt(dev);
 	return IRQ_HANDLED;
 }
 
