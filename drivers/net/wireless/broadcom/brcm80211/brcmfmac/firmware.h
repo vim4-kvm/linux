@@ -5,6 +5,16 @@
 #ifndef BRCMFMAC_FIRMWARE_H
 #define BRCMFMAC_FIRMWARE_H
 
+#include <kunit/visibility.h>
+
+struct device;
+
+#if IS_ENABLED(CONFIG_KUNIT)
+void *brcmf_fw_nvram_strip(const u8 *data, size_t data_len,
+			   u32 *new_length, u16 domain_nr, u16 bus_nr,
+			   struct device *dev);
+#endif
+
 #define BRCMF_FW_REQF_OPTIONAL		0x0001
 
 #define	BRCMF_FW_NAME_LEN		320
@@ -20,8 +30,7 @@
  *
  * @chipid: ID of chip.
  * @revmask: bitmask of revisions, e.g. 0x10 means rev 4 only, 0xf means rev 0-3
- * @fw: name of the firmware file.
- * @nvram: name of nvram file.
+ * @fw_base: base filename shared by firmware and NVRAM files.
  */
 struct brcmf_firmware_mapping {
 	u32 chipid;
