@@ -372,7 +372,8 @@ static int vdec_clock_gate_init(struct aml_vdec_hw *hw)
 	hw->gates[VDEC_MUX].id = "clk_vdec_mux";
 	hw->gates[HEVCF_MUX].id = "clk_hevcf_mux";
 
-	ret = devm_clk_bulk_get(hw->dev, hw->has_dbus_ctrl ? 2 : DOS_CLK_MAX, hw->gates);
+	ret = devm_clk_bulk_get(hw->dev, hw->has_dbus_ctrl && !hw->has_hevc ?
+			       2 : DOS_CLK_MAX, hw->gates);
 	if (ret || !hw->has_dbus_ctrl)
 		return ret;
 	hw->apb_gates[0].id = "sys-apb";
@@ -383,6 +384,17 @@ static int vdec_clock_gate_init(struct aml_vdec_hw *hw)
 	hw->vdec_p0 = devm_clk_get(hw->dev, "vdec-p0");
 	if (IS_ERR(hw->vdec_p0))
 		return PTR_ERR(hw->vdec_p0);
+	if (hw->has_hevc) {
+		hw->hevc_p0 = devm_clk_get(hw->dev, "hevc-p0");
+		if (IS_ERR(hw->hevc_p0))
+			return PTR_ERR(hw->hevc_p0);
+		hw->hevcb = devm_clk_get(hw->dev, "clk_hevcb_mux");
+		if (IS_ERR(hw->hevcb))
+			return PTR_ERR(hw->hevcb);
+		hw->hevcb_p0 = devm_clk_get(hw->dev, "hevcb-p0");
+		if (IS_ERR(hw->hevcb_p0))
+			return PTR_ERR(hw->hevcb_p0);
+	}
 	return t7_clock_provider_init(hw);
 }
 
@@ -408,7 +420,7 @@ static int pm_vdec_power_domain_init(struct aml_vdec_hw *hw)
 
 	mutex_init(&hw->pm_mutex);
 
-	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : VDEC_MAX); i++) {
+	for (i = 0; i < (hw->has_dbus_ctrl && !hw->has_hevc ? 1 : VDEC_MAX); i++) {
 		pd[i].dev = dev_pm_domain_attach_by_name(hw->dev, pd[i].name);
 		if (IS_ERR_OR_NULL(pd[i].dev)) {
 			err = pd[i].dev ? PTR_ERR(pd[i].dev) : -ENODEV;
@@ -449,7 +461,7 @@ static void pm_vdec_power_domain_release(struct aml_vdec_hw *hw)
 	if (!IS_ERR_OR_NULL(hw->nic3_dev))
 		dev_pm_domain_detach(hw->nic3_dev, true);
 
-	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : VDEC_MAX); i++) {
+	for (i = 0; i < (hw->has_dbus_ctrl && !hw->has_hevc ? 1 : VDEC_MAX); i++) {
 		if (!IS_ERR_OR_NULL(pd[i].link))
 			device_link_del(pd[i].link);
 
@@ -1071,6 +1083,371 @@ int vdec_disable(struct aml_vdec_hw *hw)
 	return vdec_poweroff(hw, VDEC_1);
 }
 
+static int t7_hevc_power_off(struct aml_vdec_hw *hw)
+{
+	s32 state;
+	int ret;
+
+	if (!hw->hevc_powered)
+		return 0;
+	hw->hevc_fw_loaded = false;
+	clk_disable_unprepare(hw->hevcb);
+	clk_disable_unprepare(hw->gates[HEVCF_MUX].clk);
+	ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_HEVC].dev);
+	hw->hevc_powered = false;
+	/* The HEVC temperature sensor independently holds the shared domain. */
+	if (ret < 0 || !pm_runtime_suspended(hw->pm->pd_data[VDEC_HEVC].dev) ||
+	    t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state)) {
+		t7_power_fault(hw);
+		return -EIO;
+	}
+	dev_info(hw->dev, "HEVC reference released: HEVC[3]=%d\n", state);
+	return 0;
+}
+
+static int t7_hevc_power_on(struct aml_vdec_hw *hw)
+{
+	struct clk *clock = hw->gates[HEVCF_MUX].clk;
+	u32 p0, p1, gates;
+	s32 state;
+	int ret;
+
+	/* VDEC runtime PM owns DOS, NIC3 and CPU bridges during this transition. */
+	if (!hw->has_hevc || !hw->powered || hw->faulted)
+		return -EHOSTDOWN;
+	if (hw->hevc_powered)
+		return 0;
+	ret = t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state);
+	if (ret)
+		return ret;
+	/* Other consumers can keep the shared domain on across decoder lifetimes. */
+	dev_info(hw->dev, "HEVC initial power: HEVC[3]=%d\n", state);
+
+	/* DOS-top is accessible with VDEC on; the HEVC-local gate precedes secure PM. */
+	ret = regmap_write(hw->map[DOS_BUS], DOS_GCLK_EN3, U32_MAX);
+	if (ret)
+		return ret;
+	ret = clk_set_parent(clock, hw->hevc_p0);
+	if (ret)
+		return ret;
+	ret = clk_set_rate(hw->hevc_p0, 800000000);
+	if (ret)
+		return ret;
+	/* T7 has one decoder core, but separate front and back functional clocks. */
+	ret = clk_set_parent(hw->hevcb, hw->hevcb_p0);
+	if (ret)
+		return ret;
+	ret = clk_set_rate(hw->hevcb_p0, 800000000);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(clock);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(hw->hevcb);
+	if (ret) {
+		clk_disable_unprepare(clock);
+		return ret;
+	}
+	ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_HEVC].dev);
+	if (ret < 0) {
+		clk_disable_unprepare(hw->hevcb);
+		clk_disable_unprepare(clock);
+		return ret;
+	}
+	hw->hevc_powered = true;
+	ret = t7_domain_state(PWRC_T7_DOS_HEVC_ID, &state);
+	if (ret || state) {
+		ret = ret ?: -EHOSTDOWN;
+		goto power_off;
+	}
+	/* Verify the physical p0 path before touching any internal HEVC register. */
+	ret = regmap_read(hw->clkctrl, 0x144, &p0);
+	if (ret)
+		goto power_off;
+	ret = regmap_read(hw->clkctrl, 0x14c, &p1);
+	if (ret)
+		goto power_off;
+	dev_info(hw->dev, "HEVC clock: p0=%#x p1=%#x\n", p0, p1);
+	if ((p0 & 0x0f7f0f7f) != (BIT(24) | BIT(8)) || (p1 & (BIT(31) | BIT(15)))) {
+		ret = -EHOSTDOWN;
+		goto power_off;
+	}
+	ret = regmap_read(hw->map[DOS_BUS], DOS_GCLK_EN3, &gates);
+	if (ret)
+		goto power_off;
+	if (gates != U32_MAX) {
+		ret = -EHOSTDOWN;
+		goto power_off;
+	}
+	return 0;
+
+power_off:
+	t7_hevc_power_off(hw);
+	return ret;
+}
+
+int aml_vdec_t7_hevc_test(struct aml_vdec_hw *hw)
+{
+	u32 value;
+	int ret, off_ret;
+
+	if (!hw->has_hevc)
+		return -EOPNOTSUPP;
+	if (hw->faulted || hw->probe_failed)
+		return -EIO;
+	if (!hw->mdec_test_passed || hw->powered || hw->probe_step)
+		return -EBUSY;
+	hw->hevc_test_passed = false;
+	ret = vdec_enable(hw);
+	if (ret)
+		return ret;
+	ret = t7_hevc_power_on(hw);
+	if (ret)
+		goto power_off;
+	/* No microcode, CPU start or DMA: only the audited reset/status registers. */
+	dev_info(hw->dev, "HEVC test: MPSR read begin\n");
+	ret = regmap_read(hw->map[DOS_BUS], HEVC_MPSR, &value);
+	if (ret)
+		goto power_off;
+	if (value) {
+		ret = -EBUSY;
+		goto power_off;
+	}
+	dev_info(hw->dev, "HEVC test: parser version read begin\n");
+	ret = regmap_read(hw->map[DOS_BUS], HEVC_PARSER_VERSION, &value);
+	if (!ret) {
+		hw->hevc_parser_version = value;
+		dev_info(hw->dev, "HEVC test: parser version=%#x\n", value);
+	}
+
+power_off:
+	off_ret = t7_hevc_power_off(hw);
+	if (!hw->faulted)
+		off_ret = vdec_disable(hw) ?: off_ret;
+	ret = ret ?: off_ret;
+	if (ret)
+		hw->probe_failed = true;
+	else
+		hw->hevc_test_passed = true;
+	return ret;
+}
+
+/* Caller keeps HEVC clocks and the DOS lease until every DMA path is idle. */
+static int t7_hevc_stop(struct aml_vdec_hw *hw)
+{
+	struct regmap *map = hw->map[DOS_BUS];
+	u32 value;
+	unsigned int i;
+	int ret;
+
+	ret = regmap_write(map, HEVC_ASSIST_MBOX0_MASK, 0);
+	if (hw->hevc_irq_enabled) {
+		disable_irq(hw->hevc_irq);
+		hw->hevc_irq_enabled = false;
+	}
+	if (ret)
+		return ret;
+	ret = regmap_write(map, HEVC_MPSR, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(map, HEVC_CPSR, 0);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_IMEM_DMA_CTRL, value,
+				       !(value & BIT(15)), 10, 100000);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_LMEM_DMA_CTRL, value,
+				       !(value & BIT(15)), 10, 100000);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_WRRSP_LMEM, value,
+				       !(value & 0xfff), 10, 50000);
+	if (ret)
+		return ret;
+	for (i = 0; i < 3; i++) {
+		ret = regmap_read(map, DOS_SW_RESET3, &value);
+		if (ret)
+			return ret;
+	}
+
+	/* Shared power can remain on: both read and write paths must acknowledge. */
+	ret = regmap_update_bits(map, HEVC_ASSIST_AXI_CTRL, BIT(6), BIT(6));
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_ASSIST_AXI_STATUS, hw->hevc_axi_front,
+				       (hw->hevc_axi_front & (BIT(15) | BIT(11))) ==
+				       (BIT(15) | BIT(11)), 10, 100000);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, HEVC_ASSIST_AXI_CTRL, BIT(14), BIT(14));
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_ASSIST_AXI_STATUS2_LO, hw->hevc_axi_back,
+				       (hw->hevc_axi_back & (BIT(15) | BIT(11))) ==
+				       (BIT(15) | BIT(11)), 10, 100000);
+	if (ret)
+		return ret;
+	for (i = 0; i < 200; i++)
+		cpu_relax();
+	return 0;
+}
+
+static int t7_hevc_reset(struct aml_vdec_hw *hw)
+{
+	struct regmap *map = hw->map[DOS_BUS];
+	u32 value;
+	int ret;
+
+	/* AXI is isolated by t7_hevc_stop; never cycle shared-domain memories. */
+	ret = regmap_write(map, HEVC_STREAM_CONTROL, 0);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, HEVC_SAO_MMU_RESET_CTRL, BIT(0), BIT(0));
+	if (ret)
+		return ret;
+	ret = regmap_write(map, DOS_SW_RESET3,
+			   BIT(3) | BIT(4) | BIT(8) | BIT(10) | BIT(11) | BIT(12) |
+			   BIT(13) | BIT(14) | BIT(15) | BIT(17) | BIT(18) | BIT(19) |
+			   BIT(24) | BIT(26));
+	if (ret)
+		return ret;
+	ret = regmap_write(map, DOS_SW_RESET3, 0);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(map, HEVC_WRRSP_LMEM, value,
+				       !(value & 0xfff), 10, 50000);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(map, HEVC_SAO_MMU_RESET_CTRL, BIT(0), 0);
+	if (ret)
+		return ret;
+	return regmap_update_bits(map, HEVC_ASSIST_AXI_CTRL, BIT(6) | BIT(14), 0);
+}
+
+int aml_hevc_prepare_hw(struct aml_vdec_hw *hw)
+{
+	struct arm_smccc_res result;
+	int ret;
+
+	ret = t7_hevc_power_on(hw);
+	if (ret)
+		return ret;
+	ret = t7_hevc_stop(hw);
+	if (ret)
+		goto fault;
+	/* The HEVC DMC client is distinct from legacy VDEC's client 13. */
+	arm_smccc_smc(0xb200000e, 4, 0, 0, 0, 0, 0, 0, &result);
+	if (result.a0)
+		return -EACCES;
+	ret = t7_hevc_reset(hw);
+	if (ret)
+		goto fault;
+	/* Core resets retain IMEM. Never carry this cache across a PM reference release. */
+	if (hw->hevc_fw_loaded)
+		return 0;
+	/* HEVC_MMU, legacy core routing: secure firmware selects its HEVC target. */
+	arm_smccc_smc(0xb200000f, 17, 0, 0, 0, 0, 0, 0, &result);
+	dev_info(hw->dev, "HEVC secure firmware load: a0=%#lx\n", result.a0);
+	if (result.a0)
+		return -EIO;
+	hw->hevc_fw_loaded = true;
+	return 0;
+fault:
+	dev_err(hw->dev, "HEVC stop/reset failed: %d front=%#x back=%#x\n",
+		ret, hw->hevc_axi_front, hw->hevc_axi_back);
+	t7_power_fault(hw);
+	return ret;
+}
+
+int aml_hevc_enable_irq(struct aml_vdec_hw *hw,
+			irqreturn_t (*thread)(int irq, void *priv), void *priv)
+{
+	int ret;
+
+	if (!hw->hevc_powered || hw->faulted)
+		return -EHOSTDOWN;
+	if (hw->hevc_irq_enabled || !thread || !priv)
+		return -EINVAL;
+	ret = regmap_write(hw->map[DOS_BUS], HEVC_ASSIST_MBOX0_MASK, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(hw->map[DOS_BUS], HEVC_ASSIST_MBOX0_CLR_REG, 1);
+	if (ret)
+		return ret;
+	hw->hevc_irq_thread = thread;
+	hw->hevc_priv = priv;
+	hw->hevc_irq_enabled = true;
+	enable_irq(hw->hevc_irq);
+	return 0;
+}
+
+int aml_hevc_stop_hw(struct aml_vdec_hw *hw)
+{
+	int ret;
+
+	if (hw->faulted)
+		return -EIO;
+	if (!hw->hevc_powered)
+		return 0;
+	ret = t7_hevc_stop(hw);
+	if (ret) {
+		t7_power_fault(hw);
+		return ret;
+	}
+	/* disable_irq() has waited for the final callback before ownership changes. */
+	hw->hevc_irq_thread = NULL;
+	hw->hevc_priv = NULL;
+	return 0;
+}
+
+int aml_hevc_release_hw(struct aml_vdec_hw *hw)
+{
+	int ret = aml_hevc_stop_hw(hw);
+
+	return ret ?: t7_hevc_power_off(hw);
+}
+
+int aml_vdec_t7_hevc_core_test(struct aml_vdec_hw *hw)
+{
+	int ret, off_ret;
+
+	if (!hw->has_hevc)
+		return -EOPNOTSUPP;
+	if (hw->faulted || hw->probe_failed)
+		return -EIO;
+	if (!hw->hevc_test_passed || hw->powered || hw->probe_step)
+		return -EBUSY;
+	hw->hevc_core_test_passed = false;
+	ret = vdec_enable(hw);
+	if (ret)
+		return ret;
+	ret = aml_hevc_prepare_hw(hw);
+	/* Even a rejected load can have touched IMEM DMA; always drain it. */
+	off_ret = aml_hevc_release_hw(hw);
+	if (!hw->faulted)
+		off_ret = vdec_disable(hw) ?: off_ret;
+	ret = ret ?: off_ret;
+	if (ret)
+		hw->probe_failed = true;
+	else
+		hw->hevc_core_test_passed = true;
+	return ret;
+}
+
+static irqreturn_t hevc_threaded_isr_handler(int irq, void *priv)
+{
+	struct aml_vdec_hw *hw = priv;
+	int ret;
+
+	ret = regmap_read(hw->map[DOS_BUS], HEVC_ASSIST_SCRATCH_0, &hw->hevc_irq_status);
+	if (!ret)
+		ret = regmap_write(hw->map[DOS_BUS], HEVC_ASSIST_MBOX0_CLR_REG, 1);
+	if (ret)
+		hw->hevc_irq_status = U32_MAX;
+	return hw->hevc_irq_thread(irq, hw->hevc_priv);
+}
+
 static const struct power_manager_s pm[] = {
 	[AML_PM_PD] = {
 		.pd_data    = vdec_domain_data,
@@ -1146,6 +1523,8 @@ int dev_request_hw_resources(void *priv)
 	hw = dev->dec_hw;
 	hw->dev = &pdev->dev;
 	hw->has_dbus_ctrl = dev->pvdec_data->has_dbus_ctrl;
+	hw->has_hevc = hw->has_dbus_ctrl &&
+		of_property_match_string(pdev->dev.of_node, "power-domain-names", "hevc") >= 0;
 	hw->has_internal_canvas = dev->pvdec_data->has_internal_canvas;
 	hw->canvas_endian_remap = hw->has_internal_canvas &&
 				 soc_device_match(canvas_endian_quirks);
@@ -1163,6 +1542,16 @@ int dev_request_hw_resources(void *priv)
 		dev_err(&pdev->dev, "failed to install irq %d (%d)",
 			hw->dec_irq, ret);
 		return -1;
+	}
+	if (hw->has_hevc) {
+		hw->hevc_irq = platform_get_irq(pdev, 1);
+		if (hw->hevc_irq < 0)
+			return hw->hevc_irq;
+		ret = devm_request_threaded_irq(&pdev->dev, hw->hevc_irq, NULL,
+						hevc_threaded_isr_handler,
+						IRQF_ONESHOT | IRQF_NO_AUTOEN, "hevc", hw);
+		if (ret)
+			return ret;
 	}
 
 	for (i = 0; i < (hw->has_dbus_ctrl ? 1 : MAX_REG_BUS); i++) {

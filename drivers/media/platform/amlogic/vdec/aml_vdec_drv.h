@@ -41,12 +41,14 @@ enum aml_fmt_type {
  * @CODEC_TYPE_H264: Stateless H.264 decoder.
  * @CODEC_TYPE_MPEG2: Stateless MPEG-2 decoder.
  * @CODEC_TYPE_MJPEG: Stateful JPEG decoder.
+ * @CODEC_TYPE_HEVC: Stateful HEVC decoder.
  * @CODEC_TYPE_FRAME: Uncompressed frame format.
  */
 enum aml_codec_type {
 	CODEC_TYPE_H264 = 0,
 	CODEC_TYPE_MPEG2,
 	CODEC_TYPE_MJPEG,
+	CODEC_TYPE_HEVC,
 	CODEC_TYPE_FRAME,
 };
 
@@ -95,6 +97,8 @@ struct aml_video_fmt {
  * @dev_mutex: video_device lock.
  * @jpeg_vfd: Independent JPEG video node.
  * @jpeg_intf: JPEG media interface.
+ * @hevc_vfd: Independent HEVC video node.
+ * @hevc_intf: HEVC media interface.
  */
 struct aml_vdec_dev {
 	struct platform_device *plat_dev;
@@ -103,6 +107,8 @@ struct aml_vdec_dev {
 	struct video_device *vfd;
 	struct video_device *jpeg_vfd;
 	struct media_intf_devnode *jpeg_intf;
+	struct video_device *hevc_vfd;
+	struct media_intf_devnode *hevc_intf;
 	struct media_device mdev;
 
 	unsigned int open_count;
@@ -154,6 +160,10 @@ struct dec_pic_info {
  * @diag_started: The initial T7 decode snapshot has been recorded.
  * @compose: Visible image rectangle within CAPTURE storage.
  * @is_jpeg: Context belongs to the JPEG node.
+ * @is_hevc: Context belongs to the HEVC node.
+ * @hevc_wait_capture: HEVC is waiting for CAPTURE after source change.
+ * @hevc_min_capture: Minimum CAPTURE buffers reported for HEVC.
+ * @hevc_lock: Serializes HEVC metadata and pending display buffers.
  */
 struct aml_vdec_ctx {
 	struct aml_vdec_dev *dev;
@@ -180,10 +190,17 @@ struct aml_vdec_ctx {
 	bool buffers_held;
 	bool decode_failed;
 	bool is_jpeg;
+	bool is_hevc;
+	bool hevc_wait_capture;
+	u32 hevc_min_capture;
+	/* Serializes HEVC metadata and pending display buffers with ioctls. */
+	struct mutex hevc_lock;
 	bool diag_started;
 };
 
 void aml_vdec_fault(struct aml_vdec_ctx *ctx);
+int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx);
+void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx);
 
 static inline struct aml_vdec_ctx *fh_to_dec_ctx(struct file *file)
 {

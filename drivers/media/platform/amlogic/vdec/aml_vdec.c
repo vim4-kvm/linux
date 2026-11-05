@@ -14,6 +14,7 @@
 #include "aml_vdec.h"
 #include "aml_vdec_hw.h"
 #include "aml_vdec_platform.h"
+#include "hevc.h"
 
 #define VCODEC_DRV_NAME "aml-vdec-drv"
 
@@ -21,9 +22,6 @@ struct aml_vdec_buffer {
 	struct v4l2_m2m_buffer m2m;
 	struct dma_buf *pins[VB2_MAX_PLANES];
 };
-
-static int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx);
-static void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx);
 
 void aml_vdec_fault(struct aml_vdec_ctx *ctx)
 {
@@ -112,6 +110,10 @@ static const struct aml_vdec_v4l2_ctrl controls[] = {
 
 static const struct aml_dec_type dec_type_name[] = {
 	{
+		.codec_type = CODEC_TYPE_HEVC,
+		.name = "HEVC",
+	},
+	{
 		.codec_type = CODEC_TYPE_MJPEG,
 		.name = "MJPEG",
 	},
@@ -138,12 +140,34 @@ static const char *dec_type_to_name(unsigned int type)
 	return "ERR";
 }
 
+static int hevc_get_volatile_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct aml_vdec_ctx *ctx = ctrl_to_dec_ctx(ctrl->handler);
+
+	if (ctrl->id != V4L2_CID_MIN_BUFFERS_FOR_CAPTURE)
+		return -EINVAL;
+	ctrl->val = READ_ONCE(ctx->hevc_min_capture);
+	return 0;
+}
+
+static const struct v4l2_ctrl_ops hevc_ctrl_ops = {
+	.g_volatile_ctrl = hevc_get_volatile_ctrl,
+};
+
 int aml_vdec_ctrls_setup(struct aml_vdec_ctx *ctx)
 {
 	int i;
-	int ctrls_size = ctx->is_jpeg ? 0 : ARRAY_SIZE(controls);
+	int ctrls_size = ctx->is_jpeg || ctx->is_hevc ? 0 : ARRAY_SIZE(controls);
 
 	v4l2_ctrl_handler_init(&ctx->ctrl_handler, ctrls_size);
+	if (ctx->is_hevc) {
+		struct v4l2_ctrl *ctrl;
+
+		ctrl = v4l2_ctrl_new_std(&ctx->ctrl_handler, &hevc_ctrl_ops,
+					 V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, 1, 18, 1, 1);
+		if (ctrl)
+			ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_VOLATILE;
+	}
 	for (i = 0; i < ctrls_size; i++) {
 		if (controls[i].codec_type == CODEC_TYPE_MPEG2 &&
 		    !ctx->dev->pvdec_data->has_internal_canvas)
@@ -155,6 +179,12 @@ int aml_vdec_ctrls_setup(struct aml_vdec_ctx *ctx)
 			v4l2_ctrl_handler_free(&ctx->ctrl_handler);
 			return ctx->ctrl_handler.error;
 		}
+	}
+	if (ctx->ctrl_handler.error) {
+		int error = ctx->ctrl_handler.error;
+
+		v4l2_ctrl_handler_free(&ctx->ctrl_handler);
+		return error;
 	}
 	ctx->fh.ctrl_handler = &ctx->ctrl_handler;
 	return v4l2_ctrl_handler_setup(&ctx->ctrl_handler);
@@ -198,6 +228,10 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 	int ret = 0;
 	const char *fw_path = dev->pvdec_data->fw_path[ctx->curr_dec_type];
 
+	if (ctx->is_hevc) {
+		aml_hevc_device_run(ctx);
+		return;
+	}
 	if (dev->dec_hw->faulted || ctx->decode_failed)
 		goto err_cancel_job;
 	src_buf = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
@@ -267,8 +301,16 @@ err_cancel_job:
 					 VB2_BUF_STATE_ERROR);
 }
 
+static int m2mops_vdec_job_ready(void *priv)
+{
+	struct aml_vdec_ctx *ctx = priv;
+
+	return ctx->is_hevc ? aml_hevc_job_ready(ctx) : 1;
+}
+
 const struct v4l2_m2m_ops aml_vdec_m2m_ops = {
 	.device_run = m2mops_vdec_device_run,
+	.job_ready = m2mops_vdec_job_ready,
 };
 
 static int vidioc_vdec_querycap(struct file *file, void *priv,
@@ -282,6 +324,11 @@ static int vidioc_vdec_querycap(struct file *file, void *priv,
 
 static bool vdec_format_supported(struct aml_vdec_ctx *ctx, const struct aml_video_fmt *fmt)
 {
+	if (ctx->is_hevc)
+		return fmt->type == AML_FMT_DEC ? fmt->codec_type == CODEC_TYPE_HEVC :
+			fmt->fourcc == V4L2_PIX_FMT_NV12M;
+	if (fmt->codec_type == CODEC_TYPE_HEVC)
+		return false;
 	if (fmt->type == AML_FMT_DEC)
 		return ctx->is_jpeg == (fmt->codec_type == CODEC_TYPE_MJPEG);
 	return ctx->is_jpeg == (fmt->fourcc == V4L2_PIX_FMT_YUV420);
@@ -393,6 +440,8 @@ static int vdec_try_fmt_mp(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 	const struct aml_video_fmt *requested;
 	int i, align;
 
+	if (ctx->is_hevc)
+		return aml_hevc_try_fmt(ctx, type, pix_mp);
 	if (V4L2_TYPE_IS_OUTPUT(type))
 		dec_fmt = &ctx->dec_fmt[AML_FMT_SRC];
 	else
@@ -515,8 +564,9 @@ static void reset_output_fmts(struct aml_vdec_ctx *ctx)
 	const struct aml_video_fmt *out_fmt;
 	struct v4l2_pix_format_mplane fmt;
 
-	out_fmt = aml_vdec_get_video_fmt(dev, ctx->is_jpeg ? V4L2_PIX_FMT_MJPEG :
-							  V4L2_PIX_FMT_H264_SLICE);
+	out_fmt = aml_vdec_get_video_fmt(dev, ctx->is_hevc ? V4L2_PIX_FMT_HEVC :
+					ctx->is_jpeg ? V4L2_PIX_FMT_MJPEG :
+					V4L2_PIX_FMT_H264_SLICE);
 	if (!out_fmt)
 		return;
 
@@ -543,8 +593,8 @@ static void reset_capture_fmts(struct aml_vdec_ctx *ctx)
 	const struct aml_video_fmt *cap_fmt;
 	struct v4l2_pix_format_mplane fmt;
 
-	cap_fmt = aml_vdec_get_video_fmt(dev, ctx->is_jpeg ? V4L2_PIX_FMT_YUV420 :
-							  V4L2_PIX_FMT_NV12);
+	cap_fmt = aml_vdec_get_video_fmt(dev, ctx->is_hevc ? V4L2_PIX_FMT_NV12M :
+					ctx->is_jpeg ? V4L2_PIX_FMT_YUV420 : V4L2_PIX_FMT_NV12);
 	if (!cap_fmt)
 		return;
 
@@ -575,6 +625,10 @@ static int vdec_g_fmt(struct aml_vdec_ctx *ctx, struct v4l2_format *f)
 {
 	struct v4l2_pix_format_mplane *pix_mp = &f->fmt.pix_mp;
 
+	if (ctx->is_hevc && !V4L2_TYPE_IS_OUTPUT(f->type)) {
+		*pix_mp = ctx->pix_fmt[AML_FMT_DST];
+		return aml_hevc_try_fmt(ctx, f->type, pix_mp);
+	}
 	if (V4L2_TYPE_IS_OUTPUT(f->type))
 		*pix_mp = ctx->pix_fmt[AML_FMT_SRC];
 	else
@@ -651,6 +705,8 @@ static int vdec_g_selection(struct file *file, void *priv, struct v4l2_selection
 {
 	struct aml_vdec_ctx *ctx = fh_to_dec_ctx(file);
 
+	if (ctx->is_hevc)
+		return aml_hevc_get_selection(ctx, s);
 	if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE ||
 	    ctx->dec_fmt[AML_FMT_SRC].codec_type != CODEC_TYPE_MJPEG)
 		return -EINVAL;
@@ -674,7 +730,7 @@ static int vdec_try_decoder_cmd(struct file *file, void *priv, struct v4l2_decod
 {
 	struct aml_vdec_ctx *ctx = fh_to_dec_ctx(file);
 
-	if (ctx->dec_fmt[AML_FMT_SRC].codec_type == CODEC_TYPE_MJPEG)
+	if (ctx->is_jpeg || ctx->is_hevc)
 		return v4l2_m2m_ioctl_try_decoder_cmd(file, priv, dc);
 	return v4l2_m2m_ioctl_stateless_try_decoder_cmd(file, priv, dc);
 }
@@ -685,6 +741,8 @@ static int vdec_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_c
 	struct vb2_v4l2_buffer *dst;
 	int ret;
 
+	if (ctx->is_hevc)
+		return aml_hevc_decoder_cmd(file, priv, dc);
 	if (ctx->dec_fmt[AML_FMT_SRC].codec_type != CODEC_TYPE_MJPEG)
 		return v4l2_m2m_ioctl_stateless_decoder_cmd(file, priv, dc);
 	ret = vdec_try_decoder_cmd(file, priv, dc);
@@ -697,6 +755,18 @@ static int vdec_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_c
 			vb2_set_plane_payload(&dst->vb2_buf, 0, 0);
 	}
 	return v4l2_m2m_ioctl_decoder_cmd(file, priv, dc);
+}
+
+static int vdec_subscribe_event(struct v4l2_fh *fh,
+				const struct v4l2_event_subscription *sub)
+{
+	struct aml_vdec_ctx *ctx = container_of(fh, struct aml_vdec_ctx, fh);
+
+	if (ctx->is_hevc && sub->type == V4L2_EVENT_SOURCE_CHANGE)
+		return v4l2_src_change_event_subscribe(fh, sub);
+	if (ctx->is_hevc && sub->type == V4L2_EVENT_EOS)
+		return v4l2_event_subscribe(fh, sub, 2, NULL);
+	return v4l2_ctrl_subscribe_event(fh, sub);
 }
 
 const struct v4l2_ioctl_ops aml_vdec_ioctl_ops = {
@@ -726,7 +796,7 @@ const struct v4l2_ioctl_ops aml_vdec_ioctl_ops = {
 	.vidioc_decoder_cmd = vdec_decoder_cmd,
 	.vidioc_try_decoder_cmd = vdec_try_decoder_cmd,
 
-	.vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
+	.vidioc_subscribe_event = vdec_subscribe_event,
 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
 
 	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
@@ -749,6 +819,8 @@ static int vb2ops_vdec_queue_setup(struct vb2_queue *vq,
 	struct v4l2_pix_format_mplane *pix_fmt;
 	unsigned int i;
 
+	if (ctx->is_hevc && V4L2_TYPE_IS_CAPTURE(vq->type))
+		*nbuffers = max(*nbuffers, READ_ONCE(ctx->hevc_min_capture));
 	if (V4L2_TYPE_IS_OUTPUT(vq->type))
 		pix_fmt = &ctx->pix_fmt[AML_FMT_SRC];
 	else
@@ -859,7 +931,7 @@ static void vb2_ops_vdec_buf_cleanup(struct vb2_buffer *vb)
 	}
 }
 
-static void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx)
+void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx)
 {
 	struct vb2_queue *queues[] = { v4l2_m2m_get_src_vq(ctx->m2m_ctx),
 				       v4l2_m2m_get_dst_vq(ctx->m2m_ctx) };
@@ -880,7 +952,7 @@ static void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx)
 	mutex_unlock(&queues[0]->mmap_lock);
 }
 
-static int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx)
+int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx)
 {
 	struct vb2_queue *queues[] = { v4l2_m2m_get_src_vq(ctx->m2m_ctx),
 				       v4l2_m2m_get_dst_vq(ctx->m2m_ctx) };
@@ -916,10 +988,15 @@ static void vb2_ops_vdec_buf_queue(struct vb2_buffer *vb)
 	struct aml_vdec_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
 	struct vb2_v4l2_buffer *vb2_v4l2 = to_vb2_v4l2_buffer(vb);
 
-	if (ctx->dec_fmt[AML_FMT_SRC].codec_type == CODEC_TYPE_MJPEG &&
+	if ((ctx->is_jpeg || ctx->is_hevc) &&
 	    V4L2_TYPE_IS_CAPTURE(vb->type) && v4l2_m2m_dst_buf_is_last(ctx->m2m_ctx)) {
-		vb2_set_plane_payload(vb, 0, 0);
+		unsigned int i;
+
+		for (i = 0; i < vb->num_planes; i++)
+			vb2_set_plane_payload(vb, i, 0);
 		v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb2_v4l2);
+		if (ctx->is_hevc)
+			aml_hevc_eos(ctx);
 		return;
 	}
 	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, vb2_v4l2);
@@ -935,7 +1012,7 @@ static int vb2ops_vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 
 	if (ctx->dev->dec_hw->faulted)
 		return -EIO;
-	if (ctx->dec_fmt[AML_FMT_SRC].codec_type == CODEC_TYPE_MJPEG)
+	if (ctx->is_jpeg || ctx->is_hevc)
 		v4l2_m2m_update_start_streaming_state(ctx->m2m_ctx, q);
 	if (V4L2_TYPE_IS_OUTPUT(q->type)) {
 		ctx->is_output_streamon = 1;
@@ -943,6 +1020,8 @@ static int vb2ops_vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 			return -EINVAL;
 	} else {
 		ctx->is_cap_streamon = 1;
+		if (ctx->is_hevc)
+			aml_hevc_start_capture(ctx);
 	}
 
 	return 0;
@@ -953,9 +1032,12 @@ static void vb2ops_vdec_stop_streaming(struct vb2_queue *q)
 	struct aml_vdec_ctx *ctx = vb2_get_drv_priv(q);
 	struct vb2_v4l2_buffer *src_buf = NULL, *dst_buf = NULL;
 
-	aml_vdec_release_instance(ctx);
+	if (ctx->is_hevc)
+		aml_hevc_cancel_output(ctx);
+	if (!ctx->is_hevc || V4L2_TYPE_IS_OUTPUT(q->type))
+		aml_vdec_release_instance(ctx);
 
-	if (ctx->dec_fmt[AML_FMT_SRC].codec_type == CODEC_TYPE_MJPEG)
+	if (ctx->is_jpeg || ctx->is_hevc)
 		v4l2_m2m_update_stop_streaming_state(ctx->m2m_ctx, q);
 
 	if (V4L2_TYPE_IS_OUTPUT(q->type)) {
@@ -1011,8 +1093,8 @@ int aml_vdec_queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->ops = &aml_vdec_vb2_ops;
 	src_vq->lock = &ctx->v4l2_intf_lock;
 	src_vq->buf_struct_size = sizeof(struct aml_vdec_buffer);
-	src_vq->supports_requests = !ctx->is_jpeg;
-	if (dev->pvdec_data->has_internal_canvas && !ctx->is_jpeg)
+	src_vq->supports_requests = !ctx->is_jpeg && !ctx->is_hevc;
+	if (dev->pvdec_data->has_internal_canvas && !ctx->is_jpeg && !ctx->is_hevc)
 		src_vq->subsystem_flags = VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF;
 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	ret = vb2_queue_init(src_vq);
