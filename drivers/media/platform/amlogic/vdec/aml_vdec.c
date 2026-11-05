@@ -764,6 +764,8 @@ static int vdec_subscribe_event(struct v4l2_fh *fh,
 
 	if (ctx->is_hevc && sub->type == V4L2_EVENT_SOURCE_CHANGE)
 		return v4l2_src_change_event_subscribe(fh, sub);
+	if (ctx->is_hevc && sub->type == V4L2_EVENT_EOS)
+		return v4l2_event_subscribe(fh, sub, 2, NULL);
 	return v4l2_ctrl_subscribe_event(fh, sub);
 }
 
@@ -993,6 +995,8 @@ static void vb2_ops_vdec_buf_queue(struct vb2_buffer *vb)
 		for (i = 0; i < vb->num_planes; i++)
 			vb2_set_plane_payload(vb, i, 0);
 		v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb2_v4l2);
+		if (ctx->is_hevc)
+			aml_hevc_eos(ctx);
 		return;
 	}
 	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, vb2_v4l2);
