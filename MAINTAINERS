@@ -1446,23 +1446,11 @@ F:	sound/soc/meson/t7-vad*
 AMLOGIC T7 AUDIO OFFLINE TESTS
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Maintained
+F:	sound/soc/meson/.kunitconfig
+F:	sound/soc/meson/t7-audio-kunit.h
+F:	sound/soc/meson/t7_audio_kunit.c
 F:	sound/soc/meson/test-data/t7-audio-processing.dts
 F:	sound/soc/meson/test-data/t7-audio-routes.dts
-F:	sound/soc/meson/test_t7_aed.py
-F:	sound/soc/meson/test_t7_asrc.py
-F:	sound/soc/meson/test_t7_audio_routes.py
-F:	sound/soc/meson/test_t7_audio_windows.py
-F:	sound/soc/meson/test_t7_card.py
-F:	sound/soc/meson/test_t7_frddr.py
-F:	sound/soc/meson/test_t7_loopback.py
-F:	sound/soc/meson/test_t7_processing_power.py
-F:	sound/soc/meson/test_t7_spdifin.py
-F:	sound/soc/meson/test_t7_spdifout.py
-F:	sound/soc/meson/test_t7_tdm_stream.py
-F:	sound/soc/meson/test_t7_tdmin.py
-F:	sound/soc/meson/test_t7_tdmout.py
-F:	sound/soc/meson/test_t7_toddr.py
-F:	sound/soc/meson/test_t7_vad.py
 
 AMLOGIC T7 DISPLAY EXPERIMENT
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
@@ -1472,26 +1460,16 @@ F:	Documentation/devicetree/bindings/display/amlogic,t7-display-handoff.yaml
 F:	Documentation/devicetree/bindings/display/amlogic,t7-display.yaml
 F:	Documentation/devicetree/bindings/media/amlogic,t7-vdin-test.yaml
 F:	arch/arm64/boot/dts/amlogic/amlogic-t7-a311d2-khadas-vim4-display-m*.dts
+F:	drivers/gpu/drm/meson/.kunitconfig
 F:	drivers/gpu/drm/meson/meson_t7_fb.h
 F:	drivers/gpu/drm/meson/meson_t7_handoff.*
+F:	drivers/gpu/drm/meson/meson_t7_kunit.c
+F:	drivers/gpu/drm/meson/meson_t7_kunit.h
 F:	drivers/gpu/drm/meson/meson_t7_layers.*
 F:	drivers/gpu/drm/meson/meson_t7_scanout.h
 F:	drivers/gpu/drm/meson/meson_t7_video.*
 F:	drivers/gpu/drm/meson/meson_t7_video_kms.*
 F:	drivers/gpu/drm/meson/meson_t7_video_pps.c
-F:	drivers/gpu/drm/meson/test_t7_boot.py
-F:	drivers/gpu/drm/meson/test_t7_fb.py
-F:	drivers/gpu/drm/meson/test_t7_handoff.py
-F:	drivers/gpu/drm/meson/test_t7_hdmi_atomic.py
-F:	drivers/gpu/drm/meson/test_t7_layers.py
-F:	drivers/gpu/drm/meson/test_t7_link_clock.py
-F:	drivers/gpu/drm/meson/test_t7_osd.py
-F:	drivers/gpu/drm/meson/test_t7_producer_layouts.py
-F:	drivers/gpu/drm/meson/test_t7_scanout.py
-F:	drivers/gpu/drm/meson/test_t7_sram.py
-F:	drivers/gpu/drm/meson/test_t7_video.py
-F:	drivers/gpu/drm/meson/test_t7_video_kms.py
-F:	drivers/gpu/drm/meson/test_t7_video_phase.py
 
 AMLOGIC T7 CRG USB DEVICE CONTROLLER
 M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
@@ -17706,7 +17684,6 @@ F:	Documentation/devicetree/bindings/media/cec/amlogic,meson-gx-ao-cec.yaml
 F:	Documentation/devicetree/bindings/media/cec/amlogic,t7-ao-cec.yaml
 F:	drivers/media/cec/platform/meson/ao-cec-g12a.c
 F:	drivers/media/cec/platform/meson/ao-cec.c
-F:	drivers/media/cec/platform/meson/test_ao_cec_t7.py
 
 MESON GE2D DRIVER FOR AMLOGIC SOCS
 M:	Neil Armstrong <neil.armstrong@linaro.org>
@@ -30332,5 +30309,4 @@ M:	localhost-copilot <318096335+localhost-copilot@users.noreply.github.com>
 S:	Odd Fixes
 F:	Documentation/devicetree/bindings/misc/amlogic,t7c-adla.yaml
 F:	drivers/misc/adla/
-F:	drivers/misc/adla/test*.py
 F:	include/trace/events/adla.h
