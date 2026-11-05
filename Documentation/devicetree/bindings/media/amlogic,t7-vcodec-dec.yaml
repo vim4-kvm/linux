@@ -12,7 +12,7 @@ maintainers:
 description: |
   T7 VDEC uses DOS DBUS isolation and a secure power domain, without the S4
   DMC request register. HEVC has a separate secure domain and functional
-  clock. The DOS mapping overlaps HCODEC, so the engines need a shared
+  front/back clock pair. The DOS mapping overlaps HCODEC, so the engines need a shared
   register owner before concurrent operation can be supported. Normal board
   device trees keep this node disabled pending decoder validation.
 
@@ -31,7 +31,7 @@ properties:
 
   clocks:
     minItems: 5
-    maxItems: 7
+    maxItems: 9
 
   clock-names:
     minItems: 5
@@ -43,6 +43,8 @@ properties:
       - const: vdec-p0
       - const: clk_hevcf_mux
       - const: hevc-p0
+      - const: clk_hevcb_mux
+      - const: hevcb-p0
 
   power-domains:
     minItems: 2
@@ -81,9 +83,9 @@ allOf:
     then:
       properties:
         clocks:
-          minItems: 7
+          minItems: 9
         clock-names:
-          minItems: 7
+          minItems: 9
         power-domains:
           minItems: 3
     else:
