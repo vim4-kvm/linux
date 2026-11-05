@@ -6,6 +6,18 @@
 #ifndef _AML_MPEG12_H_
 #define _AML_MPEG12_H_
 
+#include <kunit/visibility.h>
+#include <linux/v4l2-controls.h>
+
+#if IS_ENABLED(CONFIG_KUNIT)
+u32 mpeg12_write_headers(u8 *buf, const struct v4l2_ctrl_mpeg2_sequence *seq,
+			 const struct v4l2_ctrl_mpeg2_picture *pic,
+			 const struct v4l2_ctrl_mpeg2_quantisation *quant, bool with_seq);
+unsigned int mpeg12_reference_timestamps(const struct v4l2_ctrl_mpeg2_picture *pic,
+					 const struct v4l2_ctrl_mpeg2_picture *first,
+					 bool pair, u64 refs[2]);
+#endif
+
 /* Scratch register meanings for the mpeg12_multi microcode (vmpeg12_multi.c). */
 #define MREG_CC_ADDR		AV_SCRATCH_0
 #define MREG_REF0		AV_SCRATCH_2
