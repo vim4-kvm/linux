@@ -7,6 +7,7 @@
 #include "aml_vdec_hw.h"
 #include "h264.h"
 #include "mpeg12.h"
+#include "mjpeg.h"
 
 #define VIDEO_DEC_H264  "s4_h264_multi.bin"
 
@@ -66,6 +67,26 @@ static struct aml_video_fmt aml_s4_video_formats[] = {
 };
 
 static struct aml_video_fmt aml_t7_video_formats[] = {
+	{
+		.name = "MJPEG",
+		.fourcc = V4L2_PIX_FMT_MJPEG,
+		.type = AML_FMT_DEC,
+		.align = 64,
+		.codec_type = CODEC_TYPE_MJPEG,
+		.num_planes = 1,
+		.stepwise = {AML_VDEC_MIN_W, AML_VDEC_1080P_MAX_W, 2,
+			AML_VDEC_MIN_H, AML_VDEC_1080P_MAX_H, 2},
+	},
+	{
+		.name = "YUV420",
+		.fourcc = V4L2_PIX_FMT_YUV420,
+		.type = AML_FMT_FRAME,
+		.align = 64,
+		.codec_type = CODEC_TYPE_FRAME,
+		.num_planes = 1,
+		.stepwise = {AML_VDEC_MIN_W, AML_VDEC_1080P_MAX_W, 2,
+			AML_VDEC_MIN_H, AML_VDEC_1080P_MAX_H, 2},
+	},
 	{
 		.name = "MPEG-2 Slice",
 		.fourcc = V4L2_PIX_FMT_MPEG2_SLICE,
@@ -131,6 +152,13 @@ static struct aml_video_fmt aml_t7_video_formats[] = {
 };
 
 static const struct aml_codec_ops aml_S4_dec_ops[] = {
+	[CODEC_TYPE_MJPEG] = {
+		.init = aml_mjpeg_init,
+		.exit = aml_mjpeg_exit,
+		.prepare = aml_mjpeg_prepare,
+		.run = aml_mjpeg_dec_run,
+		.finish = aml_mjpeg_finish,
+	},
 	[CODEC_TYPE_H264] = {
 		.init = aml_h264_init,
 		.exit = aml_h264_exit,
