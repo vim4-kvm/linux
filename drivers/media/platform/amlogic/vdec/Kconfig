@@ -17,3 +17,14 @@ config VIDEO_AMLOGIC_VDEC
 	  This driver is designed to support V4L2 M2M STATELESS
 	  interface.
       To compile this driver as a module choose m here.
+
+config VIDEO_AMLOGIC_VDEC_KUNIT_TEST
+	tristate "KUnit tests for Amlogic video decoder" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	depends on VIDEO_AMLOGIC_VDEC
+	default KUNIT_ALL_TESTS
+	help
+	  Test parameter serialization and arithmetic boundaries without
+	  requiring decoder hardware. These tests do not exercise DMA or
+	  the firmware protocol.
+	  Run the suite with the KUnit executor and the local .kunitconfig.
