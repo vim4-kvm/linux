@@ -8,6 +8,11 @@
 
 #define REG_ALIGN(x) ((x) << 2)
 
+#define MDEC_CAV_LUT_DATAL           REG_ALIGN(0x09ea)
+#define MDEC_CAV_LUT_DATAH           REG_ALIGN(0x09eb)
+#define MDEC_CAV_LUT_ADDR            REG_ALIGN(0x09ec)
+#define MDEC_CAV_CFG0                REG_ALIGN(0x09ed)
+
 #define VDEC_ASSIST_MMC_CTRL0        REG_ALIGN(0x0001)
 #define VDEC_ASSIST_MMC_CTRL1        REG_ALIGN(0x0002)
 

@@ -47,6 +47,7 @@ struct aml_dev_platform_data {
 	int power_type;
 	const char *fw_path[MAX_DEC_FORMAT];
 	bool has_dbus_ctrl;
+	bool has_internal_canvas;
 };
 
 extern const struct aml_dev_platform_data aml_vdec_s4_pdata;
