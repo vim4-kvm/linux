@@ -1679,8 +1679,23 @@ void aml_hevc_eos(struct aml_vdec_ctx *ctx)
 	v4l2_event_queue_fh(&ctx->fh, &event);
 }
 
+void aml_hevc_last_buffer_done(struct aml_vdec_ctx *ctx,
+			       struct vb2_v4l2_buffer *vb)
+{
+	struct aml_hevc_ctx *h;
+
+	mutex_lock(&ctx->hevc_lock);
+	h = ctx->codec_priv;
+	if (h)
+		vb->sequence = h->sequence++;
+	v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb);
+	aml_hevc_eos(ctx);
+	mutex_unlock(&ctx->hevc_lock);
+}
+
 static void h265_end_capture(struct aml_vdec_ctx *ctx, bool eos)
 {
+	struct aml_hevc_ctx *h = ctx->codec_priv;
 	struct vb2_v4l2_buffer *vb = v4l2_m2m_dst_buf_remove(ctx->m2m_ctx);
 	unsigned int i;
 
@@ -1691,6 +1706,7 @@ static void h265_end_capture(struct aml_vdec_ctx *ctx, bool eos)
 	}
 	for (i = 0; i < vb->vb2_buf.num_planes; i++)
 		vb2_set_plane_payload(&vb->vb2_buf, i, 0);
+	vb->sequence = h->sequence++;
 	if (eos) {
 		v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb);
 		aml_hevc_eos(ctx);
@@ -1820,6 +1836,7 @@ void aml_hevc_device_run(struct aml_vdec_ctx *ctx)
 		h->pending++;
 	}
 	v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
+	src->sequence = ctx->sequence_out++;
 	v4l2_m2m_buf_done(src, VB2_BUF_STATE_DONE);
 	if (drain) {
 		if (h->pending) {
@@ -1840,8 +1857,10 @@ error:
 	if (h)
 		h265_flush_pending(h, VB2_BUF_STATE_ERROR, false);
 	src = v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
-	if (src)
+	if (src) {
+		src->sequence = ctx->sequence_out++;
 		v4l2_m2m_buf_done(src, VB2_BUF_STATE_ERROR);
+	}
 	vb2_queue_error(v4l2_m2m_get_src_vq(ctx->m2m_ctx));
 	vb2_queue_error(v4l2_m2m_get_dst_vq(ctx->m2m_ctx));
 finish:

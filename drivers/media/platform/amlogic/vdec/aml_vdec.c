@@ -205,18 +205,22 @@ static void aml_vdec_stop_job(struct aml_vdec_ctx *ctx)
 		ctx->codec_ops->finish(ctx);
 }
 
-static void vdec_mark_last(struct aml_vdec_ctx *ctx)
+static void vdec_job_finish(struct aml_vdec_ctx *ctx,
+			    enum vb2_buffer_state state)
 {
 	struct vb2_v4l2_buffer *src, *dst;
 
-	if (ctx->curr_dec_type != CODEC_TYPE_MJPEG)
-		return;
 	src = v4l2_m2m_next_src_buf(ctx->m2m_ctx);
 	dst = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
-	if (src && dst && v4l2_m2m_is_last_draining_src_buf(ctx->m2m_ctx, src)) {
+	src->sequence = ctx->sequence_out++;
+	dst->sequence = ctx->sequence_cap++;
+	if (ctx->is_jpeg &&
+	    v4l2_m2m_is_last_draining_src_buf(ctx->m2m_ctx, src)) {
 		dst->flags |= V4L2_BUF_FLAG_LAST;
 		v4l2_m2m_mark_stopped(ctx->m2m_ctx);
 	}
+	v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev_dec, ctx->m2m_ctx,
+					 state);
 }
 
 static void m2mops_vdec_device_run(void *m2m_priv)
@@ -286,9 +290,7 @@ complete_request:
 
 	aml_vdec_put_buffer_pins(ctx);
 	WRITE_ONCE(dev->dec_hw->curr_ctx, NULL);
-	vdec_mark_last(ctx);
-	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx,
-					 VB2_BUF_STATE_DONE);
+	vdec_job_finish(ctx, VB2_BUF_STATE_DONE);
 	return;
 
 err_cancel_job:
@@ -296,9 +298,7 @@ err_cancel_job:
 	aml_vdec_put_buffer_pins(ctx);
 	if (!dev->dec_hw->faulted)
 		WRITE_ONCE(dev->dec_hw->curr_ctx, NULL);
-	vdec_mark_last(ctx);
-	v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx,
-					 VB2_BUF_STATE_ERROR);
+	vdec_job_finish(ctx, VB2_BUF_STATE_ERROR);
 }
 
 static int m2mops_vdec_job_ready(void *priv)
@@ -994,9 +994,12 @@ static void vb2_ops_vdec_buf_queue(struct vb2_buffer *vb)
 
 		for (i = 0; i < vb->num_planes; i++)
 			vb2_set_plane_payload(vb, i, 0);
-		v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb2_v4l2);
-		if (ctx->is_hevc)
-			aml_hevc_eos(ctx);
+		if (ctx->is_hevc) {
+			aml_hevc_last_buffer_done(ctx, vb2_v4l2);
+		} else {
+			vb2_v4l2->sequence = ctx->sequence_cap++;
+			v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb2_v4l2);
+		}
 		return;
 	}
 	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, vb2_v4l2);
@@ -1015,10 +1018,12 @@ static int vb2ops_vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	if (ctx->is_jpeg || ctx->is_hevc)
 		v4l2_m2m_update_start_streaming_state(ctx->m2m_ctx, q);
 	if (V4L2_TYPE_IS_OUTPUT(q->type)) {
+		ctx->sequence_out = 0;
 		ctx->is_output_streamon = 1;
 		if (aml_vdec_init_dec_inst(ctx) < 0)
 			return -EINVAL;
 	} else {
+		ctx->sequence_cap = 0;
 		ctx->is_cap_streamon = 1;
 		if (ctx->is_hevc)
 			aml_hevc_start_capture(ctx);
