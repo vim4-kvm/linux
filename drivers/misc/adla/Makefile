@@ -52,3 +52,4 @@ adla_core-objs += drv/common/adlak_mm.o
 adla_core-objs += drv/common/adlak_device.o
 adla_core-objs += drv/common/adlak_submit.o
 adla_core-objs += addon/adlak_platform_addon.o
+adla_core-$(CONFIG_AMLOGIC_ADLA_KUNIT_TEST) += adlak_os_test.o

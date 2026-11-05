@@ -8,3 +8,13 @@ config AMLOGIC_ADLA_COMPAT
 	  Exposes /dev/adla0 and the vendor ioctl, mmap and sysfs contracts.
 	  This is not a DRM accelerator interface. Hardware validation is
 	  required before use on T7C boards.
+
+config AMLOGIC_ADLA_KUNIT_TEST
+	bool "KUnit tests for ADLA mutex initialization" if !KUNIT_ALL_TESTS
+	depends on KUNIT=y && AMLOGIC_ADLA_COMPAT && PROVE_LOCKING
+	default KUNIT_ALL_TESTS
+	help
+	  Exercise allocated ADLA mutexes in device-to-SMMU lock order.
+	  Check that initialization at distinct call sites preserves lockdep
+	  instead of producing a recursive lock-class report.
+	  No ADLA device or registers are accessed.
