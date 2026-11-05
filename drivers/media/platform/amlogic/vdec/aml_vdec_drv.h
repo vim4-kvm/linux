@@ -89,10 +89,10 @@ struct aml_video_fmt {
 struct aml_vdec_dev {
 	struct platform_device *plat_dev;
 	struct v4l2_device v4l2_dev;
-	struct v4l2_device jpeg_v4l2_dev;
 	struct v4l2_m2m_dev *m2m_dev_dec;
 	struct video_device *vfd;
 	struct video_device *jpeg_vfd;
+	struct media_intf_devnode *jpeg_intf;
 	struct media_device mdev;
 
 	unsigned int open_count;
