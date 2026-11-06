@@ -412,8 +412,7 @@ static void h265_prot_init(struct aml_hevc_ctx *h)
 	wr(hw, HEVC_ASSIST_MBOX0_MASK, 1);
 	wr(hw, HEVC_PSCALE_CTRL, 0);
 	wr(hw, H265_DEBUG_REG1, 0);
-	/* Observe each header handshake until the first format has been parsed. */
-	wr(hw, H265_NAL_SEARCH_CTL, h->format_known ? 0x8 : 0x1);
+	wr(hw, H265_NAL_SEARCH_CTL, 0x8);
 	wr(hw, H265_DECODE_STOP_POS, 0);
 	h265_config_decode_mode(h);
 
