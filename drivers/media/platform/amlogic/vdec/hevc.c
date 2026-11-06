@@ -202,8 +202,8 @@ static int h265_alloc_workspace(struct aml_hevc_ctx *h)
 	h->mmu_map = h265_carve(&p, H265_MMU_MAP_SIZE);
 	h->aux = h265_carve(&p, H265_AUX_PREFIX_SIZE + H265_AUX_SUFFIX_SIZE);
 
-	dev_info(dev, "hevc: workspace %zu KiB at %pad, side %zu KiB\n",
-		 h->ws_size / 1024, &h->ws_p, h->side_size / 1024);
+	dev_dbg(dev, "hevc: workspace %zu KiB at %pad, side %zu KiB\n",
+		h->ws_size / 1024, &h->ws_p, h->side_size / 1024);
 	return 0;
 }
 
