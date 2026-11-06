@@ -7,6 +7,7 @@
 #define _AML_HEVC_H_
 
 #include "hevc_regs.h"
+#include "hevc_dpb.h"
 
 /*
  * Scratch register meanings for the HEVC microcode.  Several of these names
@@ -87,25 +88,6 @@
 #define H265_ACTION_DONE		0xff
 
 #define H265_DECODE_MODE_MULTI_FRAMEBASE	0x1
-
-/* NAL unit types, H.265 table 7-1. */
-#define H265_NAL_IDR_W_RADL		19
-#define H265_NAL_IDR_N_LP		20
-#define H265_NAL_CRA			21
-#define H265_NAL_BLA_W_LP		16
-#define H265_NAL_BLA_W_RADL		17
-#define H265_NAL_BLA_N_LP		18
-#define H265_NAL_RASL_N			8
-#define H265_NAL_RASL_R			9
-#define H265_NAL_VPS			32
-#define H265_NAL_SPS			33
-#define H265_NAL_PPS			34
-#define H265_NAL_EOS			36
-
-/* The microcode's slice_type: B, P, I. */
-#define H265_B_SLICE			0
-#define H265_P_SLICE			1
-#define H265_I_SLICE			2
 
 int aml_hevc_init(void *priv);
 void aml_hevc_exit(void *priv);
