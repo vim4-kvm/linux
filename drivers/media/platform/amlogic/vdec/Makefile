@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 aml-vdec-drv-objs := aml_vdec.o aml_vdec_stateless.o aml_vdec_stateful.o \
 		     aml_vdec_drv.o aml_vdec_hw.o aml_vdec_platform.o \
-		     aml_vdec_debugfs.o \
 		     h264.o h264_headers.o mpeg12.o mjpeg.o hevc.o hevc_dpb.o hevc_hw.o
 
 ifneq ($(CONFIG_VIDEO_AMLOGIC_VDEC_KUNIT_TEST),)

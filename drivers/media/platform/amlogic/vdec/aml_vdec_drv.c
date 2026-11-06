@@ -455,7 +455,6 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		}
 	}
 	if (pdata->has_dbus_ctrl) {
-		aml_vdec_debugfs_init(dev);
 		return 0;
 	}
 	ret = vdec_enable(dev->dec_hw);
@@ -463,7 +462,6 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		media_device_unregister(&dev->mdev);
 		goto err_media_dev_register;
 	}
-	aml_vdec_debugfs_init(dev);
 	return 0;
 
 err_media_dev_register:
@@ -490,8 +488,6 @@ err_lease:
 static void aml_vdec_drv_remove(struct platform_device *pdev)
 {
 	struct aml_vdec_dev *dev = platform_get_drvdata(pdev);
-
-	aml_vdec_debugfs_remove(dev);
 
 	if (dev->pvdec_data->has_dbus_ctrl) {
 		pm_runtime_disable(&pdev->dev);
@@ -559,24 +555,7 @@ static struct platform_driver aml_vcodec_dec_driver = {
 	},
 };
 
-static int __init aml_vdec_driver_init(void)
-{
-	int ret;
-
-	aml_vdec_debugfs_root_init();
-	ret = platform_driver_register(&aml_vcodec_dec_driver);
-	if (ret)
-		aml_vdec_debugfs_root_remove();
-	return ret;
-}
-module_init(aml_vdec_driver_init);
-
-static void __exit aml_vdec_driver_exit(void)
-{
-	platform_driver_unregister(&aml_vcodec_dec_driver);
-	aml_vdec_debugfs_root_remove();
-}
-module_exit(aml_vdec_driver_exit);
+module_platform_driver(aml_vcodec_dec_driver);
 
 MODULE_DESCRIPTION("Amlogic V4L2 decoder driver");
 MODULE_LICENSE("GPL");
