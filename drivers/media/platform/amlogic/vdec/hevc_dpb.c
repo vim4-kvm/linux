@@ -337,6 +337,9 @@ int h265_validate_params(const u16 *p)
 {
 	unsigned int log2_ctu, width_ctu, height_ctu, cols, rows, i, sum, sao_unit;
 
+	/* VPSSPSPPS can expose PPS fields before the firmware has usable SPS data. */
+	if (!p[P_PIC_WIDTH] && !p[P_PIC_HEIGHT] && !p[P_CHROMA_FORMAT_IDC])
+		return -EBADMSG;
 	if (p[P_PIC_WIDTH] < H265_MIN_DIM || p[P_PIC_HEIGHT] < H265_MIN_DIM ||
 	    p[P_PIC_WIDTH] > H265_MAX_DIM || p[P_PIC_HEIGHT] > H265_MAX_HEIGHT)
 		return -EINVAL;

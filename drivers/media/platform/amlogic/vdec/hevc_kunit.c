@@ -86,6 +86,10 @@ static void invalid_firmware_parameters(struct kunit *test)
 	reset_params(h);
 	h->p[P_CHROMA_FORMAT_IDC] = 2;
 	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), -EOPNOTSUPP);
+	h->p[P_PIC_WIDTH] = 0;
+	h->p[P_PIC_HEIGHT] = 0;
+	h->p[P_CHROMA_FORMAT_IDC] = 0;
+	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), -EBADMSG);
 	for (i = 0; i < ARRAY_SIZE(shifts); i++) {
 		reset_params(h);
 		h->p[shifts[i]] = U16_MAX;
