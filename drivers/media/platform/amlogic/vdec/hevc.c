@@ -412,8 +412,8 @@ static void h265_prot_init(struct aml_hevc_ctx *h)
 	wr(hw, HEVC_ASSIST_MBOX0_MASK, 1);
 	wr(hw, HEVC_PSCALE_CTRL, 0);
 	wr(hw, H265_DEBUG_REG1, 0);
-	/* check vps/sps/pps/i-slice in ucode */
-	wr(hw, H265_NAL_SEARCH_CTL, 0x8);
+	/* Observe each header handshake until the first format has been parsed. */
+	wr(hw, H265_NAL_SEARCH_CTL, h->format_known ? 0x8 : 0x1);
 	wr(hw, H265_DECODE_STOP_POS, 0);
 	h265_config_decode_mode(h);
 
@@ -1347,6 +1347,19 @@ static void h265_dump_start(struct aml_vdec_hw *hw, const char *phase)
 		read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT), read_dos_reg(hw, HEVC_SHIFT_STATUS),
 		read_dos_reg(hw, HEVC_PARSER_INT_CONTROL), read_dos_reg(hw, H265_DECODE_MODE),
 		read_dos_reg(hw, H265_NAL_SEARCH_CTL));
+	dev_dbg(hw->dev,
+		"hevc: %s mailbox_irq=%08x fiq_sel=%08x mcpu_group=%08x mcpu_mask=%08x mcpu_req=%08x\n",
+		phase, read_dos_reg(hw, HEVC_ASSIST_MBOX0_IRQ_REG),
+		read_dos_reg(hw, HEVC_ASSIST_MBOX0_FIQ_SEL),
+		read_dos_reg(hw, HEVC_MCPU_INTR_GRP), read_dos_reg(hw, HEVC_MCPU_INTR_MSK),
+		read_dos_reg(hw, HEVC_MCPU_INTR_REQ));
+	dev_dbg(hw->dev,
+		"hevc: %s parser_status=%08x parser_core=%08x debug_g=%08x debug_h=%08x rpm_or_info=%08x lmem_cmd=%08x lmem_dma=%08x level=%08x\n",
+		phase, read_dos_reg(hw, HEVC_PARSER_INT_STATUS),
+		read_dos_reg(hw, HEVC_PARSER_CORE_CONTROL), read_dos_reg(hw, H265_DEBUG_REG1),
+		read_dos_reg(hw, H265_DECODE_MODE2), read_dos_reg(hw, HEVC_RPM_BUFFER),
+		read_dos_reg(hw, H265_LMEM_DUMP_ADR), read_dos_reg(hw, HEVC_LMEM_DMA_CTRL),
+		read_dos_reg(hw, HEVC_STREAM_LEVEL));
 }
 
 static void h265_command(struct aml_vdec_hw *hw, u32 cmd)
@@ -1421,6 +1434,7 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		}
 		dev_dbg(hw->dev, "hevc: nal %d -> %02x\n", nal, parse);
 		h265_command(hw, parse);
+		h265_dump_start(hw, "header-reply");
 		return IRQ_HANDLED;
 	}
 	case H265_SLICE_SEGMENT_DONE: {
