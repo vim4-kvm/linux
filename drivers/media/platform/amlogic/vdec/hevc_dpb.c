@@ -313,16 +313,32 @@ int h265_tile_index(struct h265_dpb *h, int cu_adr, int w_lcu)
 	return tx | (ty << 8);
 }
 
+struct h265_crop h265_display_crop(const u16 *p)
+{
+	struct h265_crop crop = { .width = p[P_PIC_WIDTH], .height = p[P_PIC_HEIGHT] };
+	u32 width, height;
+
+	if (!p[P_CONFORMANCE_WINDOW_FLAG])
+		return crop;
+	/* The NV12 path only supports 4:2:0, with two samples per crop unit. */
+	width = 2U * (p[P_CONF_WIN_LEFT_OFFSET] + p[P_CONF_WIN_RIGHT_OFFSET]);
+	height = 2U * (p[P_CONF_WIN_TOP_OFFSET] + p[P_CONF_WIN_BOTTOM_OFFSET]);
+	/* Firmware can leave unusable offsets even when the SPS has no crop. */
+	if (width >= crop.width || height >= crop.height)
+		return crop;
+	crop.left = 2U * p[P_CONF_WIN_LEFT_OFFSET];
+	crop.top = 2U * p[P_CONF_WIN_TOP_OFFSET];
+	crop.width -= width;
+	crop.height -= height;
+	return crop;
+}
+
 int h265_validate_params(const u16 *p)
 {
 	unsigned int log2_ctu, width_ctu, height_ctu, cols, rows, i, sum, sao_unit;
 
 	if (p[P_PIC_WIDTH] < H265_MIN_DIM || p[P_PIC_HEIGHT] < H265_MIN_DIM ||
 	    p[P_PIC_WIDTH] > H265_MAX_DIM || p[P_PIC_HEIGHT] > H265_MAX_HEIGHT)
-		return -EINVAL;
-	if (p[P_CONFORMANCE_WINDOW_FLAG] &&
-	    (2U * (p[P_CONF_WIN_LEFT_OFFSET] + p[P_CONF_WIN_RIGHT_OFFSET]) >= p[P_PIC_WIDTH] ||
-	     2U * (p[P_CONF_WIN_TOP_OFFSET] + p[P_CONF_WIN_BOTTOM_OFFSET]) >= p[P_PIC_HEIGHT]))
 		return -EINVAL;
 	/* An NV12 CAPTURE queue must not silently discard a Main10 stream's low bits. */
 	if (p[P_CHROMA_FORMAT_IDC] != 1 || p[P_BIT_DEPTH])
