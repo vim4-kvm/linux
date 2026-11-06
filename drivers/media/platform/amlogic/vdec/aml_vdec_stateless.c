@@ -171,6 +171,11 @@ static const struct v4l2_m2m_ops stateless_m2m_ops = {
 	.device_run = stateless_device_run,
 };
 
+static int stateless_run_job(struct aml_vdec_ctx *ctx)
+{
+	return ctx->codec_ops->run(ctx);
+}
+
 const struct aml_vdec_interface aml_vdec_stateless_interface = {
 	.context_size = sizeof(struct aml_vdec_ctx),
 	.ioctl_ops = &aml_vdec_stateless_ioctl_ops,
@@ -178,5 +183,6 @@ const struct aml_vdec_interface aml_vdec_stateless_interface = {
 	.m2m_ops = &stateless_m2m_ops,
 	.controls_init = stateless_ctrls_setup,
 	.finish_job = stateless_finish_job,
+	.run_job = stateless_run_job,
 	.supports_requests = true,
 };
