@@ -8,6 +8,8 @@
 
 #include <kunit/visibility.h>
 
+#include "aml_vdec_drv.h"
+
 #include <linux/module.h>
 #include <linux/clk.h>
 #include <linux/platform_device.h>
@@ -45,18 +47,6 @@ struct aml_vdec_hw_ops {
 	void (*config_canvas)(u8 canvas_index,
 			      ulong addr, u32 width, u32 height,
 			      u32 wrap, u32 blkmode, u32 endian);
-};
-
-/**
- * enum vdec_type_e - Type of decoder hardware.
- * @VDEC_1: Legacy decoder core.
- * @VDEC_HEVC: HEVC decoder core.
- * @VDEC_MAX: Number of decoder cores.
- */
-enum vdec_type_e {
-	VDEC_1 = 0,
-	VDEC_HEVC,
-	VDEC_MAX,
 };
 
 /**
@@ -249,6 +239,7 @@ struct power_manager_s {
 	bool (*power_state)(struct aml_vdec_hw *hw, int id);
 };
 
+bool aml_vdec_core_present(struct aml_vdec_hw *hw, enum vdec_type_e core);
 int dev_request_hw_resources(void *priv);
 void dev_destroy_hw_resources(void *priv);
 struct aml_vdec_hw *vdec_get_hw(void *priv);

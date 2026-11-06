@@ -26,6 +26,64 @@
 #define AML_VDEC_4K_MAX_W    4096U
 
 struct aml_vdec_ctx;
+
+enum vdec_type_e {
+	VDEC_1 = 0,
+	VDEC_HEVC,
+	VDEC_MAX,
+};
+
+struct aml_vdec_interface {
+	const struct v4l2_ioctl_ops *ioctl_ops;
+	const struct vb2_ops *queue_ops;
+	const struct v4l2_m2m_ops *m2m_ops;
+	int (*controls_init)(struct aml_vdec_ctx *ctx);
+	void (*finish_job)(struct aml_vdec_ctx *ctx, enum vb2_buffer_state state);
+	bool supports_requests;
+};
+
+struct aml_vdec_ctrl_set {
+	const struct v4l2_ctrl_config *controls;
+	unsigned int num_controls;
+	bool requires_internal_canvas;
+};
+
+struct aml_vdec_node_desc {
+	const struct aml_vdec_interface *interface;
+	const struct aml_vdec_ctrl_set *control_sets;
+	unsigned int num_control_sets;
+	const u32 *formats;
+	unsigned int num_formats;
+	u32 default_output, default_capture;
+	u32 output_flags, events;
+	bool buffered_capture;
+	int (*try_format)(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
+			  struct v4l2_pix_format_mplane *format);
+	void (*set_colors)(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
+			   struct v4l2_pix_format_mplane *format);
+	int (*get_selection)(struct aml_vdec_ctx *ctx, struct v4l2_selection *selection);
+	int (*decoder_cmd)(struct file *file, void *priv, struct v4l2_decoder_cmd *cmd);
+	void (*start_capture)(struct aml_vdec_ctx *ctx);
+	void (*cancel_output)(struct aml_vdec_ctx *ctx);
+	void (*last_buffer)(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *buffer);
+	void (*run)(struct aml_vdec_ctx *ctx);
+	int (*job_ready)(struct aml_vdec_ctx *ctx);
+};
+
+struct aml_vdec_node {
+	struct video_device *vfd;
+	struct media_intf_devnode *intf;
+	struct aml_vdec_dev *dev;
+	const struct aml_vdec_node_desc *desc;
+};
+
+extern const struct aml_vdec_interface aml_vdec_stateless_interface;
+extern const struct aml_vdec_interface aml_vdec_stateful_interface;
+
+extern const struct aml_vdec_node_desc aml_vdec_stateless_node;
+extern const struct aml_vdec_node_desc aml_vdec_jpeg_node;
+extern const struct aml_vdec_node_desc aml_vdec_hevc_node;
+
 /**
  * enum aml_fmt_type - Type of format type
  * @AML_FMT_DEC: Compressed OUTPUT format.
@@ -89,26 +147,18 @@ struct aml_video_fmt {
  * @plat_dev: Platform device for the current driver.
  * @v4l2_dev: V4L2 device to register video devices for.
  * @m2m_dev_dec: Mem2mem device associated to this device.
- * @vfd: Video_device associated to this device.
  * @mdev: Media_device associated to this device.
+ * @nodes: Platform-described video nodes in registration order.
  * @open_count: Number of live file contexts, under dev_mutex.
  * @dec_hw: Decoder hardware resources. See struct aml_vdec_hw.
  * @pvdec_data: Decoder platform data. See struct aml_dev_platform_data.
  * @dev_mutex: video_device lock.
- * @jpeg_vfd: Independent JPEG video node.
- * @jpeg_intf: JPEG media interface.
- * @hevc_vfd: Independent HEVC video node.
- * @hevc_intf: HEVC media interface.
  */
 struct aml_vdec_dev {
 	struct platform_device *plat_dev;
 	struct v4l2_device v4l2_dev;
 	struct v4l2_m2m_dev *m2m_dev_dec;
-	struct video_device *vfd;
-	struct video_device *jpeg_vfd;
-	struct media_intf_devnode *jpeg_intf;
-	struct video_device *hevc_vfd;
-	struct media_intf_devnode *hevc_intf;
+	struct aml_vdec_node *nodes;
 	struct media_device mdev;
 
 	unsigned int open_count;
@@ -161,14 +211,13 @@ struct dec_pic_info {
  * @decode_failed: A timed-out context rejects further jobs until close.
  * @diag_started: The initial T7 decode snapshot has been recorded.
  * @compose: Visible image rectangle within CAPTURE storage.
- * @is_jpeg: Context belongs to the JPEG node.
- * @is_hevc: Context belongs to the HEVC node.
  * @hevc_wait_capture: HEVC is waiting for CAPTURE after source change.
  * @hevc_min_capture: Minimum CAPTURE buffers reported for HEVC.
  * @hevc_lock: Serializes HEVC metadata and pending display buffers.
  */
 struct aml_vdec_ctx {
 	struct aml_vdec_dev *dev;
+	const struct aml_vdec_node_desc *node;
 	struct v4l2_fh fh;
 	struct v4l2_m2m_ctx *m2m_ctx;
 	struct v4l2_ctrl_handler ctrl_handler;
@@ -193,8 +242,6 @@ struct aml_vdec_ctx {
 	int decode_result;
 	bool buffers_held;
 	bool decode_failed;
-	bool is_jpeg;
-	bool is_hevc;
 	bool hevc_wait_capture;
 	u32 hevc_min_capture;
 	/* Serializes HEVC metadata and pending display buffers with ioctls. */
