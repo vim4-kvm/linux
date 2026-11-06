@@ -411,7 +411,7 @@ static int h264_config_internal_canvas(struct aml_vdec_hw *hw,
 				       struct h264_decode_buf_spec *buf_spec,
 				       u32 mb_width, u32 mb_height)
 {
-	struct aml_h264_ctx *h264 = hw->curr_ctx;
+	struct aml_h264_ctx *h264 = hw->vdec1.priv;
 	u8 y_index, uv_index;
 	int ret;
 
@@ -1195,7 +1195,7 @@ static void h264_set_buffer_address(struct aml_vdec_ctx *ctx,
 
 static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
 {
-	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->curr_ctx;
+	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->vdec1.priv;
 	struct vdec_h264_stateless_ctrl_ref *ctrls = &h264_ctx->ctrl_ref;
 	struct v4l2_ctrl_h264_decode_params *decode =
 	    (struct v4l2_ctrl_h264_decode_params *)ctrls->decode;
@@ -1307,7 +1307,7 @@ static u32 h264_buffer_info(enum h264_picture_structure structure, u8 fields)
 static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 				  struct aml_vdec_ctx *ctx)
 {
-	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->curr_ctx;
+	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->vdec1.priv;
 	struct vdec_h264_stateless_ctrl_ref *ctrls = &h264_ctx->ctrl_ref;
 	struct v4l2_ctrl_h264_decode_params *decode =
 	    (struct v4l2_ctrl_h264_decode_params *)ctrls->decode;
@@ -1578,7 +1578,7 @@ EXPORT_SYMBOL_IF_KUNIT(h264_use_placeholder_canvas);
 
 static int get_canvas_index(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
 {
-	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->curr_ctx;
+	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->vdec1.priv;
 	int i, ret;
 	struct h264_decode_buf_spec *buf;
 
@@ -2072,9 +2072,9 @@ void aml_h264_prepare(void *priv)
 	struct aml_vdec_ctx *ctx = priv;
 	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
 
-	hw->hw_ops.irq_handler = h264_isr;
-	hw->hw_ops.irq_threaded_func = h264_threaded_isr_func;
-	hw->hw_ops.load_firmware_ex = hw->has_dbus_ctrl ? NULL : aml_h264_load_fw_ext;
+	hw->vdec1.ops.irq_handler = h264_isr;
+	hw->vdec1.ops.irq_threaded_func = h264_threaded_isr_func;
+	hw->vdec1.ops.load_firmware_ex = hw->has_dbus_ctrl ? NULL : aml_h264_load_fw_ext;
 }
 
 void aml_h264_exit(void *priv)
@@ -2196,8 +2196,8 @@ static void h264_snapshot(struct aml_vdec_ctx *ctx, const char *phase)
 	int i, ret;
 
 	dev_info(hw->dev, "h264 snapshot %s irq=%d hard=%u thread=%u swap=%#x\n",
-		 phase, hw->dec_irq, READ_ONCE(hw->irq_count),
-		 READ_ONCE(hw->threaded_irq_count), hw->secure_swap);
+		 phase, hw->vdec1.irq, READ_ONCE(hw->vdec1.irq_count),
+		 READ_ONCE(hw->vdec1.threaded_irq_count), hw->vdec1.secure_swap);
 	for (i = 0; i < ARRAY_SIZE(regs); i++) {
 		ret = regmap_read(hw->map[DOS_BUS], regs[i].reg, &value);
 		if (ret) {
