@@ -164,7 +164,7 @@ void h265_apply_rps(struct h265_dpb *h, const struct h265_resolved_rps *resolved
 }
 
 static int h265_used_pocs(const struct h265_dpb *h, const struct h265_rps_set *set,
-			   int *pocs)
+			  int *pocs)
 {
 	int i, count = 0;
 
