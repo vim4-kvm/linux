@@ -230,8 +230,17 @@ static int stateless_run_job(struct aml_vdec_ctx *ctx)
 	return ctx->codec_ops->run(ctx);
 }
 
+static void stateless_context_init(struct aml_vdec_ctx *ctx)
+{
+	struct aml_vdec_stateless_ctx *stateless;
+
+	stateless = container_of(ctx, struct aml_vdec_stateless_ctx, ctx);
+	ctx->job = &stateless->job;
+}
+
 const struct aml_vdec_interface aml_vdec_stateless_interface = {
-	.context_size = sizeof(struct aml_vdec_ctx),
+	.context_size = sizeof(struct aml_vdec_stateless_ctx),
+	.context_init = stateless_context_init,
 	.ioctl_ops = &aml_vdec_stateless_ioctl_ops,
 	.queue_ops = &aml_vdec_vb2_ops,
 	.m2m_ops = &stateless_m2m_ops,
@@ -248,6 +257,7 @@ static const u32 stateless_formats[] = {
 
 const struct aml_vdec_node_desc aml_vdec_stateless_node = {
 	.interface = &aml_vdec_stateless_interface,
+	.job_ops = &aml_vdec1_job_ops,
 	.formats = stateless_formats,
 	.num_formats = ARRAY_SIZE(stateless_formats),
 	.default_output = V4L2_PIX_FMT_H264_SLICE,

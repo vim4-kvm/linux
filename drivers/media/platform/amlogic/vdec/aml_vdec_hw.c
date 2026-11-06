@@ -1645,3 +1645,59 @@ void dev_destroy_hw_resources(void *priv)
 
 	dev_dbg(hw->dev, "##Amlogic hw resource release OK##\n");
 }
+
+static int vdec1_job_acquire(struct aml_vdec_ctx *ctx)
+{
+	struct aml_vdec_hw *hw = ctx->dev->dec_hw;
+	struct aml_vdec_dev *dev = ctx->dev;
+	const char *fw_path = dev->pvdec_data->fw_path[ctx->curr_dec_type];
+	int ret;
+
+	hw->vdec1.job = ctx->job;
+	/* m2m owns the hardware until stop has drained IRQ and DMA activity. */
+	WRITE_ONCE(dev->dec_hw->vdec1.priv, ctx->codec_priv);
+	if (ctx->codec_ops->prepare)
+		ctx->codec_ops->prepare(ctx);
+	dos_enable(dev->dec_hw);
+	/* incase of bus hang in stop_streaming */
+	ctx->job->dos_clk_en = 1;
+	ret = aml_vdec_reset_core(dev->dec_hw, ctx->codec_ops->reset);
+	if (ret) {
+		/* Isolation/reset failed: do not retry MMIO or return DMA ownership. */
+		aml_vdec_fault(ctx);
+		return ret;
+	}
+
+	ret = load_firmware(dev->dec_hw, fw_path, ctx->codec_ops);
+	return ret;
+
+}
+
+static int vdec1_job_stop(struct aml_vdec_ctx *ctx)
+{
+	struct aml_vdec_hw *hw = ctx->dev->dec_hw;
+	int ret;
+
+	if (!ctx->job->dos_clk_en || hw->faulted)
+		return hw->faulted ? -EIO : 0;
+	ret = aml_stop_vdec_hw(hw);
+	if (ret) {
+		aml_vdec_fault(ctx);
+		return ret;
+	}
+	ctx->job->dos_clk_en = false;
+	if (ctx->codec_ops->finish)
+		ctx->codec_ops->finish(ctx);
+	return 0;
+}
+static void vdec1_job_release(struct aml_vdec_ctx *ctx)
+{
+	WRITE_ONCE(ctx->dev->dec_hw->vdec1.priv, NULL);
+	ctx->dev->dec_hw->vdec1.job = NULL;
+}
+
+const struct aml_vdec_job_ops aml_vdec1_job_ops = {
+	.acquire = vdec1_job_acquire,
+	.stop = vdec1_job_stop,
+	.release = vdec1_job_release,
+};
