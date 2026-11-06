@@ -19,13 +19,14 @@
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
 
-#include "aml_vdec_drv.h"
+#include "aml_vdec.h"
 #include "aml_vdec_hw.h"
 #include "mjpeg.h"
 
 #define MJPEG_TIMEOUT_MS	500
 
 struct aml_mjpeg_ctx {
+	bool picture_ready;
 	struct aml_vdec_ctx *v4l2_ctx;
 
 	void *stage_vaddr;
@@ -489,3 +490,31 @@ int aml_mjpeg_dec_run(void *priv)
 				      ctx->pix_fmt[AML_FMT_DST].plane_fmt[0].sizeimage);
 	return ctx->decode_result;
 }
+
+static int mjpeg_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
+			struct vb2_v4l2_buffer *dst, struct aml_vdec_decode_result *result)
+{
+	struct aml_mjpeg_ctx *m = ctx->codec_priv;
+	int ret = aml_mjpeg_dec_run(ctx);
+
+	m->picture_ready = !ret;
+	result->picture = !ret;
+	return ret;
+}
+
+static int mjpeg_get_frame(struct aml_vdec_ctx *ctx, bool flush, struct aml_vdec_frame *frame)
+{
+	struct aml_mjpeg_ctx *m = ctx->codec_priv;
+
+	if (!m->picture_ready)
+		return 0;
+	frame->buffer = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
+	frame->final = true;
+	m->picture_ready = false;
+	return 1;
+}
+
+const struct aml_vdec_stateful_ops aml_mjpeg_stateful_ops = {
+	.submit = mjpeg_submit,
+	.get_frame = mjpeg_get_frame,
+};
