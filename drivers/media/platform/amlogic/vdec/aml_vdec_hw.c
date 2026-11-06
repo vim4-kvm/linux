@@ -790,13 +790,15 @@ static int t7_clock_preflight(struct aml_vdec_hw *hw)
 	if (ret)
 		return ret;
 	selected = p1 & BIT(15) ? p1 : p0;
-	dev_info(hw->dev, "CLKCTRL: SYS=%#x APB=%#x VDEC0=%#x VDEC1=%#x path=%u\n",
-		 sys, apb, p0, p1, !!(p1 & BIT(15)));
+	dev_dbg(hw->dev, "CLKCTRL: SYS=%#x APB=%#x VDEC0=%#x VDEC1=%#x path=%u\n",
+		sys, apb, p0, p1, !!(p1 & BIT(15)));
 	/* 800 MHz recipe: fclk_div2p5, divide by one, gate enabled. */
 	if (p1 & BIT(15) || !(sys & BIT(1)) ||
 	    (apb & (BIT(19) | BIT(20))) != (BIT(19) | BIT(20)) ||
 	    (selected & 0xf7f) != BIT(8)) {
-		dev_err(hw->dev, "refusing DOS MMIO: physical clock configuration mismatch\n");
+		dev_err(hw->dev,
+			"refusing DOS MMIO: CLKCTRL mismatch SYS=%#x APB=%#x VDEC0=%#x VDEC1=%#x path=%u\n",
+			sys, apb, p0, p1, !!(p1 & BIT(15)));
 		return -EHOSTDOWN;
 	}
 	return 0;
@@ -890,10 +892,14 @@ static int t7_probe_begin(struct aml_vdec_hw *hw)
 		return ret;
 	hw->nic3_held = true;
 	ret = aml_vdec_t7_power_state(hw, &vdec, &nic3);
-	dev_info(hw->dev, "pre-EN0: VDEC[4]=%d NIC3[39]=%d rate=%lu\n",
-		 vdec, nic3, clk_get_rate(hw->gates[VDEC_MUX].clk));
-	if (ret || vdec != 1 || nic3)
+	dev_dbg(hw->dev, "pre-EN0: VDEC[4]=%d NIC3[39]=%d rate=%lu\n",
+		vdec, nic3, clk_get_rate(hw->gates[VDEC_MUX].clk));
+	if (ret || vdec != 1 || nic3) {
+		dev_err(hw->dev,
+			"pre-EN0 power state unexpected: VDEC[4]=%d NIC3[39]=%d rate=%lu\n",
+			vdec, nic3, clk_get_rate(hw->gates[VDEC_MUX].clk));
 		return ret ?: -EHOSTDOWN;
+	}
 	return 0;
 }
 
@@ -912,14 +918,21 @@ static int t7_probe_domain_on(struct aml_vdec_hw *hw)
 		return ret;
 	hw->powered = true;
 	ret = aml_vdec_t7_power_state(hw, &vdec, &nic3);
-	dev_info(hw->dev, "post-EN0 power: VDEC[4]=%d NIC3[39]=%d\n", vdec, nic3);
-	if (ret || vdec || nic3)
+	dev_dbg(hw->dev, "post-EN0 power: VDEC[4]=%d NIC3[39]=%d\n", vdec, nic3);
+	if (ret || vdec || nic3) {
+		dev_err(hw->dev,
+			"post-EN0 power state unexpected: VDEC[4]=%d NIC3[39]=%d\n",
+			vdec, nic3);
 		return ret ?: -EHOSTDOWN;
+	}
 	/* DMC normal-memory policy, not an APB permission or register proxy. */
 	arm_smccc_smc(0xb200000e, 13, 0, 0, 0, 0, 0, 0, &result);
-	dev_info(hw->dev, "CONFIG_DEVICE_SECURE(13,0) a0=%#lx\n", result.a0);
-	if (result.a0)
+	dev_dbg(hw->dev, "CONFIG_DEVICE_SECURE(13,0) a0=%#lx\n", result.a0);
+	if (result.a0) {
+		dev_err(hw->dev, "CONFIG_DEVICE_SECURE(13,0) failed: a0=%#lx\n",
+			result.a0);
 		return -EACCES;
+	}
 	return t7_clock_preflight(hw);
 }
 
@@ -958,8 +971,8 @@ static int t7_register_access(struct aml_vdec_hw *hw, unsigned int step)
 	default:
 		return -EINVAL;
 	}
-	dev_info(hw->dev, "DOS step %u: %s offset=%#x begin\n",
-		 step, write ? "write" : "read", reg);
+	dev_dbg(hw->dev, "DOS step %u: %s offset=%#x begin\n",
+		step, write ? "write" : "read", reg);
 	if (write)
 		ret = regmap_write(hw->map[DOS_BUS], reg, value);
 	else
@@ -968,8 +981,8 @@ static int t7_register_access(struct aml_vdec_hw *hw, unsigned int step)
 		return ret;
 	/* Order the transaction before its completion marker and next step. */
 	mb();
-	dev_info(hw->dev, "DOS step %u: %s offset=%#x value=%#x complete\n",
-		 step, write ? "write" : "read", reg, value);
+	dev_dbg(hw->dev, "DOS step %u: %s offset=%#x value=%#x complete\n",
+		step, write ? "write" : "read", reg, value);
 	if (!write)
 		hw->probe_value = value;
 	if (step == 2)
@@ -1035,7 +1048,7 @@ int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw)
 		if (ret)
 			return ret;
 	}
-	dev_info(hw->dev, "MDEC test complete: VDEC off; no firmware or DMA started\n");
+	dev_dbg(hw->dev, "MDEC test complete: VDEC off; no firmware or DMA started\n");
 	return 0;
 }
 
@@ -1101,7 +1114,7 @@ static int t7_hevc_power_off(struct aml_vdec_hw *hw)
 		t7_power_fault(hw);
 		return -EIO;
 	}
-	dev_info(hw->dev, "HEVC reference released: HEVC[3]=%d\n", state);
+	dev_dbg(hw->dev, "HEVC reference released: HEVC[3]=%d\n", state);
 	return 0;
 }
 

@@ -393,8 +393,8 @@ static int aml_vdec_init_dec_inst(struct aml_vdec_ctx *ctx)
 			return ret;
 	}
 	ctx->curr_dec_type = fmt_out->codec_type;
-	dev_info(&dev->plat_dev->dev, "%s set curr_dec_type %s\n",
-		 __func__, dec_type_to_name(ctx->curr_dec_type));
+	dev_dbg(&dev->plat_dev->dev, "%s set curr_dec_type %s\n",
+		__func__, dec_type_to_name(ctx->curr_dec_type));
 
 	return ret;
 }
