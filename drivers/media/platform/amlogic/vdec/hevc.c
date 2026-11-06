@@ -33,6 +33,7 @@
 #include "aml_vdec.h"
 #include "aml_vdec_hw.h"
 #include "hevc_priv.h"
+#include "hevc_golden.h"
 
 /* Workspace, the reference's amvh265_workbuff_spec[1] (4096x2048). */
 #define H265_IPP_SIZE		0x4000
@@ -90,7 +91,8 @@ static const u16 h265_parser_cmd[] = {
 
 static void wr(struct aml_vdec_hw *hw, u32 reg, u32 val)
 {
-	regmap_write(hw->map[DOS_BUS], reg, val);
+	if (!regmap_write(hw->map[DOS_BUS], reg, val))
+		aml_hevc_golden_access('W', reg, val);
 }
 
 /* ---------------------------------------------------------------- */
@@ -403,6 +405,8 @@ static void h265_prot_init(struct aml_hevc_ctx *h)
 {
 	struct aml_vdec_hw *hw = h->hw;
 
+	aml_hevc_golden_phase(3);
+
 	h265_config_workspace(h);
 	h265_init_decoder(h);
 
@@ -441,6 +445,7 @@ static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 		h->stream_size = want;
 	}
 
+	aml_hevc_golden_phase(4);
 	memcpy(h->stream_v, data, size);
 	memset(h->stream_v + size, 0, h->stream_size - size);
 	h->payload = size;
@@ -1375,6 +1380,8 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 	u32 status = hw->hevc_irq_status;
 	u32 st = status & 0xff;
 
+	aml_hevc_golden_event('I', 0x30c0, status);
+
 	dev_dbg(hw->dev, "hevc: irq status=%08x pc=%08x shift=%08x\n",
 		status, read_dos_reg(hw, HEVC_MPC_E), read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT));
 	if (h->finished)
@@ -1452,6 +1459,7 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		return IRQ_HANDLED;
 	}
 	case H265_DECPIC_DATA_DONE:
+		aml_hevc_golden_phase(7);
 		h265_picture_done(h);
 		h265_finish(h, h->have_picture ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR);
 		return IRQ_HANDLED;
@@ -1573,6 +1581,7 @@ int aml_hevc_dec_run(void *priv)
 		goto stop;
 
 	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
+	aml_hevc_golden_phase(5);
 	/* Publish the initial command before resetting and releasing the CPUs. */
 	wr(hw, HEVC_DEC_STATUS_REG, H265_ACTION_DONE);
 	h265_dump_start(hw, "before-reset");

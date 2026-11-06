@@ -20,6 +20,31 @@
 #include "aml_vdec_drv.h"
 #include "aml_vdec_hw.h"
 #include "aml_vdec_platform.h"
+#include "hevc_golden.h"
+
+static bool hevc_golden_trace;
+module_param(hevc_golden_trace, bool, 0644);
+static unsigned int hevc_golden_current_phase;
+
+void aml_hevc_golden_event(char op, u32 reg, u32 value)
+{
+	if (unlikely(READ_ONCE(hevc_golden_trace)))
+		trace_printk("HGT p=%u op=%c reg=%04x val=%08x\n",
+			     READ_ONCE(hevc_golden_current_phase), op, reg, value);
+}
+
+void aml_hevc_golden_phase(unsigned int phase)
+{
+	WRITE_ONCE(hevc_golden_current_phase, phase);
+	aml_hevc_golden_event('E', 0, phase);
+}
+
+void aml_hevc_golden_access(char op, u32 reg, u32 value)
+{
+	reg >>= 2;
+	if ((reg >= 0x3000 && reg < 0x3f00) || (reg >= 0x3f33 && reg <= 0x3f35))
+		aml_hevc_golden_event(op, reg, value);
+}
 
 #define MHz     (1000000)
 #define MC_SIZE (4096 * 16)
@@ -38,7 +63,8 @@ u32 read_dos_reg(struct aml_vdec_hw *hw, u32 addr)
 {
 	u32 ret_val;
 
-	regmap_read(hw->map[DOS_BUS], addr, &ret_val);
+	if (!regmap_read(hw->map[DOS_BUS], addr, &ret_val))
+		aml_hevc_golden_access('R', addr, ret_val);
 
 	return ret_val;
 }
@@ -1240,6 +1266,7 @@ static int t7_hevc_stop(struct aml_vdec_hw *hw)
 	unsigned int i;
 	int ret;
 
+	aml_hevc_golden_phase(8);
 	ret = regmap_write(map, HEVC_ASSIST_MBOX0_MASK, 0);
 	if (hw->hevc_irq_enabled) {
 		disable_irq(hw->hevc_irq);
@@ -1299,6 +1326,7 @@ static int t7_hevc_reset(struct aml_vdec_hw *hw)
 	u32 value;
 	int ret;
 
+	aml_hevc_golden_phase(9);
 	/* AXI is isolated by t7_hevc_stop; never cycle shared-domain memories. */
 	ret = regmap_write(map, HEVC_STREAM_CONTROL, 0);
 	if (ret)
@@ -1330,6 +1358,7 @@ int aml_hevc_prepare_hw(struct aml_vdec_hw *hw)
 	struct arm_smccc_res result;
 	int ret;
 
+	aml_hevc_golden_phase(1);
 	ret = t7_hevc_power_on(hw);
 	if (ret)
 		return ret;
@@ -1347,7 +1376,10 @@ int aml_hevc_prepare_hw(struct aml_vdec_hw *hw)
 	if (hw->hevc_fw_loaded)
 		return 0;
 	/* HEVC_MMU, legacy core routing: secure firmware selects its HEVC target. */
+	aml_hevc_golden_phase(2);
+	aml_hevc_golden_event('L', 17, 0);
 	arm_smccc_smc(0xb200000f, 17, 0, 0, 0, 0, 0, 0, &result);
+	aml_hevc_golden_event('F', 0, result.a0);
 	dev_info(hw->dev, "HEVC secure firmware load: a0=%#lx\n", result.a0);
 	if (result.a0)
 		return -EIO;
