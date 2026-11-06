@@ -193,6 +193,7 @@ static const struct aml_codec_ops aml_S4_dec_ops[] = {
 		.exit = aml_hevc_exit,
 	},
 	[CODEC_TYPE_MJPEG] = {
+		.secure_format = 6,
 		.init = aml_mjpeg_init,
 		.exit = aml_mjpeg_exit,
 		.prepare = aml_mjpeg_prepare,
@@ -200,6 +201,8 @@ static const struct aml_codec_ops aml_S4_dec_ops[] = {
 		.finish = aml_mjpeg_finish,
 	},
 	[CODEC_TYPE_H264] = {
+		.secure_format = 15,
+		.post_load = aml_h264_firmware_loaded,
 		.init = aml_h264_init,
 		.exit = aml_h264_exit,
 		.prepare = aml_h264_prepare,
@@ -207,6 +210,8 @@ static const struct aml_codec_ops aml_S4_dec_ops[] = {
 		.finish = aml_h264_finish,
 	},
 	[CODEC_TYPE_MPEG2] = {
+		.reset = &aml_mpeg12_reset_profile,
+		.secure_format = 0x4d31324d,
 		.init = aml_mpeg12_init,
 		.exit = aml_mpeg12_exit,
 		.prepare = aml_mpeg12_prepare,
