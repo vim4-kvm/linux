@@ -352,8 +352,6 @@ int h265_validate_params(const u16 *p)
 	    !p[P_TEMPORAL_ID] || p[P_TEMPORAL_ID] > 7 || p[P_NAL_UNIT_TYPE] > 31 ||
 	    p[P_SLICE_TYPE] > H265_I_SLICE || p[P_NUM_REF_IDX_L0_ACTIVE] > H265_MAX_REF ||
 	    p[P_NUM_REF_IDX_L1_ACTIVE] > H265_MAX_REF ||
-	    p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0] >= H265_MAX_REF ||
-	    p[P_SPS_NUM_REORDER_PICS_0] > p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0] ||
 	    p[P_FIVE_MINUS_MAX_NUM_MERGE_CAND] > 4)
 		return -EINVAL;
 	width_ctu = DIV_ROUND_UP(p[P_PIC_WIDTH], 1U << log2_ctu);
@@ -435,8 +433,6 @@ bool h265_update_random_access(struct h265_dpb *h)
 	bool bla = h->nal_type >= H265_NAL_BLA_W_LP && h->nal_type <= H265_NAL_BLA_N_LP;
 	bool first = h->poc_random_access == H265_MAX_INT;
 
-	if (!h->slice_segment_addr && (idr || bla || (first && h->nal_type == H265_NAL_CRA)))
-		h->epoch++;
 	if (first || idr) {
 		if (bla || h->nal_type == H265_NAL_CRA)
 			h->poc_random_access = h->curr_poc;
@@ -461,31 +457,140 @@ int h265_free_slot(struct h265_dpb *h)
 	return -ENOBUFS;
 }
 
-int h265_next_output(struct h265_dpb *h, bool flush)
+static int h265_first_needed(const struct h265_dpb *h)
 {
-	int i, next = -1;
+	int i, first = -1;
 
-	for (i = 0; i < H265_SLOTS; i++) {
-		if (!h->pic[i].output_pending)
-			continue;
-		if (next < 0 || h->pic[i].epoch < h->pic[next].epoch ||
-		    (h->pic[i].epoch == h->pic[next].epoch && h->pic[i].poc < h->pic[next].poc))
-			next = i;
-	}
-	if (next >= 0 && !flush && h->pic[next].epoch == h->epoch &&
-	    h->pending <= h->pic[next].reorder_limit)
-		return -1;
-	return next;
+	for (i = 0; i < H265_SLOTS; i++)
+		if (h->pic[i].needed_for_output &&
+		    (first < 0 || h->pic[i].poc < h->pic[first].poc))
+			first = i;
+	return first;
 }
 
-void h265_queue_output(struct h265_dpb *h, unsigned int slot)
+static void h265_push_slot(struct h265_slot_queue *queue, unsigned int slot)
 {
-	h->pic[slot].output_pending = true;
-	h->pending++;
+	queue->slots[(queue->head + queue->count) % H265_SLOTS] = slot;
+	queue->count++;
 }
 
-void h265_remove_output(struct h265_dpb *h, unsigned int slot)
+static int h265_pop_slot(struct h265_dpb *h, struct h265_slot_queue *queue)
 {
+	unsigned int slot;
+
+	if (!queue->count)
+		return -ENOENT;
+	slot = queue->slots[queue->head];
+	queue->head = (queue->head + 1) % H265_SLOTS;
+	queue->count--;
 	h->pic[slot].output_pending = false;
 	h->pending--;
+	return slot;
+}
+
+static void h265_bump(struct h265_dpb *h, unsigned int slot)
+{
+	h->pic[slot].needed_for_output = false;
+	h265_push_slot(&h->output, slot);
+}
+
+static void h265_bump_limits(struct h265_dpb *h, const struct h265_output_limits *limits,
+			     bool before_decode)
+{
+	u64 latency_limit = (u64)limits->max_num_reorder_pics +
+			    limits->max_latency_increase_plus1 - 1;
+	unsigned int needed, fullness;
+	bool latency;
+	int i, first;
+
+	for (;;) {
+		needed = 0;
+		fullness = 0;
+		latency = false;
+		for (i = 0; i < H265_SLOTS; i++) {
+			const struct h265_pic *pic = &h->pic[i];
+
+			fullness += pic->valid && (pic->referenced || pic->needed_for_output);
+			if (!pic->needed_for_output)
+				continue;
+			needed++;
+			if (limits->max_latency_increase_plus1 &&
+			    pic->latency_count >= latency_limit)
+				latency = true;
+		}
+		first = h265_first_needed(h);
+		if (first < 0)
+			break;
+		if (needed <= limits->max_num_reorder_pics && !latency &&
+		    (!before_decode || fullness < limits->max_dec_pic_buffering))
+			break;
+		h265_bump(h, first);
+	}
+}
+
+void h265_dpb_begin_picture(struct h265_dpb *h, const struct h265_picture_info *info,
+			    const struct h265_output_limits *limits)
+{
+	int i;
+
+	/* C.5.2.2: decide prior output before an implicit format-change drain. */
+	if (info->irap && info->no_rasl_output && !info->first_picture) {
+		bool discard = info->is_cra || info->no_output_of_prior_pics;
+
+		for (i = 0; i < H265_SLOTS; i++) {
+			h->pic[i].referenced = false;
+			h->pic[i].valid = false;
+			if (discard && h->pic[i].needed_for_output) {
+				h->pic[i].needed_for_output = false;
+				h265_push_slot(&h->discard, i);
+			}
+		}
+		if (!discard)
+			h265_dpb_flush(h);
+		return;
+	}
+	h265_bump_limits(h, limits, true);
+}
+
+void h265_dpb_end_picture(struct h265_dpb *h, unsigned int slot, bool pic_output,
+			  const struct h265_output_limits *limits)
+{
+	int i;
+
+	/* C.5.2.3 counts only pictures following this picture in output order. */
+	if (pic_output)
+		for (i = 0; i < H265_SLOTS; i++)
+			if (h->pic[i].needed_for_output && h->pic[i].poc > h->pic[slot].poc)
+				h->pic[i].latency_count++;
+	h->pic[slot].output_pending = true;
+	h->pic[slot].needed_for_output = pic_output;
+	h->pic[slot].latency_count = 0;
+	h->pending++;
+	if (!pic_output)
+		h265_push_slot(&h->discard, slot);
+	h265_bump_limits(h, limits, false);
+}
+
+void h265_dpb_flush(struct h265_dpb *h)
+{
+	int slot;
+
+	while ((slot = h265_first_needed(h)) >= 0)
+		h265_bump(h, slot);
+}
+
+int h265_dpb_pop_output(struct h265_dpb *h)
+{
+	return h265_pop_slot(h, &h->output);
+}
+
+int h265_dpb_pop_discard(struct h265_dpb *h)
+{
+	return h265_pop_slot(h, &h->discard);
+}
+
+void h265_dpb_end_sequence(struct h265_dpb *h)
+{
+	/* A coded EOS is a boundary for the next picture, not a V4L2 drain. */
+	h->new_cvs = true;
 }
