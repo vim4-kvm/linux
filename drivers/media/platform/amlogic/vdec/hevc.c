@@ -938,6 +938,11 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 	v |= BIT(8);			/* NV12 */
 	v &= ~(3 << 14);
 	v |= 2 << 14;			/* line align 64 */
+	/* The V4L path reapplies these DBLK controls for every slice. */
+	v2 = 0x57 << 8;
+	if (h->pic_w >= 1280)
+		v2 |= BIT(4);
+	wr(hw, HEVC_DBLK_CFGB, v2);
 	wr(hw, HEVC_SAO_CTRL1, v);
 
 	v = read_dos_reg(hw, HEVCD_IPP_AXIIF_CONFIG);
