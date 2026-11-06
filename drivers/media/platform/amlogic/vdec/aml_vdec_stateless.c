@@ -113,13 +113,8 @@ static const struct vb2_ops aml_vdec_vb2_ops = {
 	.buf_request_complete = vb2ops_vdec_buf_request_complete,
 };
 
-static int stateless_g_selection(struct file *file, void *priv, struct v4l2_selection *s)
-{
-	return -EINVAL;
-}
 
 const struct v4l2_ioctl_ops aml_vdec_stateless_ioctl_ops = {
-	.vidioc_g_selection = stateless_g_selection,
 	.vidioc_querycap = vidioc_vdec_querycap,
 	.vidioc_enum_framesizes = vidioc_vdec_enum_framesizes,
 
