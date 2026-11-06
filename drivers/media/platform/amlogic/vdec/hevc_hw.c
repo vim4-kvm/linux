@@ -837,7 +837,10 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		int slot;
 
 		h->dpb.new_pic = true;
-		h265_apply_rps(&h->dpb);
+		ret = h265_resolve_rps(&h->dpb, &h->dpb.rps);
+		if (ret)
+			return ret;
+		h265_apply_rps(&h->dpb, &h->dpb.rps);
 
 		slot = h265_free_slot(&h->dpb);
 		if (slot < 0) {
@@ -866,6 +869,8 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 	} else {
 		if (h->dpb.cur < 0)
 			return 1;	/* a picture's first slice went missing */
+		if (!h265_rps_matches(&h->dpb.rps, &p[P_CUR_RPS]))
+			return -EINVAL;
 		h->dpb.new_pic = false;
 	}
 
@@ -897,7 +902,7 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		h->dpb.tile_height_lcu = t->height;
 	}
 
-	ret = h265_set_ref_lists(&h->dpb);
+	ret = h265_set_ref_lists(&h->dpb, &h->dpb.rps);
 	if (ret) {
 		dev_err(hw->dev, "hevc: invalid reference lists: poc=%d type=%d refs=%u/%u mod=%#x RPS=%*ph\n",
 			h->dpb.curr_poc, h->dpb.slice_type, p[P_NUM_REF_IDX_L0_ACTIVE],

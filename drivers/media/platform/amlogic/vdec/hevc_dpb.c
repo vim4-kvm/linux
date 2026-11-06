@@ -25,90 +25,157 @@ int h265_pic_by_poc(struct h265_dpb *h, int poc, bool ref_only)
 	return best;
 }
 
-static int h265_long_term_poc(struct h265_dpb *h, int poc)
+static bool h265_reference_candidate(const struct h265_dpb *h, int slot)
 {
-	u32 mask = BIT(h->p[P_LOG2_MAX_POC_LSB_MINUS4] + 4) - 1;
-	int i, found = H265_INVALID_POC;
+	const struct h265_pic *pic = &h->pic[slot];
 
-	/* Long-term RPM deltas can wrap at the stream's POC LSB width. */
-	for (i = 0; i < H265_SLOTS; i++) {
-		struct h265_pic *pic = &h->pic[i];
-
-		/* cur can still name the preceding picture before slot allocation. */
-		if (pic->poc == h->curr_poc || !pic->valid || !pic->referenced ||
-		    pic->width != h->pic_w || pic->height != h->pic_h ||
-		    ((u32)pic->poc & mask) != ((u32)poc & mask))
-			continue;
-		if (found != (int)H265_INVALID_POC && found != pic->poc)
-			return H265_INVALID_POC;
-		found = pic->poc;
-	}
-	return found;
+	/* cur may still name the preceding picture before slot allocation. */
+	return pic->valid && pic->referenced && pic->poc != h->curr_poc &&
+		pic->width == h->pic_w && pic->height == h->pic_h;
 }
 
-/* Decode a CUR_RPS entry to a POC; returns false at the end marker. */
-static bool h265_rps_poc(struct h265_dpb *h, int i, int *poc, bool *used, bool *lt)
+static int h265_rps_poc(int curr_poc, u16 entry)
 {
-	u16 e = h->p[P_CUR_RPS + i];
-	int delt;
+	int delta = entry & (BIT(RPS_USED_BIT - 1) - 1);
 
-	if (e == RPS_END)
-		return false;
-	delt = e & ((1 << (RPS_USED_BIT - 1)) - 1);
-	if (e & (1 << (RPS_USED_BIT - 1)))
-		*poc = h->curr_poc - ((1 << (RPS_USED_BIT - 1)) - delt);
-	else
-		*poc = h->curr_poc + delt;
-	*used = (e >> RPS_USED_BIT) & 1;
-	*lt = (e >> RPS_LT_BIT) & 1;
-	if (*lt)
-		*poc = h265_long_term_poc(h, *poc);
+	if (entry & BIT(RPS_USED_BIT - 1))
+		delta -= BIT(RPS_USED_BIT - 1);
+	return curr_poc + delta;
+}
+
+static void h265_rps_add(struct h265_rps_set *set, int slot, bool used)
+{
+	set->ref[set->count++] = (struct h265_rps_ref) { .slot = slot, .used = used };
+}
+
+bool h265_rps_matches(const struct h265_resolved_rps *resolved, const u16 *words)
+{
+	int i;
+
+	for (i = 0; i < H265_MAX_REF; i++) {
+		if (resolved->words[i] != words[i])
+			return false;
+		if (words[i] == RPS_END)
+			break;
+	}
 	return true;
 }
 
-/* apply_ref_pic_set(): everything the current RPS does not name stops being
- * a reference.
- */
-void h265_apply_rps(struct h265_dpb *h)
+int h265_resolve_rps(const struct h265_dpb *h, struct h265_resolved_rps *resolved)
 {
 	bool reset = h->nal_type == H265_NAL_IDR_W_RADL ||
 		     h->nal_type == H265_NAL_IDR_N_LP ||
 		     (h->nal_type >= H265_NAL_BLA_W_LP && h->nal_type <= H265_NAL_BLA_N_LP);
-	int pocs[H265_MAX_REF], count = 0;
-	bool long_terms[H265_MAX_REF];
+	struct h265_resolved_rps result = {};
+	int lt_poc[H265_MAX_REF], lt_slot[H265_MAX_REF], n_lt = 0;
+	bool lt_used[H265_MAX_REF], assigned[H265_MAX_REF] = {};
+	u32 st_slots = 0, mask = BIT(h->p[P_LOG2_MAX_POC_LSB_MINUS4] + 4) - 1;
+	int i, j, k;
+
+	memcpy(result.words, &h->p[P_CUR_RPS], sizeof(result.words));
+	if (reset)
+		goto done;
+
+	/* Establish all short-term ownership before considering any LT LSB. */
+	for (i = 0; i < H265_MAX_REF && result.words[i] != RPS_END; i++) {
+		u16 entry = result.words[i];
+		int poc = h265_rps_poc(h->curr_poc, entry), slot = -1;
+		bool used = entry & BIT(RPS_USED_BIT);
+
+		if (entry & BIT(RPS_LT_BIT)) {
+			lt_poc[n_lt] = poc;
+			lt_used[n_lt++] = used;
+			continue;
+		}
+		for (j = 0; j < H265_SLOTS; j++)
+			if (h265_reference_candidate(h, j) && h->pic[j].poc == poc &&
+			    (slot < 0 || h->pic[j].decode_idx > h->pic[slot].decode_idx))
+				slot = j;
+		if (slot >= 0)
+			st_slots |= BIT(slot);
+		h265_rps_add(entry & BIT(RPS_USED_BIT - 1) ?
+			     &result.st_before : &result.st_after, slot, used);
+	}
+
+	for (i = 0; i < n_lt; i++) {
+		int entries[H265_MAX_REF], candidates[H265_SLOTS];
+		int count = 0, n_candidates = 0;
+
+		if (assigned[i])
+			continue;
+		for (j = i; j < n_lt; j++)
+			if (((u32)lt_poc[j] & mask) == ((u32)lt_poc[i] & mask))
+				entries[count++] = j;
+		for (j = 0; j < H265_SLOTS; j++) {
+			if ((st_slots & BIT(j)) || !h265_reference_candidate(h, j) ||
+			    ((u32)h->pic[j].poc & mask) != ((u32)lt_poc[i] & mask))
+				continue;
+			for (k = 0; k < n_candidates; k++)
+				if (h->pic[candidates[k]].poc == h->pic[j].poc)
+					break;
+			if (k == n_candidates)
+				candidates[n_candidates++] = j;
+			else if (h->pic[j].decode_idx > h->pic[candidates[k]].decode_idx)
+				candidates[k] = j;
+		}
+		/* Equal-size LSB groups follow descending POC in RPM order. */
+		if (n_candidates && n_candidates != count)
+			return -EINVAL;
+		for (j = 0; j < n_candidates; j++)
+			for (k = j + 1; k < n_candidates; k++)
+				if (h->pic[candidates[k]].poc > h->pic[candidates[j]].poc)
+					swap(candidates[j], candidates[k]);
+		for (j = 0; j < count; j++) {
+			lt_slot[entries[j]] = n_candidates ? candidates[j] : -1;
+			assigned[entries[j]] = true;
+		}
+	}
+	for (i = 0; i < n_lt; i++)
+		h265_rps_add(lt_used[i] ? &result.lt_curr : &result.lt_foll,
+			     lt_slot[i], lt_used[i]);
+done:
+	*resolved = result;
+	return 0;
+}
+
+void h265_apply_rps(struct h265_dpb *h, const struct h265_resolved_rps *resolved)
+{
+	const struct h265_rps_set *sets[] = {
+		&resolved->st_before, &resolved->st_after, &resolved->lt_curr, &resolved->lt_foll,
+	};
+	u32 keep = 0, long_term = 0;
 	int i, j;
 
-	/* Resolve against the complete old DPB before changing reference ownership. */
-	if (!reset) {
-		for (count = 0; count < H265_MAX_REF; count++) {
-			bool used;
+	for (i = 0; i < ARRAY_SIZE(sets); i++)
+		for (j = 0; j < sets[i]->count; j++) {
+			int slot = sets[i]->ref[j].slot;
 
-			if (!h265_rps_poc(h, count, &pocs[count], &used, &long_terms[count]))
-				break;
+			if (slot < 0)
+				continue;
+			keep |= BIT(slot);
+			if (i >= 2)
+				long_term |= BIT(slot);
 		}
-	}
-
 	for (i = 0; i < H265_SLOTS; i++) {
-		struct h265_pic *pic = &h->pic[i];
-		bool found = false;
-
-		pic->long_term = false;
-		if (reset) {
-			pic->referenced = false;
-			continue;
-		}
-		if (!pic->valid || !pic->referenced || pic->poc == h->curr_poc)
-			continue;
-		for (j = 0; j < count; j++) {
-			if (pocs[j] == pic->poc) {
-				pic->long_term = long_terms[j];
-				found = true;
-				break;
-			}
-		}
-		if (!found)
-			pic->referenced = false;
+		h->pic[i].long_term = long_term & BIT(i);
+		if (!(keep & BIT(i)))
+			h->pic[i].referenced = false;
 	}
+}
+
+static int h265_used_pocs(const struct h265_dpb *h, const struct h265_rps_set *set,
+			  int *pocs)
+{
+	int i, count = 0;
+
+	for (i = 0; i < set->count; i++) {
+		const struct h265_rps_ref *ref = &set->ref[i];
+
+		if (!ref->used)
+			continue;
+		pocs[count++] = ref->slot < 0 ? H265_INVALID_POC : h->pic[ref->slot].poc;
+	}
+	return count;
 }
 
 /*
@@ -126,10 +193,10 @@ static int h265_ref_entry(int c, const int *first, int n_first,
 }
 
 /* set_ref_pic_list() */
-int h265_set_ref_lists(struct h265_dpb *h)
+int h265_set_ref_lists(struct h265_dpb *h, const struct h265_resolved_rps *resolved)
 {
 	int st0[16], st1[16], lt[16];
-	int n_neg = 0, n_pos = 0, n_lt = 0, total, i, r;
+	int n_neg, n_pos, n_lt, total, r;
 	int l0 = h->slice_type == H265_I_SLICE ? 0 : h->p[P_NUM_REF_IDX_L0_ACTIVE];
 	int l1 = h->slice_type == H265_B_SLICE ? h->p[P_NUM_REF_IDX_L1_ACTIVE] : 0;
 	u16 mod = h->p[P_MODIFICATION_FLAG];
@@ -137,22 +204,9 @@ int h265_set_ref_lists(struct h265_dpb *h)
 	memset(h->ref_poc_l0, 0, sizeof(h->ref_poc_l0));
 	memset(h->ref_poc_l1, 0, sizeof(h->ref_poc_l1));
 
-	for (i = 0; i < 16; i++) {
-		u16 e = h->p[P_CUR_RPS + i];
-		int poc;
-		bool used, is_lt;
-
-		if (!h265_rps_poc(h, i, &poc, &used, &is_lt))
-			break;
-		if (!used)
-			continue;
-		if (is_lt)
-			lt[n_lt++] = poc;
-		else if (e & (1 << (RPS_USED_BIT - 1)))
-			st0[n_neg++] = poc;
-		else
-			st1[n_pos++] = poc;
-	}
+	n_neg = h265_used_pocs(h, &resolved->st_before, st0);
+	n_pos = h265_used_pocs(h, &resolved->st_after, st1);
+	n_lt = h265_used_pocs(h, &resolved->lt_curr, lt);
 	total = n_neg + n_pos + n_lt;
 	if (!total && (l0 || l1))
 		return -EINVAL;

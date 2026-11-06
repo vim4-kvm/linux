@@ -28,6 +28,13 @@ static int hevc_test_init(struct kunit *test)
 	return 0;
 }
 
+static int resolve_ref_lists(struct h265_dpb *h)
+{
+	int ret = h265_resolve_rps(h, &h->rps);
+
+	return ret ?: h265_set_ref_lists(h, &h->rps);
+}
+
 static void poc_wrap_and_random_access(struct kunit *test)
 {
 	static const unsigned int excluded[] = { 0, 2, 4, 6, 7, 8, 9 };
@@ -172,29 +179,29 @@ static void missing_and_reordered_references(struct kunit *test)
 		h->pic[i].height = 640;
 		h->pic[i].poc = pocs[i];
 	}
-	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h), 0);
+	KUNIT_ASSERT_EQ(test, resolve_ref_lists(h), 0);
 	KUNIT_EXPECT_MEMEQ(test, h->ref_poc_l0, pocs, sizeof(pocs));
 	KUNIT_EXPECT_EQ(test, h->ref_poc_l1[0], 5);
 	KUNIT_EXPECT_EQ(test, h->ref_poc_l1[1], 3);
 	KUNIT_EXPECT_EQ(test, h->ref_poc_l1[2], 1);
 	h->pic[2].valid = false;
-	KUNIT_EXPECT_EQ(test, h265_set_ref_lists(h), -EINVAL);
+	KUNIT_EXPECT_EQ(test, resolve_ref_lists(h), -EINVAL);
 	h->pic[2].valid = true;
 	h->p[P_MODIFICATION_FLAG] = 1;
 	h->p[P_MODIFICATION_LIST] = 2;
 	h->p[P_MODIFICATION_LIST + 1] = 0;
 	h->p[P_MODIFICATION_LIST + 2] = 1;
-	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h), 0);
+	KUNIT_ASSERT_EQ(test, resolve_ref_lists(h), 0);
 	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[0], 1);
 	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[1], 3);
 	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[2], 5);
 	h->p[P_MODIFICATION_LIST] = 3;
-	KUNIT_EXPECT_EQ(test, h265_set_ref_lists(h), -EINVAL);
+	KUNIT_EXPECT_EQ(test, resolve_ref_lists(h), -EINVAL);
 	h->p[P_CUR_RPS] = RPS_END;
-	KUNIT_EXPECT_EQ(test, h265_set_ref_lists(h), -EINVAL);
+	KUNIT_EXPECT_EQ(test, resolve_ref_lists(h), -EINVAL);
 	h->slice_type = H265_I_SLICE;
 	h->p[P_SLICE_TYPE] = H265_I_SLICE;
-	KUNIT_EXPECT_EQ(test, h265_set_ref_lists(h), 0);
+	KUNIT_EXPECT_EQ(test, resolve_ref_lists(h), 0);
 	KUNIT_EXPECT_EQ(test, h->ref_num_l0, 0);
 	KUNIT_EXPECT_EQ(test, h->ref_num_l1, 0);
 }
@@ -245,8 +252,9 @@ static void long_term_references_survive_poc_lsb_wrap(struct kunit *test)
 		h->pic[i].height = 240;
 		h->pic[i].poc = pocs[i];
 	}
-	h265_apply_rps(h);
-	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h), 0);
+	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+	h265_apply_rps(h, &h->rps);
+	KUNIT_ASSERT_EQ(test, resolve_ref_lists(h), 0);
 	KUNIT_EXPECT_MEMEQ(test, h->ref_poc_l0, pocs, sizeof(pocs));
 	KUNIT_EXPECT_TRUE(test, h->pic[2].referenced);
 	KUNIT_EXPECT_TRUE(test, h->pic[2].long_term);
@@ -255,13 +263,13 @@ static void long_term_references_survive_poc_lsb_wrap(struct kunit *test)
 	/* Two retained POC cycles with the same LSB cannot be guessed apart. */
 	h->pic[4] = h->pic[2];
 	h->pic[4].poc = 326;
-	KUNIT_EXPECT_EQ(test, h265_set_ref_lists(h), -EINVAL);
+	KUNIT_EXPECT_EQ(test, resolve_ref_lists(h), -EINVAL);
 	/* A short-term delta must still identify a complete POC exactly. */
 	h->p[P_CUR_RPS] = 0x2004;
 	h->p[P_CUR_RPS + 1] = RPS_END;
 	h->p[P_NUM_REF_IDX_L0_ACTIVE] = 1;
 	h->pic[4].poc = 8;
-	KUNIT_EXPECT_EQ(test, h265_set_ref_lists(h), -EINVAL);
+	KUNIT_EXPECT_EQ(test, resolve_ref_lists(h), -EINVAL);
 }
 
 static void previous_decoded_picture_can_be_long_term(struct kunit *test)
@@ -288,7 +296,8 @@ static void previous_decoded_picture_can_be_long_term(struct kunit *test)
 	h->pic[0].poc = 70;
 
 	/* RPS is applied while cur still identifies the preceding decoded picture. */
-	h265_apply_rps(h);
+	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+	h265_apply_rps(h, &h->rps);
 	KUNIT_ASSERT_TRUE(test, h->pic[0].referenced);
 	KUNIT_EXPECT_TRUE(test, h->pic[0].long_term);
 	slot = h265_free_slot(h);
@@ -297,8 +306,90 @@ static void previous_decoded_picture_can_be_long_term(struct kunit *test)
 	h->pic[slot] = h->pic[0];
 	h->pic[slot].poc = h->curr_poc;
 	/* The new picture shares the LT LSB, but must not become its own reference. */
-	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h), 0);
+	KUNIT_ASSERT_EQ(test, resolve_ref_lists(h), 0);
 	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[0], 70);
+}
+
+static void rps_snapshot_resolves_st_before_lt(struct kunit *test)
+{
+	static const u16 words[] = { 0x3ffc, 0x1fe2, 0xfffc, RPS_END };
+	static const int pocs[] = { 326, 300, 70 };
+	struct h265_dpb *h = test->priv;
+	unsigned int i;
+
+	h->curr_poc = 330;
+	h->cur = 0;
+	h->nal_type = 1;
+	h->slice_type = H265_P_SLICE;
+	h->p[P_SLICE_TYPE] = H265_P_SLICE;
+	h->p[P_NUM_REF_IDX_L0_ACTIVE] = 2;
+	memcpy(h->p, words, sizeof(words));
+	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
+		h->pic[i].valid = true;
+		h->pic[i].referenced = true;
+		h->pic[i].poc = pocs[i];
+	}
+	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+	h265_apply_rps(h, &h->rps);
+	KUNIT_EXPECT_TRUE(test, h->pic[1].referenced);
+	KUNIT_EXPECT_TRUE(test, h->pic[2].long_term);
+	/* Allocating the current slot cannot change an already resolved RPS. */
+	h->cur = 3;
+	h->pic[3] = h->pic[0];
+	h->pic[3].poc = h->curr_poc;
+	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h, &h->rps), 0);
+	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[0], 326);
+	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[1], 70);
+	/* A later slice may change its list, but must retain the picture RPS. */
+	h->p[P_MODIFICATION_FLAG] = 1;
+	h->p[P_MODIFICATION_LIST] = 1;
+	h->p[P_MODIFICATION_LIST + 1] = 0;
+	KUNIT_EXPECT_TRUE(test, h265_rps_matches(&h->rps, h->p));
+	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h, &h->rps), 0);
+	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[0], 70);
+	h->p[P_CUR_RPS + 4] = 0x1234;
+	KUNIT_EXPECT_TRUE(test, h265_rps_matches(&h->rps, h->p));
+	h->p[P_CUR_RPS + 2] ^= BIT(RPS_USED_BIT);
+	KUNIT_EXPECT_FALSE(test, h265_rps_matches(&h->rps, h->p));
+}
+
+static void rps_lsb_groups_require_unique_assignment(struct kunit *test)
+{
+	static const u16 words[] = { 0x60aa, 0x60aa, 0x404b, RPS_END };
+	static const int pocs[] = { 505, 761, 154 };
+	struct h265_dpb *h = test->priv;
+	struct h265_resolved_rps snapshot;
+	unsigned int i;
+
+	h->curr_poc = 847;
+	h->cur = -1;
+	h->nal_type = 1;
+	h->slice_type = H265_P_SLICE;
+	h->p[P_SLICE_TYPE] = H265_P_SLICE;
+	h->p[P_NUM_REF_IDX_L0_ACTIVE] = 2;
+	memcpy(h->p, words, sizeof(words));
+	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
+		h->pic[i].valid = true;
+		h->pic[i].referenced = true;
+		h->pic[i].poc = pocs[i];
+	}
+	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+	h265_apply_rps(h, &h->rps);
+	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h, &h->rps), 0);
+	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[0], 761);
+	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[1], 505);
+	KUNIT_EXPECT_TRUE(test, h->pic[2].long_term);
+	/* POC 1108 needs two of three retained LSB249 candidates. */
+	h->curr_poc = 1108;
+	h->p[P_CUR_RPS] = 0x7fa5;
+	h->p[P_CUR_RPS + 1] = 0x7da5;
+	h->pic[3] = h->pic[0];
+	h->pic[3].poc = 1017;
+	snapshot = h->rps;
+	KUNIT_EXPECT_EQ(test, h265_resolve_rps(h, &h->rps), -EINVAL);
+	KUNIT_EXPECT_MEMEQ(test, &h->rps, &snapshot, sizeof(snapshot));
+	for (i = 0; i < 4; i++)
+		KUNIT_EXPECT_TRUE(test, h->pic[i].referenced);
 }
 
 static void mv_storage_covers_edge_ctus(struct kunit *test)
@@ -344,7 +435,8 @@ static void rps_and_output_own_picture_slots(struct kunit *test)
 	h->pic[1].poc = 2;
 	h->pic[2].poc = 3;
 	h->pic[2].output_pending = true;
-	h265_apply_rps(h);
+	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+	h265_apply_rps(h, &h->rps);
 	KUNIT_EXPECT_TRUE(test, h->pic[0].referenced);
 	KUNIT_EXPECT_TRUE(test, h->pic[1].referenced);
 	KUNIT_EXPECT_FALSE(test, h->pic[2].referenced);
@@ -374,7 +466,8 @@ static void irap_releases_previous_references(struct kunit *test)
 	for (i = 0; i < ARRAY_SIZE(nals); i++) {
 		h->nal_type = nals[i];
 		h->pic[0].referenced = true;
-		h265_apply_rps(h);
+		KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+		h265_apply_rps(h, &h->rps);
 		KUNIT_EXPECT_FALSE(test, h->pic[0].referenced);
 	}
 }
@@ -501,6 +594,8 @@ static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(missing_and_reordered_references),
 	KUNIT_CASE(long_term_references_survive_poc_lsb_wrap),
 	KUNIT_CASE(previous_decoded_picture_can_be_long_term),
+	KUNIT_CASE(rps_snapshot_resolves_st_before_lt),
+	KUNIT_CASE(rps_lsb_groups_require_unique_assignment),
 	KUNIT_CASE(capture_sao_capacity),
 	KUNIT_CASE(mv_storage_covers_edge_ctus),
 	KUNIT_CASE(rps_and_output_own_picture_slots),

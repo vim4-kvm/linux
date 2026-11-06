@@ -120,6 +120,21 @@ struct h265_tile {
 	u32 sao_vb, sao_abv;
 };
 
+struct h265_rps_ref {
+	int slot;		/* -1 when absent from the snapshot */
+	bool used;
+};
+
+struct h265_rps_set {
+	struct h265_rps_ref ref[H265_MAX_REF];
+	unsigned int count;
+};
+
+struct h265_resolved_rps {
+	u16 words[H265_MAX_REF];
+	struct h265_rps_set st_before, st_after, lt_curr, lt_foll;
+};
+
 struct h265_dpb {
 	u32 epoch;
 	unsigned int pending, reorder_limit;
@@ -131,6 +146,7 @@ struct h265_dpb {
 	u32 decode_idx;
 	/* picture state */
 	u16 p[P_RPM_COUNT];
+	struct h265_resolved_rps rps;
 	int cur;		/* slot being decoded, -1 when none */
 	int col;
 	int curr_poc, iprev_poc, col_poc;
@@ -155,8 +171,10 @@ struct h265_dpb {
 };
 
 int h265_pic_by_poc(struct h265_dpb *h, int poc, bool ref_only);
-void h265_apply_rps(struct h265_dpb *h);
-int h265_set_ref_lists(struct h265_dpb *h);
+int h265_resolve_rps(const struct h265_dpb *h, struct h265_resolved_rps *resolved);
+bool h265_rps_matches(const struct h265_resolved_rps *resolved, const u16 *words);
+void h265_apply_rps(struct h265_dpb *h, const struct h265_resolved_rps *resolved);
+int h265_set_ref_lists(struct h265_dpb *h, const struct h265_resolved_rps *resolved);
 void h265_update_tiles(struct h265_dpb *h, int w_cu, int h_cu,
 		       int sao_mem_unit);
 int h265_tile_index(struct h265_dpb *h, int cu_adr, int w_lcu);
