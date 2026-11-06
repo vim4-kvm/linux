@@ -102,7 +102,7 @@ void aml_vdec_run_pair(struct aml_vdec_ctx *ctx)
 	if (ret)
 		goto stop_job;
 
-	ret = ctx->codec_ops->run(ctx);
+	ret = ctx->node->interface->run_job(ctx);
 
 stop_job:
 	/*
