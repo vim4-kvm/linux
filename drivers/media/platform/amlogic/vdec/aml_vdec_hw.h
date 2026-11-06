@@ -148,22 +148,9 @@ struct aml_hevc_core {
 	void *priv;
 };
 
-struct aml_vdec_diagnostics {
-	bool power_test_passed;
-	u32 power_test_reset;
-	bool mdec_test_passed;
-	u32 mdec_test_value;
-	u32 probe_step;
-	u32 probe_value;
-	u32 probe_en0;
-	bool probe_failed;
-	bool probe_pinned;
-};
-
 struct aml_vdec_hw {
 	struct aml_vdec1_core vdec1;
 	struct aml_hevc_core hevc;
-	struct aml_vdec_diagnostics diag;
 	/* Contiguous registration storage; cores retain their own clock views. */
 	struct clk_bulk_data clock_data[DOS_CLK_MAX];
 	struct platform_device *pdev;
@@ -219,8 +206,6 @@ u32 read_dos_reg(struct aml_vdec_hw *hw, u32 reg_addr);
 int vdec_enable(struct aml_vdec_hw *hw);
 int vdec_disable(struct aml_vdec_hw *hw);
 int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3);
-int aml_vdec_t7_power_test(struct aml_vdec_hw *hw);
-int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw);
 int aml_hevc_power_on(struct aml_vdec_hw *hw);
 int aml_hevc_power_off(struct aml_vdec_hw *hw);
 int aml_hevc_prepare_hw(struct aml_vdec_hw *hw);
@@ -228,7 +213,6 @@ int aml_hevc_enable_irq(struct aml_vdec_hw *hw,
 			irqreturn_t (*thread)(int irq, void *priv), void *priv);
 int aml_hevc_stop_hw(struct aml_vdec_hw *hw);
 int aml_hevc_release_hw(struct aml_vdec_hw *hw);
-int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step);
 void dos_enable(struct aml_vdec_hw *hw);
 void aml_start_vdec_hw(struct aml_vdec_hw *hw);
 int aml_stop_vdec_hw(struct aml_vdec_hw *hw);

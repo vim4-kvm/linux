@@ -794,85 +794,15 @@ static int t7_clock_preflight(struct aml_vdec_hw *hw)
 	return 0;
 }
 
-static int t7_power_on(struct aml_vdec_hw *hw)
-{
-	s32 vdec = -1, nic3 = -1;
-	int ret;
-
-	if (hw->faulted)
-		return -EIO;
-	/* vdec_power_ctrl.c enables the functional clock before secure PM. */
-	/* T7 vdec_max_clk_get(), used unconditionally by vendor clkg12.c. */
-	ret = t7_set_clock(hw);
-	if (ret)
-		return ret;
-	ret = t7_clocks_on(hw);
-	if (ret)
-		return ret;
-	ret = pm_runtime_resume_and_get(hw->pm->pd_data[VDEC_1].dev);
-	if (ret < 0) {
-		t7_clocks_off(hw);
-		return ret;
-	}
-	hw->vdec1.powered = true;
-	/*
-	 * genpd's successful SET call does not verify firmware a0 or GET status.
-	 * Do not touch even DOS_GCLK_EN0 until both VDEC and its NIC3 parent
-	 * report on. This query itself uses SMC, never the gated DOS aperture.
-	 */
-	ret = aml_vdec_t7_power_state(hw, &vdec, &nic3);
-	dev_info(hw->dev, "pre-DOS power: VDEC[4]=%d NIC3[39]=%d rate=%lu\n",
-		 vdec, nic3, clk_get_rate(hw->vdec1.gates[VDEC_MUX].clk));
-	if (ret || vdec || nic3) {
-		dev_err(hw->dev, "refusing DOS MMIO: secure power check failed\n");
-		t7_power_off(hw);
-		return ret ?: -EHOSTDOWN;
-	}
-	ret = t7_clock_preflight(hw);
-	if (ret)
-		t7_power_off(hw);
-	return ret;
-}
-
-int aml_vdec_t7_power_test(struct aml_vdec_hw *hw)
-{
-	int ret, off_ret;
-
-	if (!hw->has_dbus_ctrl)
-		return -EOPNOTSUPP;
-	if (hw->diag.probe_failed)
-		return -EIO;
-	hw->diag.power_test_passed = false;
-	hw->diag.mdec_test_passed = false;
-	ret = t7_power_on(hw);
-	if (ret)
-		return ret;
-	/*
-	 * No documented VDEC silicon ID register was found. Sample the known
-	 * reset register read by vendor amvdec_start(), without writing reset,
-	 * enabling internal gates/IRQ, loading firmware or starting any DMA.
-	 */
-	ret = regmap_read(hw->map[DOS_BUS], DOS_SW_RESET0, &hw->diag.power_test_reset);
-	if (!ret)
-		dev_info(hw->dev, "power test DOS_SW_RESET0 offset=%#x value=%#x\n",
-			 DOS_SW_RESET0, hw->diag.power_test_reset);
-	off_ret = t7_power_off(hw);
-	if (ret || off_ret)
-		return ret ?: off_ret;
-	hw->diag.power_test_passed = true;
-	dev_info(hw->dev, "power test complete: VDEC off; no firmware or DMA started\n");
-	return 0;
-}
-
-static int t7_probe_begin(struct aml_vdec_hw *hw)
+static int t7_bus_on(struct aml_vdec_hw *hw)
 {
 	s32 vdec = -1, nic3 = -1;
 	int ret;
 
 	/*
 	 * Vendor vdec_set_clk() programs DOS_GCLK_EN0 BEFORE secure VDEC on.
-	 * Hold NIC3, DOS clocks and CPU APB gates for that DOS-top access. Its first read is
-	 * an explicit probe; never access internal MDEC registers in this phase.
+	 * Hold NIC3, DOS clocks and CPU APB gates for that DOS-top access. Only DOS-top
+	 * registers are accessible before the VDEC domain is powered on.
 	 */
 	ret = t7_clocks_on(hw);
 	if (ret)
@@ -893,7 +823,7 @@ static int t7_probe_begin(struct aml_vdec_hw *hw)
 	return 0;
 }
 
-static int t7_probe_domain_on(struct aml_vdec_hw *hw)
+static int t7_vdec_domain_on(struct aml_vdec_hw *hw)
 {
 	struct arm_smccc_res result;
 	s32 vdec = -1, nic3 = -1;
@@ -926,120 +856,72 @@ static int t7_probe_domain_on(struct aml_vdec_hw *hw)
 	return t7_clock_preflight(hw);
 }
 
-/* Each register step performs exactly one MMIO operation, never an RMW. */
-static int t7_register_access(struct aml_vdec_hw *hw, unsigned int step)
+/* Preserve the vendor order around the secure VDEC domain transition. */
+static int t7_enable_dos(struct aml_vdec_hw *hw)
 {
-	u32 reg, value = 0;
-	bool write = false;
+	struct regmap *map = hw->map[DOS_BUS];
+	u32 en0, value;
 	int ret;
 
-	switch (step) {
-	case 2:
-	case 3:
-	case 4:
-	case 6:
-		reg = DOS_GCLK_EN0;
-		write = step == 3;
-		value = (hw->diag.probe_en0 & ~0x3ff) | 0x3ff;
-		break;
-	case 7:
-		reg = DOS_SW_RESET0;
-		break;
-	case 8:
-		reg = DOS_MEM_PD_VDEC;
-		break;
-	case 9:
-	case 10:
-	case 11:
-		reg = GCLK_EN;
-		write = step == 10;
-		value = 0x3ff;
-		break;
-	case 12:
-		reg = MDEC_PIC_DC_CTRL;
-		break;
-	default:
-		return -EINVAL;
-	}
-	dev_dbg(hw->dev, "DOS step %u: %s offset=%#x begin\n",
-		step, write ? "write" : "read", reg);
-	if (write)
-		ret = regmap_write(hw->map[DOS_BUS], reg, value);
-	else
-		ret = regmap_read(hw->map[DOS_BUS], reg, &value);
+	ret = regmap_read(map, DOS_GCLK_EN0, &en0);
 	if (ret)
 		return ret;
-	/* Order the transaction before its completion marker and next step. */
+	/* Complete the DOS-top read before enabling its VDEC gates. */
 	mb();
-	dev_dbg(hw->dev, "DOS step %u: %s offset=%#x value=%#x complete\n",
-		step, write ? "write" : "read", reg, value);
-	if (!write)
-		hw->diag.probe_value = value;
-	if (step == 2)
-		hw->diag.probe_en0 = value;
-	if ((step == 4 || step == 6 || step == 11) && (value & 0x3ff) != 0x3ff)
+	/* Keep the HCODEC gates owned by other DOS users unchanged. */
+	ret = regmap_write(map, DOS_GCLK_EN0, (en0 & ~0x3ff) | 0x3ff);
+	if (ret)
+		return ret;
+	/* Publish the DOS-top gates before their readback. */
+	mb();
+	ret = regmap_read(map, DOS_GCLK_EN0, &value);
+	if (ret)
+		return ret;
+	/* Finish the gate check before secure power-on. */
+	mb();
+	if ((value & 0x3ff) != 0x3ff)
 		return -EIO;
-	if ((step == 7 || step == 8) && value)
+
+	ret = t7_vdec_domain_on(hw);
+	if (ret)
+		return ret;
+	ret = regmap_read(map, DOS_GCLK_EN0, &value);
+	if (ret)
+		return ret;
+	/* Keep the powered gate check ahead of internal state reads. */
+	mb();
+	if ((value & 0x3ff) != 0x3ff)
+		return -EIO;
+	ret = regmap_read(map, DOS_SW_RESET0, &value);
+	if (ret)
+		return ret;
+	/* Finish reset-state verification before checking memory power. */
+	mb();
+	if (value)
 		return -EHOSTDOWN;
-	if (step == 12)
-		hw->diag.mdec_test_value = value;
-	return 0;
-}
-
-int aml_vdec_t7_register_step(struct aml_vdec_hw *hw, unsigned int step)
-{
-	int ret, off_ret;
-
-	if (!hw->has_dbus_ctrl)
-		return -EOPNOTSUPP;
-	if (hw->faulted || hw->diag.probe_failed)
-		return -EIO;
-	if (!hw->diag.power_test_passed)
-		return -EPERM;
-	/* Zero aborts a live session without another DOS transaction. */
-	if (step && (step > 13 || step != hw->diag.probe_step + 1))
-		return -EINVAL;
-	if (step == 1) {
-		hw->diag.mdec_test_passed = false;
-		__module_get(THIS_MODULE);
-		hw->diag.probe_pinned = true;
-		ret = t7_probe_begin(hw);
-	} else if (step == 5) {
-		ret = t7_probe_domain_on(hw);
-	} else if (!step || step == 13) {
-		ret = 0;
-	} else {
-		ret = t7_register_access(hw, step);
-	}
-	if (ret || !step || step == 13) {
-		off_ret = t7_power_off(hw);
-		hw->diag.probe_failed = ret || off_ret;
-		hw->diag.mdec_test_passed = step == 13 && !hw->diag.probe_failed;
-		hw->diag.probe_step = 0;
-		if (hw->diag.probe_pinned) {
-			hw->diag.probe_pinned = false;
-			module_put(THIS_MODULE);
-		}
-		return ret ?: off_ret;
-	}
-	hw->diag.probe_step = step;
-	return 0;
-}
-
-int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw)
-{
-	unsigned int step;
-	int ret;
-
-	if (!hw->has_dbus_ctrl)
-		return -EOPNOTSUPP;
-	for (step = 1; step <= 13; step++) {
-		ret = aml_vdec_t7_register_step(hw, step);
-		if (ret)
-			return ret;
-	}
-	dev_dbg(hw->dev, "MDEC test complete: VDEC off; no firmware or DMA started\n");
-	return 0;
+	ret = regmap_read(map, DOS_MEM_PD_VDEC, &value);
+	if (ret)
+		return ret;
+	/* Verify memory power before accessing internal gates. */
+	mb();
+	if (value)
+		return -EHOSTDOWN;
+	ret = regmap_read(map, GCLK_EN, &value);
+	if (ret)
+		return ret;
+	/* Complete the internal-gate read before updating those gates. */
+	mb();
+	ret = regmap_write(map, GCLK_EN, 0x3ff);
+	if (ret)
+		return ret;
+	/* Publish the internal gates before their readback. */
+	mb();
+	ret = regmap_read(map, GCLK_EN, &value);
+	if (ret)
+		return ret;
+	/* Finish the gate check before enabling MDEC and mailbox accesses. */
+	mb();
+	return (value & 0x3ff) == 0x3ff ? 0 : -EIO;
 }
 
 int vdec_enable(struct aml_vdec_hw *hw)
@@ -1047,16 +929,12 @@ int vdec_enable(struct aml_vdec_hw *hw)
 	int ret;
 
 	if (hw->has_dbus_ctrl) {
-		unsigned int step;
-
-		ret = t7_probe_begin(hw);
+		ret = t7_bus_on(hw);
 		if (ret)
 			goto power_off;
-		for (step = 2; step <= 11; step++) {
-			ret = step == 5 ? t7_probe_domain_on(hw) : t7_register_access(hw, step);
-			if (ret)
-				goto power_off;
-		}
+		ret = t7_enable_dos(hw);
+		if (ret)
+			goto power_off;
 		ret = regmap_update_bits(hw->map[DOS_BUS], MDEC_PIC_DC_CTRL, BIT(31), 0);
 		if (ret)
 			goto power_off;
