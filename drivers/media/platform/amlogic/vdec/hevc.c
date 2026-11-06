@@ -1116,8 +1116,19 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 	int i, ret, col_ref;
 
 	ret = h265_validate_params(p);
-	if (ret)
+	if (ret) {
+		dev_err(hw->dev,
+			"hevc: invalid RPM (%d): %ux%u ctu=%u+%u poc=%u/%u type=%u nal=%u tid=%u depth=%#x chroma=%u refs=%u/%u dpb=%u reorder=%u merge=%u tiles=%u/%u\n",
+			ret, p[P_PIC_WIDTH], p[P_PIC_HEIGHT], p[P_LOG2_MIN_CB_SIZE_MINUS3],
+			p[P_LOG2_DIFF_MAX_MIN_CB_SIZE], p[P_POC_LSB],
+			p[P_LOG2_MAX_POC_LSB_MINUS4], p[P_SLICE_TYPE], p[P_NAL_UNIT_TYPE],
+			p[P_TEMPORAL_ID], p[P_BIT_DEPTH], p[P_CHROMA_FORMAT_IDC],
+			p[P_NUM_REF_IDX_L0_ACTIVE], p[P_NUM_REF_IDX_L1_ACTIVE],
+			p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0], p[P_SPS_NUM_REORDER_PICS_0],
+			p[P_FIVE_MINUS_MAX_NUM_MERGE_CAND], p[P_NUM_TILE_COLUMNS_MINUS1],
+			p[P_NUM_TILE_ROWS_MINUS1]);
 		return ret;
+	}
 	h->temporal_id = p[P_TEMPORAL_ID];
 	h->nal_type = p[P_NAL_UNIT_TYPE];
 	h->misc_flag0 = p[P_MISC_FLAG0];
@@ -1249,8 +1260,12 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 	}
 
 	ret = h265_set_ref_lists(h);
-	if (ret)
+	if (ret) {
+		dev_err(hw->dev, "hevc: invalid reference lists: poc=%d type=%d refs=%u/%u mod=%#x RPS=%*ph\n",
+			h->curr_poc, h->slice_type, p[P_NUM_REF_IDX_L0_ACTIVE],
+			p[P_NUM_REF_IDX_L1_ACTIVE], p[P_MODIFICATION_FLAG], 32, &p[P_CUR_RPS]);
 		return ret;
+	}
 	col_ref = p[P_COLLOCATED_REF_IDX];
 	h->ldc = false;
 	if (h->slice_type != H265_I_SLICE) {
