@@ -1137,7 +1137,7 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		}
 		if (ret < 0) {
 			dev_err(hw->dev, "hevc: slice setup failed (%d)\n", ret);
-			h265_finish(h, -EIO);
+			h265_finish(h, ret == -EBADMSG ? ret : -EIO);
 			return IRQ_HANDLED;
 		}
 		if (ret > 0) {

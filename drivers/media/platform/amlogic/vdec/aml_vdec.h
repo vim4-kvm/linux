@@ -23,6 +23,7 @@ struct aml_vdec_frame {
 struct aml_vdec_decode_result {
 	bool format_changed;
 	bool picture;
+	bool recoverable_error;
 	unsigned int slot;
 	u32 flags;
 };
