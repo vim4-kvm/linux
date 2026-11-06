@@ -1203,13 +1203,22 @@ int h265_hw_run(struct aml_hevc_ctx *h, const void *data, size_t size)
 static int hevc_job_acquire(struct aml_vdec_ctx *ctx)
 {
 	struct aml_hevc_ctx *h = ctx->codec_priv;
-	int ret;
+	int ret, stop_ret;
 
 	h->hw->hevc.job = ctx->job;
 	ret = aml_hevc_prepare_hw(h->hw);
-	if (ret)
-		return ret;
-	return aml_hevc_enable_irq(h->hw, h265_irq_thread, h);
+	if (!ret)
+		ret = aml_hevc_enable_irq(h->hw, h265_irq_thread, h);
+	if (!ret)
+		return 0;
+	stop_ret = aml_vdec_job_stop(ctx);
+	if (stop_ret)
+		return stop_ret;
+	if (h->dpb.cur >= 0) {
+		h->dpb.pic[h->dpb.cur].valid = false;
+		h->dpb.pic[h->dpb.cur].referenced = false;
+	}
+	return ret;
 }
 
 static int hevc_job_stop(struct aml_vdec_ctx *ctx)
