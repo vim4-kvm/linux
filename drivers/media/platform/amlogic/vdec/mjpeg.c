@@ -268,9 +268,9 @@ static void mjpeg_init_scaler(struct aml_vdec_hw *hw)
 static void mjpeg_signal_done(struct aml_vdec_ctx *ctx, int result)
 {
 	/* The worker stops DMA before returning either buffer to userspace. */
-	ctx->decode_result = result;
-	ctx->int_cond = 1;
-	wake_up_interruptible(&ctx->queue);
+	ctx->job->decode_result = result;
+	ctx->job->int_cond = 1;
+	wake_up_interruptible(&ctx->job->queue);
 }
 
 static irqreturn_t mjpeg_isr(int irq, void *priv)
@@ -293,7 +293,7 @@ static irqreturn_t mjpeg_threaded_isr(int irq, void *priv)
 	if (!m)
 		return IRQ_HANDLED;
 	ctx = m->v4l2_ctx;
-	if (ctx->int_cond)
+	if (ctx->job->int_cond)
 		return IRQ_HANDLED;
 
 	if (read_dos_reg(hw, AV_SCRATCH_D)) {
@@ -417,12 +417,8 @@ void aml_mjpeg_exit(void *priv)
 	if (hw->faulted)
 		return;
 
-	if (ctx->dos_clk_en && aml_stop_vdec_hw(hw)) {
-		aml_vdec_fault(ctx);
+	if (aml_vdec_job_stop(ctx))
 		return;
-	}
-	ctx->dos_clk_en = false;
-	aml_mjpeg_finish(ctx);
 	if (m->stage_vaddr)
 		dma_free_coherent(hw->dev, m->stage_size,
 				  m->stage_vaddr, m->stage_paddr);
@@ -431,7 +427,7 @@ void aml_mjpeg_exit(void *priv)
 	ctx->codec_priv = NULL;
 }
 
-int aml_mjpeg_dec_run(void *priv)
+static int aml_mjpeg_dec_run(void *priv)
 {
 	struct aml_vdec_ctx *ctx = priv;
 	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
@@ -461,14 +457,14 @@ int aml_mjpeg_dec_run(void *priv)
 	dev_dbg(hw->dev, "mjpeg run %lu bytes spec %06x\n",
 		vb2_get_plane_payload(&src->vb2_buf, 0), spec);
 
-	ctx->int_cond = 0;
-	ctx->decode_result = -EIO;
+	ctx->job->int_cond = 0;
+	ctx->job->decode_result = -EIO;
 	regmap_update_bits(hw->map[DOS_BUS], VLD_MEM_VIFIFO_CONTROL, 0x6, 0x6);
 	aml_start_vdec_hw(hw);
 
-	ret = wait_event_interruptible_timeout(ctx->queue, ctx->int_cond,
+	ret = wait_event_interruptible_timeout(ctx->job->queue, ctx->job->int_cond,
 					       msecs_to_jiffies(MJPEG_TIMEOUT_MS));
-	ctx->int_cond = 0;
+	ctx->job->int_cond = 0;
 	if (!ret) {
 		dev_err(hw->dev,
 			"mjpeg timeout: status %x from %x pc %x lvl %x rp %x wp %x bitcnt %x\n",
@@ -485,10 +481,10 @@ int aml_mjpeg_dec_run(void *priv)
 
 	if (ret < 0)
 		return ret;
-	if (!ctx->decode_result)
+	if (!ctx->job->decode_result)
 		vb2_set_plane_payload(&dst->vb2_buf, 0,
 				      ctx->pix_fmt[AML_FMT_DST].plane_fmt[0].sizeimage);
-	return ctx->decode_result;
+	return ctx->job->decode_result;
 }
 
 static int mjpeg_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
@@ -535,6 +531,7 @@ static const u32 jpeg_formats[] = { V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_YUV420 };
 const struct aml_vdec_node_desc aml_vdec_jpeg_node = {
 	.interface = &aml_vdec_stateful_interface,
 	.stateful_ops = &aml_mjpeg_stateful_ops,
+	.job_ops = &aml_vdec1_job_ops,
 	.formats = jpeg_formats,
 	.num_formats = ARRAY_SIZE(jpeg_formats),
 	.default_output = V4L2_PIX_FMT_MJPEG,
