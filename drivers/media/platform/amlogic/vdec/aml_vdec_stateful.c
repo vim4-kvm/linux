@@ -28,12 +28,33 @@ static void stateful_output(struct aml_vdec_ctx *ctx, const struct aml_vdec_fram
 	v4l2_m2m_buf_done(vb, state);
 }
 
+static int stateful_next_output(struct aml_vdec_ctx *ctx, bool flush,
+				struct aml_vdec_frame *frame, enum vb2_buffer_state state)
+{
+	int ret;
+
+	for (;;) {
+		memset(frame, 0, sizeof(*frame));
+		ret = ctx->node->stateful_ops->get_frame(ctx, flush, frame);
+		if (ret <= 0 || frame->disposition == AML_VDEC_FRAME_OUTPUT)
+			return ret;
+		/* STREAMOFF must return retained buffers, including discarded pictures. */
+		if (state == VB2_BUF_STATE_ERROR) {
+			stateful_output(ctx, frame, state, false);
+			continue;
+		}
+		frame->buffer->flags &= ~(V4L2_BUF_FLAG_LAST | V4L2_BUF_FLAG_ERROR |
+			V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME | V4L2_BUF_FLAG_BFRAME);
+		v4l2_m2m_buf_queue(ctx->m2m_ctx, frame->buffer);
+	}
+}
+
 static bool stateful_flush(struct aml_vdec_ctx *ctx, enum vb2_buffer_state state, bool last)
 {
 	struct aml_vdec_frame frame;
 	bool emitted = false;
 
-	while (ctx->node->stateful_ops->get_frame(ctx, true, &frame) > 0) {
+	while (stateful_next_output(ctx, true, &frame, state) > 0) {
 		stateful_output(ctx, &frame, state, last && frame.final);
 		emitted = true;
 	}
@@ -197,7 +218,7 @@ static void stateful_buffered_device_run(struct aml_vdec_ctx *ctx)
 	v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
 	src->sequence = ctx->sequence_out++;
 	if (drain) {
-		if (ctx->node->stateful_ops->get_frame(ctx, true, &frame) > 0) {
+		if (stateful_next_output(ctx, true, &frame, VB2_BUF_STATE_DONE) > 0) {
 			stateful_eos(ctx);
 			stateful_output(ctx, &frame, VB2_BUF_STATE_DONE, frame.final);
 			stateful_flush(ctx, VB2_BUF_STATE_DONE, true);
@@ -206,7 +227,7 @@ static void stateful_buffered_device_run(struct aml_vdec_ctx *ctx)
 			stateful_end_capture(ctx, true);
 		}
 	} else {
-		while (ctx->node->stateful_ops->get_frame(ctx, false, &frame) > 0)
+		while (stateful_next_output(ctx, false, &frame, VB2_BUF_STATE_DONE) > 0)
 			stateful_output(ctx, &frame, VB2_BUF_STATE_DONE, false);
 	}
 	/* Publish drain events before either queue can report its final buffer. */
