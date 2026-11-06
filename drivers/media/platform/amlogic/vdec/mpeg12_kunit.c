@@ -43,7 +43,7 @@ static void unidirectional_b_references(struct kunit *test)
 	/* The opening B fields in sony-ct1/ct2 have only a backward anchor. */
 	KUNIT_ASSERT_EQ(test, mpeg12_reference_registers(refs, specs, count,
 							 &ref0, &ref1), 0);
-	KUNIT_EXPECT_EQ(test, ref0, ~0u);
+	KUNIT_EXPECT_EQ(test, ref0, specs[1]);
 	KUNIT_EXPECT_EQ(test, ref1, specs[1]);
 	refs[0] = 0;
 	refs[1] = U64_MAX;
@@ -53,8 +53,18 @@ static void unidirectional_b_references(struct kunit *test)
 							 &ref0, &ref1), 0);
 	KUNIT_EXPECT_EQ(test, ref0, specs[0]);
 	KUNIT_EXPECT_EQ(test, ref1, ~0u);
+	/* Two declared anchors must retain their distinct prediction directions. */
+	refs[0] = 1000;
+	refs[1] = 2000;
+	specs[0] = 0x030302;
+	specs[1] = 0x050504;
+	KUNIT_ASSERT_EQ(test, mpeg12_reference_registers(refs, specs, count,
+							 &ref0, &ref1), 0);
+	KUNIT_EXPECT_EQ(test, ref0, specs[0]);
+	KUNIT_EXPECT_EQ(test, ref1, specs[1]);
 	/* A declared reference that cannot be resolved must still fail. */
 	refs[1] = 1000;
+	specs[1] = ~0u;
 	KUNIT_EXPECT_EQ(test, mpeg12_reference_registers(refs, specs, count,
 							 &ref0, &ref1), -EINVAL);
 	refs[0] = U64_MAX;
@@ -111,13 +121,13 @@ static void sony_zero_timestamp_anchor(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, refs[1], 0);
 	KUNIT_ASSERT_EQ(test, mpeg12_reference_registers(refs, specs, count,
 							 &ref0, &ref1), 0);
-	KUNIT_EXPECT_EQ(test, ref0, ~0u);
+	KUNIT_EXPECT_EQ(test, ref0, specs[1]);
 	KUNIT_EXPECT_EQ(test, ref1, specs[1]);
 	second.picture_structure = V4L2_MPEG2_PIC_FRAME;
 	count = mpeg12_reference_timestamps(&second, NULL, false, refs);
 	KUNIT_ASSERT_EQ(test, mpeg12_reference_registers(refs, specs, count,
 							 &ref0, &ref1), 0);
-	KUNIT_EXPECT_EQ(test, ref0, ~0u);
+	KUNIT_EXPECT_EQ(test, ref0, specs[1]);
 	KUNIT_EXPECT_EQ(test, ref1, specs[1]);
 	/* Reusing the anchor for a later picture must invalidate lookup of zero. */
 	output->vb2_buf.timestamp = 3000;
