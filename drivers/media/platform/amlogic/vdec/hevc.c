@@ -36,8 +36,6 @@
 
 /* T7 workspace geometry, including its 8K deblock line offsets. */
 #define H265_IPP_SIZE		0x8000
-#define H265_SAO_ABV_BUF_SIZE	0x30000
-#define H265_SAO_VB_BUF_SIZE	0x30000
 #define H265_SHORT_TERM_RPS_SIZE 0x0800
 #define H265_VPS_SIZE		0x0800
 #define H265_SPS_SIZE		0x0800
@@ -103,7 +101,7 @@ static void h265_free_pics(struct aml_hevc_ctx *h)
 	int i;
 
 	for (i = 0; i < H265_SLOTS; i++) {
-		struct h265_pic *pic = &h->pic[i];
+		struct h265_buffer *pic = &h->buffers[i];
 
 		if (pic->body_v)
 			dma_free_coherent(dev, h->body_size, pic->body_v, pic->body_p);
@@ -112,6 +110,8 @@ static void h265_free_pics(struct aml_hevc_ctx *h)
 		if (pic->mv_v)
 			dma_free_coherent(dev, h->mv_size, pic->mv_v, pic->mv_p);
 		memset(pic, 0, sizeof(*pic));
+		memset(&h->dpb.pic[i], 0, sizeof(h->dpb.pic[i]));
+		h->capture[i] = NULL;
 	}
 	h->body_size = 0;
 	h->hdr_size = 0;
@@ -230,20 +230,19 @@ static size_t h265_hdr_alloc_size(u32 w, u32 h)
 	return 0x10000;
 }
 
-VISIBLE_IF_KUNIT size_t h265_mv_buf_size(u32 w, u32 h)
+size_t h265_mv_buf_size(u32 w, u32 h)
 {
 	/* A partial 64x64 CTU still occupies a complete 0x200-byte MV unit. */
 	u32 xn = DIV_ROUND_UP(w, 64), yn = DIV_ROUND_UP(h, 64);
 
 	return ALIGN(xn * yn * 0x200, SZ_64K);
 }
-EXPORT_SYMBOL_IF_KUNIT(h265_mv_buf_size);
 
 static int h265_alloc_pics(struct aml_hevc_ctx *h)
 {
 	struct device *dev = h->hw->dev;
-	u32 w = h->pic_w, ht = h->pic_h;
-	size_t body = ALIGN(h265_comp_body_size(w, ht, h->ten_bit), PAGE_SIZE);
+	u32 w = h->dpb.pic_w, ht = h->dpb.pic_h;
+	size_t body = ALIGN(h265_comp_body_size(w, ht, h->dpb.ten_bit), PAGE_SIZE);
 	size_t mv = h265_mv_buf_size(w, ht);
 	size_t hdr = h265_hdr_alloc_size(w, ht);
 	int i;
@@ -251,14 +250,14 @@ static int h265_alloc_pics(struct aml_hevc_ctx *h)
 	if (body / PAGE_SIZE > H265_MMU_MAP_SIZE / sizeof(u32))
 		return -EOPNOTSUPP;
 	if (h->alloc_w == w && h->alloc_h == ht &&
-	    h->alloc_ten_bit == h->ten_bit && h->alloc_nslots == h->nslots)
+	    h->alloc_ten_bit == h->dpb.ten_bit && h->alloc_nslots == h->dpb.nslots)
 		return 0;
 
 	h265_free_pics(h);
 	/* Reallocation discards all references preceding the next random access. */
-	h->poc_random_access = H265_MAX_INT;
-	for (i = 0; i < h->nslots; i++) {
-		struct h265_pic *pic = &h->pic[i];
+	h->dpb.poc_random_access = H265_MAX_INT;
+	for (i = 0; i < h->dpb.nslots; i++) {
+		struct h265_buffer *pic = &h->buffers[i];
 
 		pic->body_v = dma_alloc_coherent(dev, body, &pic->body_p, GFP_KERNEL);
 		pic->hdr_v = dma_alloc_coherent(dev, hdr, &pic->hdr_p, GFP_KERNEL);
@@ -271,18 +270,18 @@ static int h265_alloc_pics(struct aml_hevc_ctx *h)
 			return -ENOMEM;
 		}
 		memset(pic->mv_v, 0, mv);
-		pic->poc = H265_INVALID_POC;
+		h->dpb.pic[i].poc = H265_INVALID_POC;
 	}
 	h->body_size = body;
 	h->hdr_size = hdr;
 	h->mv_size = mv;
 	h->alloc_w = w;
 	h->alloc_h = ht;
-	h->alloc_ten_bit = h->ten_bit;
-	h->alloc_nslots = h->nslots;
+	h->alloc_ten_bit = h->dpb.ten_bit;
+	h->alloc_nslots = h->dpb.nslots;
 
 	dev_dbg(dev, "hevc: %d pictures %ux%u, body %zu, mv %zu\n",
-		h->nslots, w, ht, body, mv);
+		h->dpb.nslots, w, ht, body, mv);
 	return 0;
 }
 
@@ -296,7 +295,7 @@ static void h265_config_pic_list(struct aml_hevc_ctx *h)
 	wr(h->hw, HEVCD_MPP_ANC2AXI_TBL_CONF_ADDR, BIT(1) | BIT(2));
 	for (i = 0; i < H265_SLOTS; i++)
 		wr(h->hw, HEVCD_MPP_ANC2AXI_TBL_DATA,
-		   i < h->nslots ? h->pic[i].hdr_p >> 5 : 0);
+		   i < h->dpb.nslots ? h->buffers[i].hdr_p >> 5 : 0);
 	wr(h->hw, HEVCD_MPP_ANC2AXI_TBL_CONF_ADDR, BIT(0));
 	wr(h->hw, HEVCD_MPP_ANC_CANVAS_ACCCONFIG_ADDR, BIT(0));
 	for (i = 0; i < 32; i++)
@@ -469,270 +468,13 @@ static void h265_enable_input(struct aml_hevc_ctx *h)
 /* picture management                                               */
 /* ---------------------------------------------------------------- */
 
-static int h265_pic_by_poc(struct aml_hevc_ctx *h, int poc, bool ref_only)
-{
-	int i, best = -1;
-
-	if (poc == (int)H265_INVALID_POC)
-		return -1;
-	for (i = 0; i < H265_SLOTS; i++) {
-		struct h265_pic *pic = &h->pic[i];
-
-		if (!pic->valid || pic->poc != poc || i == h->cur)
-			continue;
-		if (ref_only && (!pic->referenced || pic->width != h->pic_w ||
-				 pic->height != h->pic_h))
-			continue;
-		if (best < 0 || pic->decode_idx > h->pic[best].decode_idx)
-			best = i;
-	}
-	return best;
-}
-
-static int h265_long_term_poc(struct aml_hevc_ctx *h, int poc)
-{
-	u32 mask = BIT(h->p[P_LOG2_MAX_POC_LSB_MINUS4] + 4) - 1;
-	int i, found = H265_INVALID_POC;
-
-	/* Long-term RPM deltas can wrap at the stream's POC LSB width. */
-	for (i = 0; i < H265_SLOTS; i++) {
-		struct h265_pic *pic = &h->pic[i];
-
-		/* cur can still name the preceding picture before slot allocation. */
-		if (pic->poc == h->curr_poc || !pic->valid || !pic->referenced ||
-		    pic->width != h->pic_w || pic->height != h->pic_h ||
-		    ((u32)pic->poc & mask) != ((u32)poc & mask))
-			continue;
-		if (found != (int)H265_INVALID_POC && found != pic->poc)
-			return H265_INVALID_POC;
-		found = pic->poc;
-	}
-	return found;
-}
-
-/* Decode a CUR_RPS entry to a POC; returns false at the end marker. */
-static bool h265_rps_poc(struct aml_hevc_ctx *h, int i, int *poc, bool *used, bool *lt)
-{
-	u16 e = h->p[P_CUR_RPS + i];
-	int delt;
-
-	if (e == RPS_END)
-		return false;
-	delt = e & ((1 << (RPS_USED_BIT - 1)) - 1);
-	if (e & (1 << (RPS_USED_BIT - 1)))
-		*poc = h->curr_poc - ((1 << (RPS_USED_BIT - 1)) - delt);
-	else
-		*poc = h->curr_poc + delt;
-	*used = (e >> RPS_USED_BIT) & 1;
-	*lt = (e >> RPS_LT_BIT) & 1;
-	if (*lt)
-		*poc = h265_long_term_poc(h, *poc);
-	return true;
-}
-
-/* apply_ref_pic_set(): everything the current RPS does not name stops being
- * a reference.
- */
-VISIBLE_IF_KUNIT void h265_apply_rps(struct aml_hevc_ctx *h)
-{
-	bool reset = h->nal_type == H265_NAL_IDR_W_RADL ||
-		     h->nal_type == H265_NAL_IDR_N_LP ||
-		     (h->nal_type >= H265_NAL_BLA_W_LP && h->nal_type <= H265_NAL_BLA_N_LP);
-	int pocs[H265_MAX_REF], count = 0;
-	bool long_terms[H265_MAX_REF];
-	int i, j;
-
-	/* Resolve against the complete old DPB before changing reference ownership. */
-	if (!reset) {
-		for (count = 0; count < H265_MAX_REF; count++) {
-			bool used;
-
-			if (!h265_rps_poc(h, count, &pocs[count], &used, &long_terms[count]))
-				break;
-		}
-	}
-
-	for (i = 0; i < H265_SLOTS; i++) {
-		struct h265_pic *pic = &h->pic[i];
-		bool found = false;
-
-		pic->long_term = false;
-		if (reset) {
-			pic->referenced = false;
-			continue;
-		}
-		if (!pic->valid || !pic->referenced || pic->poc == h->curr_poc)
-			continue;
-		for (j = 0; j < count; j++) {
-			if (pocs[j] == pic->poc) {
-				pic->long_term = long_terms[j];
-				found = true;
-				break;
-			}
-		}
-		if (!found)
-			pic->referenced = false;
-	}
-}
-EXPORT_SYMBOL_IF_KUNIT(h265_apply_rps);
-
-/*
- * Entry @c of a reference list built from the short-term pictures in @first
- * and @second order, followed by the long-term ones.
- */
-static int h265_ref_entry(int c, const int *first, int n_first,
-			  const int *second, int n_second, const int *lt)
-{
-	if (c >= n_first + n_second)
-		return lt[c - n_first - n_second];
-	if (c >= n_first)
-		return second[c - n_first];
-	return first[c];
-}
-
-/* set_ref_pic_list() */
-VISIBLE_IF_KUNIT int h265_set_ref_lists(struct aml_hevc_ctx *h)
-{
-	int st0[16], st1[16], lt[16];
-	int n_neg = 0, n_pos = 0, n_lt = 0, total, i, r;
-	int l0 = h->slice_type == H265_I_SLICE ? 0 : h->p[P_NUM_REF_IDX_L0_ACTIVE];
-	int l1 = h->slice_type == H265_B_SLICE ? h->p[P_NUM_REF_IDX_L1_ACTIVE] : 0;
-	u16 mod = h->p[P_MODIFICATION_FLAG];
-
-	memset(h->ref_poc_l0, 0, sizeof(h->ref_poc_l0));
-	memset(h->ref_poc_l1, 0, sizeof(h->ref_poc_l1));
-
-	for (i = 0; i < 16; i++) {
-		u16 e = h->p[P_CUR_RPS + i];
-		int poc;
-		bool used, is_lt;
-
-		if (!h265_rps_poc(h, i, &poc, &used, &is_lt))
-			break;
-		if (!used)
-			continue;
-		if (is_lt)
-			lt[n_lt++] = poc;
-		else if (e & (1 << (RPS_USED_BIT - 1)))
-			st0[n_neg++] = poc;
-		else
-			st1[n_pos++] = poc;
-	}
-	total = n_neg + n_pos + n_lt;
-	if (!total && (l0 || l1))
-		return -EINVAL;
-
-	if (total > 0) {
-		for (r = 0; r < l0; r++) {
-			int c = (mod & 1) ? h->p[P_MODIFICATION_LIST + r] : r % total;
-
-			if (c >= total)
-				return -EINVAL;
-			h->ref_poc_l0[r] = h265_ref_entry(c, st0, n_neg, st1, n_pos, lt);
-			if (h265_pic_by_poc(h, h->ref_poc_l0[r], true) < 0)
-				return -EINVAL;
-		}
-		if (h->p[P_SLICE_TYPE] == H265_B_SLICE) {
-			for (r = 0; r < l1; r++) {
-				int c;
-
-				if (mod & 2)
-					c = h->p[P_MODIFICATION_LIST + ((mod & 1) ? l0 : 0) + r];
-				else
-					c = r % total;
-				if (c >= total)
-					return -EINVAL;
-				h->ref_poc_l1[r] = h265_ref_entry(c, st1, n_pos, st0, n_neg, lt);
-				if (h265_pic_by_poc(h, h->ref_poc_l1[r], true) < 0)
-					return -EINVAL;
-			}
-		}
-	}
-	h->ref_num_l0 = l0;
-	h->ref_num_l1 = l1;
-	return 0;
-}
-EXPORT_SYMBOL_IF_KUNIT(h265_set_ref_lists);
-
-VISIBLE_IF_KUNIT void h265_update_tiles(struct aml_hevc_ctx *h, int w_cu, int h_cu,
-					int sao_mem_unit)
-{
-	int sao_vb_size = (sao_mem_unit + (2 << 4)) * h_cu;
-	int sao_abv_size = sao_mem_unit * w_cu;
-	int i, j, x, y;
-	bool uniform;
-
-	h->tile_enabled = h->p[P_TILES_ENABLED_FLAG] & 1;
-	if (!h->tile_enabled) {
-		h->num_tile_col = 1;
-		h->num_tile_row = 1;
-		h->tile[0][0] = (struct h265_tile){ 0, 0, w_cu, h_cu,
-						    h->sao_vb, h->sao_abv };
-		return;
-	}
-	h->num_tile_col = h->p[P_NUM_TILE_COLUMNS_MINUS1] + 1;
-	h->num_tile_row = h->p[P_NUM_TILE_ROWS_MINUS1] + 1;
-	uniform = h->p[P_TILES_ENABLED_FLAG] & 2;
-
-	y = 0;
-	for (i = 0; i < h->num_tile_row; i++) {
-		x = 0;
-		for (j = 0; j < h->num_tile_col; j++) {
-			struct h265_tile *t = &h->tile[i][j];
-
-			if (j == h->num_tile_col - 1)
-				t->width = w_cu - x;
-			else
-				t->width = uniform ? (j + 1) * w_cu / h->num_tile_col -
-						     j * w_cu / h->num_tile_col :
-						     h->p[P_TILE_WIDTH + j];
-			if (i == h->num_tile_row - 1)
-				t->height = h_cu - y;
-			else
-				t->height = uniform ? (i + 1) * h_cu / h->num_tile_row -
-						      i * h_cu / h->num_tile_row :
-						      h->p[P_TILE_HEIGHT + i];
-			t->start_cu_x = x;
-			t->start_cu_y = y;
-			t->sao_vb = h->sao_vb + j * sao_vb_size;
-			t->sao_abv = h->sao_abv + i * sao_abv_size;
-			x += t->width;
-		}
-		y += h->tile[i][0].height;
-	}
-}
-EXPORT_SYMBOL_IF_KUNIT(h265_update_tiles);
-
-static int h265_tile_index(struct aml_hevc_ctx *h, int cu_adr, int w_lcu)
-{
-	int cu_x, cu_y, tx = 0, ty = 0, i;
-
-	if (!w_lcu)
-		return -1;
-	cu_x = cu_adr % w_lcu;
-	cu_y = cu_adr / w_lcu;
-	for (i = 0; i < h->num_tile_col; i++) {
-		if (cu_x >= h->tile[0][i].start_cu_x)
-			tx = i;
-		else
-			break;
-	}
-	for (i = 0; i < h->num_tile_row; i++) {
-		if (cu_y >= h->tile[i][0].start_cu_y)
-			ty = i;
-		else
-			break;
-	}
-	return tx | (ty << 8);
-}
-
 /* ---------------------------------------------------------------- */
 /* per-slice hardware configuration                                 */
 /* ---------------------------------------------------------------- */
 
 static void h265_fill_mmu_map(struct aml_hevc_ctx *h)
 {
-	struct h265_pic *pic = &h->pic[h->cur];
+	struct h265_buffer *pic = &h->buffers[h->dpb.cur];
 	u32 *map = h->side_v + (h->mmu_map - h->side_p);
 	u32 pages = h->body_size / PAGE_SIZE, first = pic->body_p >> PAGE_SHIFT, i;
 
@@ -744,14 +486,14 @@ static void h265_fill_mmu_map(struct aml_hevc_ctx *h)
 static void h265_config_comp(struct aml_hevc_ctx *h)
 {
 	struct aml_vdec_hw *hw = h->hw;
-	u32 body = h265_comp_body_size(h->pic_w, h->pic_h, h->ten_bit);
+	u32 body = h265_comp_body_size(h->dpb.pic_w, h->dpb.pic_h, h->dpb.ten_bit);
 	u32 v;
 
 	wr(hw, HEVCD_MPP_DECOMP_CTL1, BIT(4));	/* paged memory */
 	wr(hw, HEVCD_MPP_DECOMP_CTL2, 0);
 	wr(hw, HEVC_CM_BODY_LENGTH, body);
 	wr(hw, HEVC_CM_HEADER_OFFSET, body);
-	wr(hw, HEVC_CM_HEADER_LENGTH, h265_comp_header_size(h->pic_w, h->pic_h));
+	wr(hw, HEVC_CM_HEADER_LENGTH, h265_comp_header_size(h->dpb.pic_w, h->dpb.pic_h));
 	wr(hw, HEVC_SAO_MMU_VH0_ADDR, h->mmu_vbh);
 	wr(hw, HEVC_SAO_MMU_VH1_ADDR, h->mmu_vbh + H265_MMU_VBH_SIZE / 2);
 	v = read_dos_reg(hw, HEVC_SAO_CTRL9) | BIT(0);
@@ -765,24 +507,24 @@ static void h265_config_mc_buffer(struct aml_hevc_ctx *h)
 	struct aml_vdec_hw *hw = h->hw;
 	int i;
 
-	if (h->slice_type == H265_I_SLICE)
+	if (h->dpb.slice_type == H265_I_SLICE)
 		return;
 	wr(hw, HEVCD_MPP_ANC_CANVAS_ACCCONFIG_ADDR, BIT(0));
-	for (i = 0; i < h->ref_num_l0; i++) {
-		int s = h265_pic_by_poc(h, h->ref_poc_l0[i], true);
+	for (i = 0; i < h->dpb.ref_num_l0; i++) {
+		int s = h265_pic_by_poc(&h->dpb, h->dpb.ref_poc_l0[i], true);
 
 		if (s < 0)
-			s = h->cur;
+			s = h->dpb.cur;
 		wr(hw, HEVCD_MPP_ANC_CANVAS_DATA_ADDR, (s << 16) | (s << 8) | s);
 	}
-	if (h->slice_type != H265_B_SLICE)
+	if (h->dpb.slice_type != H265_B_SLICE)
 		return;
 	wr(hw, HEVCD_MPP_ANC_CANVAS_ACCCONFIG_ADDR, (16 << 8) | BIT(0));
-	for (i = 0; i < h->ref_num_l1; i++) {
-		int s = h265_pic_by_poc(h, h->ref_poc_l1[i], true);
+	for (i = 0; i < h->dpb.ref_num_l1; i++) {
+		int s = h265_pic_by_poc(&h->dpb, h->dpb.ref_poc_l1[i], true);
 
 		if (s < 0)
-			s = h->cur;
+			s = h->dpb.cur;
 		wr(hw, HEVCD_MPP_ANC_CANVAS_DATA_ADDR, (s << 16) | (s << 8) | s);
 	}
 }
@@ -794,11 +536,11 @@ static void h265_config_mcrcc(struct aml_hevc_ctx *h)
 	u32 a, b;
 
 	wr(hw, HEVCD_MCRCC_CTL1, 0x2);		/* reset mcrcc */
-	if (h->slice_type == H265_I_SLICE) {
+	if (h->dpb.slice_type == H265_I_SLICE) {
 		wr(hw, HEVCD_MCRCC_CTL1, 0x0);
 		return;
 	}
-	if (h->slice_type == H265_B_SLICE) {
+	if (h->dpb.slice_type == H265_B_SLICE) {
 		wr(hw, HEVCD_MPP_ANC_CANVAS_ACCCONFIG_ADDR, 0);
 		a = read_dos_reg(hw, HEVCD_MPP_ANC_CANVAS_DATA_ADDR) & 0xffff;
 		a |= a << 16;
@@ -827,29 +569,29 @@ static void h265_config_mcrcc(struct aml_hevc_ctx *h)
 static void h265_config_mpred(struct aml_hevc_ctx *h)
 {
 	struct aml_vdec_hw *hw = h->hw;
-	struct h265_pic *cur = &h->pic[h->cur], *col = &h->pic[h->col];
-	int unit = h->lcu_size_log2 == 6 ? 0x200 : h->lcu_size_log2 == 5 ? 0x80 : 0x20;
+	struct h265_buffer *cur = &h->buffers[h->dpb.cur], *col = &h->buffers[h->dpb.col];
+	int unit = h->dpb.lcu_size_log2 == 6 ? 0x200 : h->dpb.lcu_size_log2 == 5 ? 0x80 : 0x20;
 	dma_addr_t rd_start = col->mv_p;
-	dma_addr_t rd_ptr = rd_start + h->slice_addr * unit;
-	dma_addr_t wr_ptr = cur->mv_p + h->slice_addr * unit;
+	dma_addr_t rd_ptr = rd_start + h->dpb.slice_addr * unit;
+	dma_addr_t wr_ptr = cur->mv_p + h->dpb.slice_addr * unit;
 	bool above_en = true, mv_wr_en = true;
-	bool mv_rd_en = h->slice_type != H265_I_SLICE;
+	bool mv_rd_en = h->dpb.slice_type != H265_I_SLICE;
 	u32 v, lt = 0, en0 = 0, en1 = 0;
 	int i;
 
 	wr(hw, HEVC_MPRED_MV_WR_START_ADDR, cur->mv_p);
 	wr(hw, HEVC_MPRED_MV_RD_START_ADDR, rd_start);
-	v = (h->lcu_x_num - h->tile_width_lcu) * unit;
+	v = (h->dpb.lcu_x_num - h->dpb.tile_width_lcu) * unit;
 	wr(hw, HEVC_MPRED_MV_WR_ROW_JUMP, v);
 	wr(hw, HEVC_MPRED_MV_RD_ROW_JUMP, v);
 
-	v = (h->slice_type & 3) |
-	    (h->new_pic << 2) |
-	    (h->new_tile << 3) |
-	    (h->is_next_slice_segment << 4) |
-	    (h->tmvp << 5) |
-	    (h->ldc << 6) |
-	    (h->col_from_l0 << 7) |
+	v = (h->dpb.slice_type & 3) |
+	    (h->dpb.new_pic << 2) |
+	    (h->dpb.new_tile << 3) |
+	    (h->dpb.is_next_slice_segment << 4) |
+	    (h->dpb.tmvp << 5) |
+	    (h->dpb.ldc << 6) |
+	    (h->dpb.col_from_l0 << 7) |
 	    (0 << 8) |			/* above_ptr_ctrl */
 	    (above_en << 9) |
 	    (mv_wr_en << 10) |
@@ -857,50 +599,50 @@ static void h265_config_mpred(struct aml_hevc_ctx *h)
 	    (0 << 12) |			/* col_isIntra */
 	    (1 << 13) |			/* buffer_linear */
 	    (0 << 14) | (0 << 15) |	/* LongTerm_Curr, LongTerm_Col: no effect seen */
-	    ((h->lcu_size_log2 & 0xf) << 16) |
+	    ((h->dpb.lcu_size_log2 & 0xf) << 16) |
 	    (3 << 20) |			/* cu_size_log2 */
-	    ((h->plevel & 7) << 24);
+	    ((h->dpb.plevel & 7) << 24);
 	wr(hw, HEVC_MPRED_CTRL0, v);
 
-	wr(hw, HEVC_MPRED_CTRL1, h->max_merge_cand | (2 << 4) | (3 << 8) |
+	wr(hw, HEVC_MPRED_CTRL1, h->dpb.max_merge_cand | (2 << 4) | (3 << 8) |
 				 (5 << 12) | (36 << 16));
-	wr(hw, HEVC_MPRED_PIC_SIZE, h->pic_w | (h->pic_h << 16));
-	wr(hw, HEVC_MPRED_PIC_SIZE_LCU, (h->lcu_x_num - 1) | ((h->lcu_y_num - 1) << 16));
-	wr(hw, HEVC_MPRED_TILE_START, h->tile_start_lcu_x | (h->tile_start_lcu_y << 16));
-	wr(hw, HEVC_MPRED_TILE_SIZE_LCU, h->tile_width_lcu | (h->tile_height_lcu << 16));
-	wr(hw, HEVC_MPRED_REF_NUM, h->ref_num_l0 | (h->ref_num_l1 << 8));
+	wr(hw, HEVC_MPRED_PIC_SIZE, h->dpb.pic_w | (h->dpb.pic_h << 16));
+	wr(hw, HEVC_MPRED_PIC_SIZE_LCU, (h->dpb.lcu_x_num - 1) | ((h->dpb.lcu_y_num - 1) << 16));
+	wr(hw, HEVC_MPRED_TILE_START, h->dpb.tile_start_lcu_x | (h->dpb.tile_start_lcu_y << 16));
+	wr(hw, HEVC_MPRED_TILE_SIZE_LCU, h->dpb.tile_width_lcu | (h->dpb.tile_height_lcu << 16));
+	wr(hw, HEVC_MPRED_REF_NUM, h->dpb.ref_num_l0 | (h->dpb.ref_num_l1 << 8));
 
-	for (i = 0; i < h->ref_num_l0; i++) {
-		int s = h265_pic_by_poc(h, h->ref_poc_l0[i], true);
+	for (i = 0; i < h->dpb.ref_num_l0; i++) {
+		int s = h265_pic_by_poc(&h->dpb, h->dpb.ref_poc_l0[i], true);
 
-		if (s >= 0 && h->pic[s].long_term)
+		if (s >= 0 && h->dpb.pic[s].long_term)
 			lt |= BIT(i);
 		en0 |= BIT(i);
 	}
-	for (i = 0; i < h->ref_num_l1; i++) {
-		int s = h265_pic_by_poc(h, h->ref_poc_l1[i], true);
+	for (i = 0; i < h->dpb.ref_num_l1; i++) {
+		int s = h265_pic_by_poc(&h->dpb, h->dpb.ref_poc_l1[i], true);
 
-		if (s >= 0 && h->pic[s].long_term)
+		if (s >= 0 && h->dpb.pic[s].long_term)
 			lt |= BIT(i + 16);
 		en1 |= BIT(i);
 	}
 	wr(hw, HEVC_MPRED_LT_REF, lt);
 	wr(hw, HEVC_MPRED_REF_EN_L0, en0);
 	wr(hw, HEVC_MPRED_REF_EN_L1, en1);
-	wr(hw, HEVC_MPRED_CUR_POC, h->curr_poc);
-	wr(hw, HEVC_MPRED_COL_POC, h->col_poc);
+	wr(hw, HEVC_MPRED_CUR_POC, h->dpb.curr_poc);
+	wr(hw, HEVC_MPRED_COL_POC, h->dpb.col_poc);
 
 	/* L0/L1 pairs, in this order. */
 	for (i = 0; i < 16; i++) {
-		wr(hw, HEVC_MPRED_L0_REF00_POC + REG_ALIGN(i), h->ref_poc_l0[i]);
-		wr(hw, HEVC_MPRED_L1_REF00_POC + REG_ALIGN(i), h->ref_poc_l1[i]);
+		wr(hw, HEVC_MPRED_L0_REF00_POC + REG_ALIGN(i), h->dpb.ref_poc_l0[i]);
+		wr(hw, HEVC_MPRED_L1_REF00_POC + REG_ALIGN(i), h->dpb.ref_poc_l1[i]);
 	}
 
-	if (h->new_pic) {
+	if (h->dpb.new_pic) {
 		wr(hw, HEVC_MPRED_ABV_START_ADDR, h->mpred_above);
 		wr(hw, HEVC_MPRED_MV_WPTR, wr_ptr);
 		wr(hw, HEVC_MPRED_MV_RPTR, rd_start);
-	} else if (!h->is_next_slice_segment) {
+	} else if (!h->dpb.is_next_slice_segment) {
 		wr(hw, HEVC_MPRED_MV_RPTR, rd_ptr);
 	}
 	wr(hw, HEVC_MPRED_MV_RD_END_ADDR, rd_start + h->mv_size);
@@ -910,9 +652,9 @@ static void h265_config_mpred(struct aml_hevc_ctx *h)
 static void h265_config_sao(struct aml_hevc_ctx *h)
 {
 	struct aml_vdec_hw *hw = h->hw;
-	struct h265_pic *cur = &h->pic[h->cur];
-	u32 misc = h->misc_flag0;
-	u32 uv_size = h->lcu_total * h->lcu_size * h->lcu_size / 2;
+	struct h265_buffer *cur = &h->buffers[h->dpb.cur];
+	u32 misc = h->dpb.misc_flag0;
+	u32 uv_size = h->dpb.lcu_total * h->dpb.lcu_size * h->dpb.lcu_size / 2;
 	u32 uv_h = (uv_size + 0xffff) >> 16;
 	dma_addr_t dw_y = h->dw_target_y, dw_c = h->dw_target_c;
 	u32 v, v2;
@@ -920,18 +662,18 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 
 	v = read_dos_reg(hw, HEVC_SAO_CTRL0);
 	v &= ~0xf;
-	v |= h->lcu_size_log2;
+	v |= h->dpb.lcu_size_log2;
 	wr(hw, HEVC_SAO_CTRL0, v);
-	wr(hw, HEVC_SAO_PIC_SIZE, h->pic_w | (h->pic_h << 16));
-	wr(hw, HEVC_SAO_PIC_SIZE_LCU, (h->lcu_x_num - 1) | ((h->lcu_y_num - 1) << 16));
-	if (h->new_pic)
+	wr(hw, HEVC_SAO_PIC_SIZE, h->dpb.pic_w | (h->dpb.pic_h << 16));
+	wr(hw, HEVC_SAO_PIC_SIZE_LCU, (h->dpb.lcu_x_num - 1) | ((h->dpb.lcu_y_num - 1) << 16));
+	if (h->dpb.new_pic)
 		wr(hw, HEVC_SAO_Y_START_ADDR, U32_MAX);
 	/* T7 has a separate double-write downscale control. */
 	wr(hw, HEVC_SAO_CTRL26, 0);
 
 	v = read_dos_reg(hw, HEVC_SAO_CTRL5);
 	v &= ~(0xff << 16);		/* double write 1:1 */
-	if (h->ten_bit)
+	if (h->dpb.ten_bit)
 		v &= ~BIT(9);
 	else
 		v |= BIT(9);		/* 8 bit, memory saving */
@@ -946,19 +688,19 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 	wr(hw, HEVC_SAO_Y_WPTR, dw_y);
 	wr(hw, HEVC_SAO_C_WPTR, dw_c);
 
-	if (h->new_pic) {
+	if (h->dpb.new_pic) {
 		v = (0xff << 8);
-		if (h->pic_w >= 1280)
+		if (h->dpb.pic_w >= 1280)
 			v |= BIT(4);
 		wr(hw, HEVC_DBLK_CFGB, v);
-		wr(hw, HEVC_DBLK_CFG2, h->pic_w | (h->pic_h << 16));
+		wr(hw, HEVC_DBLK_CFG2, h->dpb.pic_w | (h->dpb.pic_h << 16));
 		v = 0;
 		if ((misc >> PCM_ENABLE_FLAG_BIT) & 1)
 			v = ((misc >> PCM_LOOP_FILTER_DISABLED_FLAG_BIT) & 1) << 3;
-		v |= ((h->p[P_PPS_CB_QP_OFFSET] & 0x1f) << 4) |
-		     ((h->p[P_PPS_CR_QP_OFFSET] & 0x1f) << 9);
-		v |= h->lcu_size == 64 ? 0 : h->lcu_size == 32 ? 1 : 2;
-		v |= h->pic_w <= 64 ? BIT(20) : 0;
+		v |= ((h->dpb.p[P_PPS_CB_QP_OFFSET] & 0x1f) << 4) |
+		     ((h->dpb.p[P_PPS_CR_QP_OFFSET] & 0x1f) << 9);
+		v |= h->dpb.lcu_size == 64 ? 0 : h->dpb.lcu_size == 32 ? 1 : 2;
+		v |= h->dpb.pic_w <= 64 ? BIT(20) : 0;
 		wr(hw, HEVC_DBLK_CFG1, v);
 		wr(hw, REG_ALIGN(0x3510), BIT(28));	/* sts1 chooses dblk_main */
 	}
@@ -973,7 +715,7 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 	v |= 2 << 14;			/* line align 64 */
 	/* The V4L path reapplies these DBLK controls for every slice. */
 	v2 = 0x57 << 8;
-	if (h->pic_w >= 1280)
+	if (h->dpb.pic_w >= 1280)
 		v2 |= BIT(4);
 	wr(hw, HEVC_DBLK_CFGB, v2);
 	wr(hw, HEVC_SAO_CTRL1, v);
@@ -989,7 +731,7 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 
 	v = 0;
 	v2 = read_dos_reg(hw, HEVC_SAO_CTRL0) & ~0x300;
-	if (h->tile_enabled) {
+	if (h->dpb.tile_enabled) {
 		v |= ((misc >> LOOP_FILTER_ACROSS_TILES_ENABLED_FLAG_BIT) & 1) << 0;
 		v2 |= ((misc >> LOOP_FILTER_ACROSS_TILES_ENABLED_FLAG_BIT) & 1) << 8;
 	}
@@ -998,14 +740,14 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 	    (misc & BIT(DEBLOCKING_FILTER_OVERRIDE_FLAG_BIT))) {
 		v |= slice_dbk_disabled << 2;
 		if (!slice_dbk_disabled) {
-			v |= (h->p[P_SLICE_BETA_OFFSET_DIV2] & 0xf) << 3;
-			v |= (h->p[P_SLICE_TC_OFFSET_DIV2] & 0xf) << 7;
+			v |= (h->dpb.p[P_SLICE_BETA_OFFSET_DIV2] & 0xf) << 3;
+			v |= (h->dpb.p[P_SLICE_TC_OFFSET_DIV2] & 0xf) << 7;
 		}
 	} else {
 		v |= ((misc >> PPS_DEBLOCKING_FILTER_DISABLED_FLAG_BIT) & 1) << 2;
 		if (!((misc >> PPS_DEBLOCKING_FILTER_DISABLED_FLAG_BIT) & 1)) {
-			v |= (h->p[P_PPS_BETA_OFFSET_DIV2] & 0xf) << 3;
-			v |= (h->p[P_PPS_TC_OFFSET_DIV2] & 0xf) << 7;
+			v |= (h->dpb.p[P_PPS_BETA_OFFSET_DIV2] & 0xf) << 3;
+			v |= (h->dpb.p[P_PPS_TC_OFFSET_DIV2] & 0xf) << 7;
 		}
 	}
 	if ((misc & BIT(PPS_LOOP_FILTER_ACROSS_SLICES_ENABLED_FLAG_BIT)) &&
@@ -1029,152 +771,16 @@ static void h265_read_rpm(struct aml_hevc_ctx *h)
 	dma_rmb();
 	for (i = 0; i < P_RPM_COUNT; i += 4)
 		for (j = 0; j < 4; j++)
-			h->p[i + j] = raw[i + 3 - j];
+			h->dpb.p[i + j] = raw[i + 3 - j];
 	for (i = 0; i < P_RPM_COUNT; i += 32)
-		dev_dbg(h->hw->dev, "hevc: rpm[%02x]=%*ph\n", i, 64, &h->p[i]);
+		dev_dbg(h->hw->dev, "hevc: rpm[%02x]=%*ph\n", i, 64, &h->dpb.p[i]);
 }
-
-VISIBLE_IF_KUNIT int h265_validate_params(const u16 *p)
-{
-	unsigned int log2_ctu, width_ctu, height_ctu, cols, rows, i, sum, sao_unit;
-
-	if (p[P_PIC_WIDTH] < H265_MIN_DIM || p[P_PIC_HEIGHT] < H265_MIN_DIM ||
-	    p[P_PIC_WIDTH] > H265_MAX_DIM || p[P_PIC_HEIGHT] > H265_MAX_HEIGHT)
-		return -EINVAL;
-	if (p[P_CONFORMANCE_WINDOW_FLAG] &&
-	    (2U * (p[P_CONF_WIN_LEFT_OFFSET] + p[P_CONF_WIN_RIGHT_OFFSET]) >= p[P_PIC_WIDTH] ||
-	     2U * (p[P_CONF_WIN_TOP_OFFSET] + p[P_CONF_WIN_BOTTOM_OFFSET]) >= p[P_PIC_HEIGHT]))
-		return -EINVAL;
-	/* An NV12 CAPTURE queue must not silently discard a Main10 stream's low bits. */
-	if (p[P_CHROMA_FORMAT_IDC] != 1 || p[P_BIT_DEPTH])
-		return -EOPNOTSUPP;
-	if (p[P_LOG2_MIN_CB_SIZE_MINUS3] > 3 || p[P_LOG2_DIFF_MAX_MIN_CB_SIZE] > 3)
-		return -EINVAL;
-	log2_ctu = p[P_LOG2_MIN_CB_SIZE_MINUS3] + 3 + p[P_LOG2_DIFF_MAX_MIN_CB_SIZE];
-	if (log2_ctu < 4 || log2_ctu > 6 || p[P_LOG2_MAX_POC_LSB_MINUS4] > 12)
-		return -EINVAL;
-	if (p[P_POC_LSB] >= BIT(p[P_LOG2_MAX_POC_LSB_MINUS4] + 4) ||
-	    !p[P_TEMPORAL_ID] || p[P_TEMPORAL_ID] > 7 || p[P_NAL_UNIT_TYPE] > 31 ||
-	    p[P_SLICE_TYPE] > H265_I_SLICE || p[P_NUM_REF_IDX_L0_ACTIVE] > H265_MAX_REF ||
-	    p[P_NUM_REF_IDX_L1_ACTIVE] > H265_MAX_REF ||
-	    p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0] >= H265_MAX_REF ||
-	    p[P_SPS_NUM_REORDER_PICS_0] > p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0] ||
-	    p[P_FIVE_MINUS_MAX_NUM_MERGE_CAND] > 4)
-		return -EINVAL;
-	width_ctu = DIV_ROUND_UP(p[P_PIC_WIDTH], 1U << log2_ctu);
-	height_ctu = DIV_ROUND_UP(p[P_PIC_HEIGHT], 1U << log2_ctu);
-	if (!p[P_FIRST_SLICE_SEGMENT_IN_PIC_FLAG] &&
-	    p[P_SLICE_SEGMENT_ADDRESS] >= width_ctu * height_ctu)
-		return -EINVAL;
-	if (!(p[P_TILES_ENABLED_FLAG] & 1))
-		return 0;
-	cols = p[P_NUM_TILE_COLUMNS_MINUS1] + 1;
-	rows = p[P_NUM_TILE_ROWS_MINUS1] + 1;
-	if (cols > H265_MAX_TILE_COLS || rows > H265_MAX_TILE_ROWS ||
-	    cols > width_ctu || rows > height_ctu)
-		return -EINVAL;
-	if (!(p[P_TILES_ENABLED_FLAG] & 2)) {
-		/* RPM has eight explicit row heights; the final row uses the remainder. */
-		if (rows > 9)
-			return -EOPNOTSUPP;
-		for (i = 0, sum = 0; i + 1 < cols; i++) {
-			if (!p[P_TILE_WIDTH + i])
-				return -EINVAL;
-			sum += p[P_TILE_WIDTH + i];
-		}
-		if (sum >= width_ctu)
-			return -EINVAL;
-		for (i = 0, sum = 0; i + 1 < rows; i++) {
-			if (!p[P_TILE_HEIGHT + i])
-				return -EINVAL;
-			sum += p[P_TILE_HEIGHT + i];
-		}
-		if (sum >= height_ctu)
-			return -EINVAL;
-	}
-	sao_unit = (log2_ctu == 4 ? 9 : log2_ctu == 5 ? 14 : 24) << 4;
-	if ((sao_unit + 32) * height_ctu * cols > H265_SAO_VB_BUF_SIZE ||
-	    sao_unit * width_ctu * rows > H265_SAO_ABV_BUF_SIZE)
-		return -EOPNOTSUPP;
-	return 0;
-}
-EXPORT_SYMBOL_IF_KUNIT(h265_validate_params);
-
-VISIBLE_IF_KUNIT void h265_update_poc(struct aml_hevc_ctx *h)
-{
-	u16 *p = h->p;
-
-	/* POC, 8.3.1 */
-	if (h->nal_type == H265_NAL_IDR_W_RADL || h->nal_type == H265_NAL_IDR_N_LP) {
-		h->curr_poc = 0;
-	} else {
-		int max_lsb = 1 << (p[P_LOG2_MAX_POC_LSB_MINUS4] + 4);
-		int prev_lsb = h->prev_tid0_poc & (max_lsb - 1);
-		int prev_msb = h->prev_tid0_poc - prev_lsb;
-		int lsb = p[P_POC_LSB];
-		int msb;
-
-		if (lsb < prev_lsb && prev_lsb - lsb >= max_lsb / 2)
-			msb = prev_msb + max_lsb;
-		else if (lsb > prev_lsb && lsb - prev_lsb > max_lsb / 2)
-			msb = prev_msb - max_lsb;
-		else
-			msb = prev_msb;
-		if (h->nal_type == H265_NAL_BLA_W_LP ||
-		    h->nal_type == H265_NAL_BLA_W_RADL ||
-		    h->nal_type == H265_NAL_BLA_N_LP ||
-		    (h->nal_type == H265_NAL_CRA && h->poc_random_access == H265_MAX_INT))
-			msb = 0;
-		h->curr_poc = msb + lsb;
-	}
-	/* prevTid0Pic excludes sub-layer non-reference, RADL and RASL pictures. */
-	if (h->temporal_id == 1 && h->nal_type != 0 && h->nal_type != 2 &&
-	    h->nal_type != 4 && (h->nal_type < 6 || h->nal_type > H265_NAL_RASL_R))
-		h->prev_tid0_poc = h->curr_poc;
-}
-EXPORT_SYMBOL_IF_KUNIT(h265_update_poc);
-
-/* Track coded-sequence boundaries and RASL pictures needing older references. */
-VISIBLE_IF_KUNIT bool h265_update_random_access(struct aml_hevc_ctx *h)
-{
-	bool idr = h->nal_type == H265_NAL_IDR_W_RADL ||
-		   h->nal_type == H265_NAL_IDR_N_LP;
-	bool bla = h->nal_type >= H265_NAL_BLA_W_LP && h->nal_type <= H265_NAL_BLA_N_LP;
-	bool first = h->poc_random_access == H265_MAX_INT;
-
-	if (!h->slice_segment_addr && (idr || bla || (first && h->nal_type == H265_NAL_CRA)))
-		h->epoch++;
-	if (first || idr) {
-		if (bla || h->nal_type == H265_NAL_CRA)
-			h->poc_random_access = h->curr_poc;
-		else
-			h->poc_random_access = -H265_MAX_INT;
-	} else if (bla) {
-		h->poc_random_access = h->curr_poc;
-	} else if (h->curr_poc < h->poc_random_access &&
-		   (h->nal_type == H265_NAL_RASL_N || h->nal_type == H265_NAL_RASL_R)) {
-		return true;
-	}
-	return false;
-}
-EXPORT_SYMBOL_IF_KUNIT(h265_update_random_access);
-
-VISIBLE_IF_KUNIT int h265_free_slot(struct aml_hevc_ctx *h)
-{
-	int i;
-
-	for (i = 0; i < h->nslots; i++)
-		if (!h->pic[i].output && (!h->pic[i].valid || !h->pic[i].referenced))
-			return i;
-	return -ENOBUFS;
-}
-EXPORT_SYMBOL_IF_KUNIT(h265_free_slot);
 
 /* Returns 0 to decode, 1 to skip, 2 to configure after stop, or a negative error. */
 static int h265_slice_header(struct aml_hevc_ctx *h)
 {
 	struct aml_vdec_hw *hw = h->hw;
-	u16 *p = h->p;
+	u16 *p = h->dpb.p;
 	int i, ret, col_ref;
 
 	ret = h265_validate_params(p);
@@ -1196,22 +802,22 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 			p[P_CONF_WIN_TOP_OFFSET], p[P_CONF_WIN_BOTTOM_OFFSET]);
 		return ret;
 	}
-	h->temporal_id = p[P_TEMPORAL_ID];
-	h->nal_type = p[P_NAL_UNIT_TYPE];
-	h->misc_flag0 = p[P_MISC_FLAG0];
+	h->dpb.temporal_id = p[P_TEMPORAL_ID];
+	h->dpb.nal_type = p[P_NAL_UNIT_TYPE];
+	h->dpb.misc_flag0 = p[P_MISC_FLAG0];
 
 	if (!p[P_FIRST_SLICE_SEGMENT_IN_PIC_FLAG]) {
-		h->slice_segment_addr = p[P_SLICE_SEGMENT_ADDRESS];
+		h->dpb.slice_segment_addr = p[P_SLICE_SEGMENT_ADDRESS];
 		if (!p[P_DEPENDENT_SLICE_SEGMENT_FLAG])
-			h->slice_addr = h->slice_segment_addr;
+			h->dpb.slice_addr = h->dpb.slice_segment_addr;
 	} else {
-		h->slice_segment_addr = 0;
-		h->slice_addr = 0;
+		h->dpb.slice_segment_addr = 0;
+		h->dpb.slice_addr = 0;
 	}
-	h->iprev_poc = h->curr_poc;
-	h->slice_type = p[P_SLICE_TYPE];
-	h->tmvp = p[P_SLICE_TEMPORAL_MVP_ENABLE_FLAG] & 1;
-	h->is_next_slice_segment = !!p[P_DEPENDENT_SLICE_SEGMENT_FLAG];
+	h->dpb.iprev_poc = h->dpb.curr_poc;
+	h->dpb.slice_type = p[P_SLICE_TYPE];
+	h->dpb.tmvp = p[P_SLICE_TEMPORAL_MVP_ENABLE_FLAG] & 1;
+	h->dpb.is_next_slice_segment = !!p[P_DEPENDENT_SLICE_SEGMENT_FLAG];
 
 	if (p[P_PIC_WIDTH] < H265_MIN_DIM || p[P_PIC_HEIGHT] < H265_MIN_DIM ||
 	    p[P_PIC_WIDTH] > H265_MAX_DIM || p[P_PIC_HEIGHT] > H265_MAX_DIM) {
@@ -1220,104 +826,105 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		return -EINVAL;
 	}
 	/* Main10 needs an output path that preserves all ten bits. */
-	h->ten_bit = false;
-	h->pic_w = p[P_PIC_WIDTH];
-	h->pic_h = p[P_PIC_HEIGHT];
+	h->dpb.ten_bit = false;
+	h->dpb.pic_w = p[P_PIC_WIDTH];
+	h->dpb.pic_h = p[P_PIC_HEIGHT];
 
-	h->lcu_size = 1 << (p[P_LOG2_MIN_CB_SIZE_MINUS3] + 3 +
+	h->dpb.lcu_size = 1 << (p[P_LOG2_MIN_CB_SIZE_MINUS3] + 3 +
 			    p[P_LOG2_DIFF_MAX_MIN_CB_SIZE]);
-	if (h->lcu_size < 16 || h->lcu_size > 64)
+	if (h->dpb.lcu_size < 16 || h->dpb.lcu_size > 64)
 		return -EINVAL;
-	h->lcu_size_log2 = ilog2(h->lcu_size);
-	h->lcu_x_num = DIV_ROUND_UP(h->pic_w, h->lcu_size);
-	h->lcu_y_num = DIV_ROUND_UP(h->pic_h, h->lcu_size);
-	h->lcu_total = h->lcu_x_num * h->lcu_y_num;
-	h->nslots = clamp_t(int, p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0] + 3,
-			    4, H265_SLOTS);
+	h->dpb.lcu_size_log2 = ilog2(h->dpb.lcu_size);
+	h->dpb.lcu_x_num = DIV_ROUND_UP(h->dpb.pic_w, h->dpb.lcu_size);
+	h->dpb.lcu_y_num = DIV_ROUND_UP(h->dpb.pic_h, h->dpb.lcu_size);
+	h->dpb.lcu_total = h->dpb.lcu_x_num * h->dpb.lcu_y_num;
+	h->dpb.nslots = clamp_t(int, p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0] + 3,
+				4, H265_SLOTS);
 	/* Leave the firmware paused before it can DMA into picture storage. */
-	if (!h->configured || h->alloc_w != h->pic_w || h->alloc_h != h->pic_h ||
-	    h->alloc_nslots != h->nslots)
+	if (!h->configured || h->alloc_w != h->dpb.pic_w || h->alloc_h != h->dpb.pic_h ||
+	    h->alloc_nslots != h->dpb.nslots)
 		return 2;
 
-	h265_update_poc(h);
-	if (h265_update_random_access(h))
+	h265_update_poc(&h->dpb);
+	if (h265_update_random_access(&h->dpb))
 		return 1;
 
 	wr(hw, HEVC_WAIT_FLAG, read_dos_reg(hw, HEVC_WAIT_FLAG) | 0x2);
 
-	if (h->slice_segment_addr == 0) {
-		int sao_mem_unit = (h->lcu_size == 16 ? 9 : h->lcu_size == 32 ? 14 : 24) << 4;
-		int w_cu = h->lcu_x_num, h_cu = h->lcu_y_num;
+	if (h->dpb.slice_segment_addr == 0) {
+		int sao_mem_unit = (h->dpb.lcu_size == 16 ? 9 :
+				    h->dpb.lcu_size == 32 ? 14 : 24) << 4;
+		int w_cu = h->dpb.lcu_x_num, h_cu = h->dpb.lcu_y_num;
 		int slot;
 
-		h->new_pic = true;
-		h265_apply_rps(h);
+		h->dpb.new_pic = true;
+		h265_apply_rps(&h->dpb);
 
-		slot = h265_free_slot(h);
+		slot = h265_free_slot(&h->dpb);
 		if (slot < 0) {
 			dev_err(hw->dev, "hevc: no free picture buffer\n");
 			return -ENOBUFS;
 		}
-		h->cur = slot;
-		h->pic[slot].valid = true;
-		h->pic[slot].referenced = true;
-		h->pic[slot].long_term = false;
-		h->pic[slot].poc = h->curr_poc;
-		h->pic[slot].width = h->pic_w;
-		h->pic[slot].height = h->pic_h;
-		h->pic[slot].decode_idx = h->decode_idx++;
-		h->pic[slot].slice_type = h->slice_type;
-		h->pic[slot].epoch = h->epoch;
-		h->pic[slot].reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
+		h->dpb.cur = slot;
+		h->dpb.pic[slot].valid = true;
+		h->dpb.pic[slot].referenced = true;
+		h->dpb.pic[slot].long_term = false;
+		h->dpb.pic[slot].poc = h->dpb.curr_poc;
+		h->dpb.pic[slot].width = h->dpb.pic_w;
+		h->dpb.pic[slot].height = h->dpb.pic_h;
+		h->dpb.pic[slot].decode_idx = h->dpb.decode_idx++;
+		h->dpb.pic[slot].slice_type = h->dpb.slice_type;
+		h->dpb.pic[slot].epoch = h->dpb.epoch;
+		h->dpb.pic[slot].reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
 
 		h265_fill_mmu_map(h);
 
-		h265_update_tiles(h, w_cu, h_cu, sao_mem_unit);
+		h265_update_tiles(&h->dpb, w_cu, h_cu, sao_mem_unit);
 		wr(hw, H265_SAO_MEM_UNIT, sao_mem_unit);
 		wr(hw, H265_SAO_ABV, h->sao_abv);
 		wr(hw, H265_SAO_VB_SIZE, (sao_mem_unit + (2 << 4)) * h_cu);
 		wr(hw, H265_SAO_VB, h->sao_vb);
 	} else {
-		if (h->cur < 0)
+		if (h->dpb.cur < 0)
 			return 1;	/* a picture's first slice went missing */
-		h->new_pic = false;
+		h->dpb.new_pic = false;
 	}
 
-	if (h->iprev_poc != h->curr_poc) {
-		h->new_tile = true;
-		h->tile_x = 0;
-		h->tile_y = 0;
-	} else if (h->tile_enabled) {
-		int t = h265_tile_index(h, h->slice_segment_addr, h->lcu_x_num);
+	if (h->dpb.iprev_poc != h->dpb.curr_poc) {
+		h->dpb.new_tile = true;
+		h->dpb.tile_x = 0;
+		h->dpb.tile_y = 0;
+	} else if (h->dpb.tile_enabled) {
+		int t = h265_tile_index(&h->dpb, h->dpb.slice_segment_addr, h->dpb.lcu_x_num);
 
-		if (t != -1 && t != (h->tile_x | (h->tile_y << 8))) {
-			h->new_tile = true;
-			h->tile_x = t & 0xff;
-			h->tile_y = (t >> 8) & 0xff;
+		if (t != -1 && t != (h->dpb.tile_x | (h->dpb.tile_y << 8))) {
+			h->dpb.new_tile = true;
+			h->dpb.tile_x = t & 0xff;
+			h->dpb.tile_y = (t >> 8) & 0xff;
 		} else {
-			h->new_tile = false;
+			h->dpb.new_tile = false;
 		}
 	} else {
-		h->new_tile = false;
+		h->dpb.new_tile = false;
 	}
-	if (h->tile_x >= H265_MAX_TILE_COLS || h->tile_y >= H265_MAX_TILE_ROWS)
-		h->new_tile = false;
-	if (h->new_tile) {
-		struct h265_tile *t = &h->tile[h->tile_y][h->tile_x];
+	if (h->dpb.tile_x >= H265_MAX_TILE_COLS || h->dpb.tile_y >= H265_MAX_TILE_ROWS)
+		h->dpb.new_tile = false;
+	if (h->dpb.new_tile) {
+		struct h265_tile *t = &h->dpb.tile[h->dpb.tile_y][h->dpb.tile_x];
 
-		h->tile_start_lcu_x = t->start_cu_x;
-		h->tile_start_lcu_y = t->start_cu_y;
-		h->tile_width_lcu = t->width;
-		h->tile_height_lcu = t->height;
+		h->dpb.tile_start_lcu_x = t->start_cu_x;
+		h->dpb.tile_start_lcu_y = t->start_cu_y;
+		h->dpb.tile_width_lcu = t->width;
+		h->dpb.tile_height_lcu = t->height;
 	}
 
-	ret = h265_set_ref_lists(h);
+	ret = h265_set_ref_lists(&h->dpb);
 	if (ret) {
 		dev_err(hw->dev, "hevc: invalid reference lists: poc=%d type=%d refs=%u/%u mod=%#x RPS=%*ph\n",
-			h->curr_poc, h->slice_type, p[P_NUM_REF_IDX_L0_ACTIVE],
+			h->dpb.curr_poc, h->dpb.slice_type, p[P_NUM_REF_IDX_L0_ACTIVE],
 			p[P_NUM_REF_IDX_L1_ACTIVE], p[P_MODIFICATION_FLAG], 32, &p[P_CUR_RPS]);
-		for (i = 0; i < h->nslots; i++) {
-			struct h265_pic *pic = &h->pic[i];
+		for (i = 0; i < h->dpb.nslots; i++) {
+			struct h265_pic *pic = &h->dpb.pic[i];
 
 			if (pic->valid)
 				dev_dbg(hw->dev, "hevc: DPB slot=%d poc=%d ref=%d lt=%d size=%ux%u epoch=%u\n",
@@ -1327,37 +934,39 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		return ret;
 	}
 	col_ref = p[P_COLLOCATED_REF_IDX];
-	h->ldc = false;
-	if (h->slice_type != H265_I_SLICE) {
-		h->ldc = true;
-		for (i = 0; i < h->ref_num_l0 && h->ldc; i++)
-			if (h->ref_poc_l0[i] > h->curr_poc)
-				h->ldc = false;
-		if (h->slice_type == H265_B_SLICE)
-			for (i = 0; i < h->ref_num_l1 && h->ldc; i++)
-				if (h->ref_poc_l1[i] > h->curr_poc)
-					h->ldc = false;
+	h->dpb.ldc = false;
+	if (h->dpb.slice_type != H265_I_SLICE) {
+		h->dpb.ldc = true;
+		for (i = 0; i < h->dpb.ref_num_l0 && h->dpb.ldc; i++)
+			if (h->dpb.ref_poc_l0[i] > h->dpb.curr_poc)
+				h->dpb.ldc = false;
+		if (h->dpb.slice_type == H265_B_SLICE)
+			for (i = 0; i < h->dpb.ref_num_l1 && h->dpb.ldc; i++)
+				if (h->dpb.ref_poc_l1[i] > h->dpb.curr_poc)
+					h->dpb.ldc = false;
 	}
-	h->col_from_l0 = p[P_COLLOCATED_FROM_L0_FLAG] & 1;
-	h->plevel = p[P_LOG2_PARALLEL_MERGE_LEVEL];
-	h->max_merge_cand = 5 - p[P_FIVE_MINUS_MAX_NUM_MERGE_CAND];
+	h->dpb.col_from_l0 = p[P_COLLOCATED_FROM_L0_FLAG] & 1;
+	h->dpb.plevel = p[P_LOG2_PARALLEL_MERGE_LEVEL];
+	h->dpb.max_merge_cand = 5 - p[P_FIVE_MINUS_MAX_NUM_MERGE_CAND];
 
-	if (h->slice_type == H265_B_SLICE && !h->col_from_l0)
-		h->col_poc = col_ref < h->ref_num_l1 ? h->ref_poc_l1[col_ref] : H265_INVALID_POC;
+	if (h->dpb.slice_type == H265_B_SLICE && !h->dpb.col_from_l0)
+		h->dpb.col_poc = col_ref < h->dpb.ref_num_l1 ?
+			h->dpb.ref_poc_l1[col_ref] : H265_INVALID_POC;
 	else
-		h->col_poc = col_ref < h->ref_num_l0 ? h->ref_poc_l0[col_ref] : H265_INVALID_POC;
+		h->dpb.col_poc = col_ref < h->dpb.ref_num_l0 ?
+			h->dpb.ref_poc_l0[col_ref] : H265_INVALID_POC;
 
-	h->col = h->cur;
-	if (h->slice_type != H265_I_SLICE && h->col_poc != (int)H265_INVALID_POC) {
-		int c = h265_pic_by_poc(h, h->col_poc, true);
+	h->dpb.col = h->dpb.cur;
+	if (h->dpb.slice_type != H265_I_SLICE && h->dpb.col_poc != (int)H265_INVALID_POC) {
+		int c = h265_pic_by_poc(&h->dpb, h->dpb.col_poc, true);
 
 		if (c >= 0)
-			h->col = c;
+			h->dpb.col = c;
 		else
-			dev_dbg(hw->dev, "hevc: collocated poc %d missing\n", h->col_poc);
+			dev_dbg(hw->dev, "hevc: collocated poc %d missing\n", h->dpb.col_poc);
 	}
 
-	if (!h->tile_width_lcu || !h->tile_height_lcu)
+	if (!h->dpb.tile_width_lcu || !h->dpb.tile_height_lcu)
 		return -EINVAL;
 
 	h265_config_mc_buffer(h);
@@ -1367,8 +976,8 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 
 	dev_dbg(hw->dev,
 		"hevc: slice poc %d type %d nal %d addr %u new %d slot %d refs %d/%d col %d\n",
-		h->curr_poc, h->slice_type, h->nal_type, p[P_SLICE_SEGMENT_ADDRESS],
-		h->new_pic, h->cur, h->ref_num_l0, h->ref_num_l1, h->col_poc);
+		h->dpb.curr_poc, h->dpb.slice_type, h->dpb.nal_type, p[P_SLICE_SEGMENT_ADDRESS],
+		h->dpb.new_pic, h->dpb.cur, h->dpb.ref_num_l0, h->dpb.ref_num_l1, h->dpb.col_poc);
 	return 0;
 }
 
@@ -1381,14 +990,14 @@ static int h265_set_dw_target(struct aml_hevc_ctx *h)
 	struct aml_vdec_ctx *ctx = h->v4l2_ctx;
 	struct v4l2_pix_format_mplane *pf = &ctx->pix_fmt[AML_FMT_DST];
 	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
-	size_t chroma = ALIGN(ALIGN(h->pic_w, 64) * ALIGN(h->pic_h, 64) / 2, SZ_64K);
+	size_t chroma = ALIGN(ALIGN(h->dpb.pic_w, 64) * ALIGN(h->dpb.pic_h, 64) / 2, SZ_64K);
 
 	h->dw_target_y = 0;
 	h->dw_target_c = 0;
 	if (!h->configured)
 		return 0;
 	if (!dst || pf->pixelformat != V4L2_PIX_FMT_NV12M ||
-	    pf->plane_fmt[0].bytesperline != ALIGN(h->pic_w, 64) ||
+	    pf->plane_fmt[0].bytesperline != ALIGN(h->dpb.pic_w, 64) ||
 	    dst->vb2_buf.num_planes != 2 ||
 	    vb2_plane_size(&dst->vb2_buf, 0) < chroma * 2 ||
 	    vb2_plane_size(&dst->vb2_buf, 1) < chroma)
@@ -1463,7 +1072,7 @@ static void h265_picture_done(struct aml_hevc_ctx *h)
 
 	h->start_decoding_flag |= info & 0xff;
 	h->rps_set_id = (info >> 8) & 0xff;
-	h->have_picture = h->cur >= 0;
+	h->have_picture = h->dpb.cur >= 0;
 }
 
 static irqreturn_t h265_irq_thread(int irq, void *priv)
@@ -1497,8 +1106,8 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		u32 parse = H265_DISCARD_NAL;
 
 		if (nal == H265_NAL_EOS) {
-			h->curr_poc = H265_INVALID_POC;
-			h->poc_random_access = H265_MAX_INT;
+			h->dpb.curr_poc = H265_INVALID_POC;
+			h->dpb.poc_random_access = H265_MAX_INT;
 		} else if (nal == H265_NAL_VPS) {
 			parse = H265_NAL_UNIT_VPS;
 			h->have_vps = true;
@@ -1565,14 +1174,14 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 	case H265_SEARCH_BUFEMPTY:
 	case H265_NAL_DECODE_DONE:
 	case H265_FIND_NEXT_PIC_NAL:
-		h265_finish(h, h->cur < 0 ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR);
+		h265_finish(h, h->dpb.cur < 0 ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR);
 		return IRQ_HANDLED;
 	case H265_DECPIC_DATA_ERROR:
 	case H265_DECODE_PARAMS_ERR:
 	case H265_DECODE_OVER_SIZE:
 	case H265_DECODE_TIMEOUT:
 		dev_err(hw->dev, "hevc: decoder reported %02x\n", st);
-		h->cur = -1;
+		h->dpb.cur = -1;
 		h265_finish(h, VB2_BUF_STATE_ERROR);
 		return IRQ_HANDLED;
 	default:
@@ -1600,9 +1209,9 @@ int aml_hevc_init(void *priv)
 	h->stateful->sequence = 0;
 	memset(&h->stateful->format, 0, sizeof(h->stateful->format));
 	memset(&h->stateful->crop, 0, sizeof(h->stateful->crop));
-	h->cur = -1;
-	h->curr_poc = H265_INVALID_POC;
-	h->poc_random_access = H265_MAX_INT;
+	h->dpb.cur = -1;
+	h->dpb.curr_poc = H265_INVALID_POC;
+	h->dpb.poc_random_access = H265_MAX_INT;
 	WRITE_ONCE(aml_vdec_stateful(ctx)->wait_capture, false);
 
 	ctx->codec_priv = h;
@@ -1631,7 +1240,7 @@ int aml_hevc_configure(void *priv)
 
 	if (h->hw->faulted || h->hw->hevc_irq_enabled)
 		return -EIO;
-	if (!h->pic_w || !h->pic_h)
+	if (!h->dpb.pic_w || !h->dpb.pic_h)
 		return -EINVAL;
 	/* The header pass has stopped and synchronized all firmware accesses. */
 	ret = h265_alloc_pics(h);
@@ -1670,7 +1279,7 @@ int aml_hevc_dec_run(void *priv)
 	h->rounds = 0;
 	h->have_picture = false;
 	h->finished = false;
-	h->cur = -1;
+	h->dpb.cur = -1;
 	ctx->int_cond = 0;
 	ctx->decode_result = -EIO;
 	ret = h265_feed(h, vb2_plane_vaddr(vb, 0), vb2_get_plane_payload(vb, 0));
@@ -1716,14 +1325,14 @@ stop:
 	stop_ret = aml_hevc_stop_hw(hw);
 	if (stop_ret)
 		return stop_ret;
-	if (ret < 0 && h->cur >= 0) {
-		h->pic[h->cur].valid = false;
-		h->pic[h->cur].referenced = false;
+	if (ret < 0 && h->dpb.cur >= 0) {
+		h->dpb.pic[h->dpb.cur].valid = false;
+		h->dpb.pic[h->dpb.cur].referenced = false;
 	}
 	return ret;
 }
 
-VISIBLE_IF_KUNIT void h265_capture_format(struct v4l2_pix_format_mplane *fmt, u32 width, u32 height)
+void h265_capture_format(struct v4l2_pix_format_mplane *fmt, u32 width, u32 height)
 {
 	u32 chroma;
 
@@ -1736,7 +1345,6 @@ VISIBLE_IF_KUNIT void h265_capture_format(struct v4l2_pix_format_mplane *fmt, u3
 	fmt->plane_fmt[1].sizeimage = chroma;
 	fmt->field = V4L2_FIELD_NONE;
 }
-EXPORT_SYMBOL_IF_KUNIT(h265_capture_format);
 
 int aml_hevc_try_fmt(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 		     struct v4l2_pix_format_mplane *fmt)
@@ -1790,31 +1398,13 @@ int aml_hevc_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selection *s)
 	return ret;
 }
 
-VISIBLE_IF_KUNIT int h265_next_output(struct aml_hevc_ctx *h, bool flush)
-{
-	int i, next = -1;
-
-	for (i = 0; i < H265_SLOTS; i++) {
-		if (!h->pic[i].output)
-			continue;
-		if (next < 0 || h->pic[i].epoch < h->pic[next].epoch ||
-		    (h->pic[i].epoch == h->pic[next].epoch && h->pic[i].poc < h->pic[next].poc))
-			next = i;
-	}
-	if (next >= 0 && !flush && h->pic[next].epoch == h->epoch &&
-	    h->pending <= h->pic[next].reorder_limit)
-		return -1;
-	return next;
-}
-EXPORT_SYMBOL_IF_KUNIT(h265_next_output);
-
 static void h265_output(struct aml_hevc_ctx *h, int slot,
 			enum vb2_buffer_state state, bool last)
 {
-	struct vb2_v4l2_buffer *vb = h->pic[slot].output;
+	struct vb2_v4l2_buffer *vb = h->capture[slot];
 
-	h->pic[slot].output = NULL;
-	h->pending--;
+	h->capture[slot] = NULL;
+	h265_remove_output(&h->dpb, slot);
 	vb->sequence = h->stateful->sequence++;
 	if (last)
 		vb->flags |= V4L2_BUF_FLAG_LAST;
@@ -1826,8 +1416,8 @@ static void h265_flush_pending(struct aml_hevc_ctx *h,
 {
 	int slot;
 
-	while ((slot = h265_next_output(h, true)) >= 0)
-		h265_output(h, slot, state, last && h->pending == 1);
+	while ((slot = h265_next_output(&h->dpb, true)) >= 0)
+		h265_output(h, slot, state, last && h->dpb.pending == 1);
 }
 
 void aml_hevc_eos(struct aml_vdec_ctx *ctx)
@@ -1904,12 +1494,12 @@ static void h265_source_change(struct aml_hevc_ctx *h)
 	struct v4l2_event event = { .type = V4L2_EVENT_SOURCE_CHANGE,
 		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION };
 	struct v4l2_pix_format_mplane *old = &ctx->pix_fmt[AML_FMT_DST];
-	u16 *p = h->p;
+	u16 *p = h->dpb.p;
 	bool capture_matches;
 	bool end_capture = h->stateful->format_known && ctx->is_cap_streamon;
 
 	h->stateful->format = ctx->pix_fmt[AML_FMT_DST];
-	h265_capture_format(&h->stateful->format, h->pic_w, h->pic_h);
+	h265_capture_format(&h->stateful->format, h->dpb.pic_w, h->dpb.pic_h);
 	capture_matches = !h->stateful->format_known && ctx->is_cap_streamon &&
 		old->width == h->stateful->format.width &&
 		old->height == h->stateful->format.height &&
@@ -1918,15 +1508,15 @@ static void h265_source_change(struct aml_hevc_ctx *h)
 		old->plane_fmt[1].sizeimage >= h->stateful->format.plane_fmt[1].sizeimage;
 	h->stateful->format.quantization = p[P_VIDEO_SIGNAL_TYPE] & BIT(9) ?
 		V4L2_QUANTIZATION_FULL_RANGE : V4L2_QUANTIZATION_LIM_RANGE;
-	h->stateful->crop = (struct v4l2_rect) { .width = h->pic_w, .height = h->pic_h };
+	h->stateful->crop = (struct v4l2_rect) { .width = h->dpb.pic_w, .height = h->dpb.pic_h };
 	if (p[P_CONFORMANCE_WINDOW_FLAG]) {
 		h->stateful->crop.left = 2 * p[P_CONF_WIN_LEFT_OFFSET];
 		h->stateful->crop.top = 2 * p[P_CONF_WIN_TOP_OFFSET];
 		h->stateful->crop.width -= h->stateful->crop.left + 2 * p[P_CONF_WIN_RIGHT_OFFSET];
 		h->stateful->crop.height -= h->stateful->crop.top + 2 * p[P_CONF_WIN_BOTTOM_OFFSET];
 	}
-	h->reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
-	WRITE_ONCE(aml_vdec_stateful(ctx)->min_capture, h->reorder_limit + 2);
+	h->dpb.reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
+	WRITE_ONCE(aml_vdec_stateful(ctx)->min_capture, h->dpb.reorder_limit + 2);
 	h->stateful->format_known = true;
 	h->configured = false;
 	ctx->pix_fmt[AML_FMT_DST] = h->stateful->format;
@@ -1937,7 +1527,7 @@ static void h265_source_change(struct aml_hevc_ctx *h)
 	/* Publish the reason before LAST can wake a CAPTURE waiter. */
 	v4l2_event_queue_fh(&ctx->fh, &event);
 	if (end_capture) {
-		if (h->pending)
+		if (h->dpb.pending)
 			h265_flush_pending(h, VB2_BUF_STATE_DONE, true);
 		else
 			h265_end_capture(ctx, false);
@@ -1990,15 +1580,16 @@ void aml_hevc_device_run(struct aml_vdec_ctx *ctx)
 		dst->field = V4L2_FIELD_NONE;
 		dst->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
 				V4L2_BUF_FLAG_BFRAME);
-		dst->flags |= h->slice_type == H265_I_SLICE ? V4L2_BUF_FLAG_KEYFRAME :
-			h->slice_type == H265_P_SLICE ? V4L2_BUF_FLAG_PFRAME : V4L2_BUF_FLAG_BFRAME;
-		h->pic[h->cur].output = dst;
-		h->pending++;
+		dst->flags |= h->dpb.slice_type == H265_I_SLICE ? V4L2_BUF_FLAG_KEYFRAME :
+			h->dpb.slice_type == H265_P_SLICE ?
+			V4L2_BUF_FLAG_PFRAME : V4L2_BUF_FLAG_BFRAME;
+		h->capture[h->dpb.cur] = dst;
+		h265_queue_output(&h->dpb, h->dpb.cur);
 	}
 	v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
 	src->sequence = ctx->sequence_out++;
 	if (drain) {
-		if (h->pending) {
+		if (h->dpb.pending) {
 			aml_hevc_eos(ctx);
 			h265_flush_pending(h, VB2_BUF_STATE_DONE, true);
 			v4l2_m2m_mark_stopped(ctx->m2m_ctx);
@@ -2006,7 +1597,7 @@ void aml_hevc_device_run(struct aml_vdec_ctx *ctx)
 			h265_end_capture(ctx, true);
 		}
 	} else {
-		while ((slot = h265_next_output(h, false)) >= 0)
+		while ((slot = h265_next_output(&h->dpb, false)) >= 0)
 			h265_output(h, slot, VB2_BUF_STATE_DONE, false);
 	}
 	/* Publish drain events before either queue can report its final buffer. */
