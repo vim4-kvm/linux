@@ -1030,6 +1030,8 @@ static void h265_read_rpm(struct aml_hevc_ctx *h)
 	for (i = 0; i < P_RPM_COUNT; i += 4)
 		for (j = 0; j < 4; j++)
 			h->p[i + j] = raw[i + 3 - j];
+	for (i = 0; i < P_RPM_COUNT; i += 32)
+		dev_dbg(h->hw->dev, "hevc: rpm[%02x]=%*ph\n", i, 64, &h->p[i]);
 }
 
 VISIBLE_IF_KUNIT int h265_validate_params(const u16 *p)
@@ -1187,6 +1189,11 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 			p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0], p[P_SPS_NUM_REORDER_PICS_0],
 			p[P_FIVE_MINUS_MAX_NUM_MERGE_CAND], p[P_NUM_TILE_COLUMNS_MINUS1],
 			p[P_NUM_TILE_ROWS_MINUS1]);
+		dev_err(hw->dev, "hevc: RPM slice first=%u addr=%u tiles=%#x crop=%u:%u/%u/%u/%u\n",
+			p[P_FIRST_SLICE_SEGMENT_IN_PIC_FLAG], p[P_SLICE_SEGMENT_ADDRESS],
+			p[P_TILES_ENABLED_FLAG], p[P_CONFORMANCE_WINDOW_FLAG],
+			p[P_CONF_WIN_LEFT_OFFSET], p[P_CONF_WIN_RIGHT_OFFSET],
+			p[P_CONF_WIN_TOP_OFFSET], p[P_CONF_WIN_BOTTOM_OFFSET]);
 		return ret;
 	}
 	h->temporal_id = p[P_TEMPORAL_ID];
@@ -1309,6 +1316,14 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		dev_err(hw->dev, "hevc: invalid reference lists: poc=%d type=%d refs=%u/%u mod=%#x RPS=%*ph\n",
 			h->curr_poc, h->slice_type, p[P_NUM_REF_IDX_L0_ACTIVE],
 			p[P_NUM_REF_IDX_L1_ACTIVE], p[P_MODIFICATION_FLAG], 32, &p[P_CUR_RPS]);
+		for (i = 0; i < h->nslots; i++) {
+			struct h265_pic *pic = &h->pic[i];
+
+			if (pic->valid)
+				dev_dbg(hw->dev, "hevc: DPB slot=%d poc=%d ref=%d lt=%d size=%ux%u epoch=%u\n",
+					i, pic->poc, pic->referenced, pic->long_term,
+					pic->width, pic->height, pic->epoch);
+		}
 		return ret;
 	}
 	col_ref = p[P_COLLOCATED_REF_IDX];
