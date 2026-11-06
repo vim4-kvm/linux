@@ -2,11 +2,10 @@
 #include <kunit/test.h>
 #include <linux/module.h>
 #include <linux/sizes.h>
-#include <media/videobuf2-v4l2.h>
 
 #include "hevc_priv.h"
 
-static void reset_params(struct aml_hevc_ctx *h)
+static void reset_params(struct h265_dpb *h)
 {
 	memset(h, 0, sizeof(*h));
 	h->p[P_PIC_WIDTH] = 704;
@@ -20,7 +19,7 @@ static void reset_params(struct aml_hevc_ctx *h)
 
 static int hevc_test_init(struct kunit *test)
 {
-	struct aml_hevc_ctx *h = kunit_kzalloc(test, sizeof(*h), GFP_KERNEL);
+	struct h265_dpb *h = kunit_kzalloc(test, sizeof(*h), GFP_KERNEL);
 
 	if (!h)
 		return -ENOMEM;
@@ -32,7 +31,7 @@ static int hevc_test_init(struct kunit *test)
 static void poc_wrap_and_random_access(struct kunit *test)
 {
 	static const unsigned int excluded[] = { 0, 2, 4, 6, 7, 8, 9 };
-	struct aml_hevc_ctx *h = test->priv;
+	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
 	h->temporal_id = 1;
@@ -71,7 +70,7 @@ static void invalid_firmware_parameters(struct kunit *test)
 		P_LOG2_MIN_CB_SIZE_MINUS3, P_LOG2_DIFF_MAX_MIN_CB_SIZE,
 		P_LOG2_MAX_POC_LSB_MINUS4,
 	};
-	struct aml_hevc_ctx *h = test->priv;
+	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
 	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), 0);
@@ -92,7 +91,7 @@ static void invalid_firmware_parameters(struct kunit *test)
 
 static void tile_boundaries(struct kunit *test)
 {
-	struct aml_hevc_ctx *h = test->priv;
+	struct h265_dpb *h = test->priv;
 
 	h->p[P_TILES_ENABLED_FLAG] = 3;
 	h->p[P_NUM_TILE_COLUMNS_MINUS1] = 2;
@@ -131,7 +130,7 @@ static void tile_boundaries(struct kunit *test)
 
 static void first_slice_ignores_absent_segment_address(struct kunit *test)
 {
-	struct aml_hevc_ctx *h = test->priv;
+	struct h265_dpb *h = test->priv;
 
 	h->p[P_PIC_WIDTH] = 832;
 	h->p[P_PIC_HEIGHT] = 480;
@@ -150,7 +149,7 @@ static void first_slice_ignores_absent_segment_address(struct kunit *test)
 static void missing_and_reordered_references(struct kunit *test)
 {
 	static const int pocs[] = { 3, 5, 1 };
-	struct aml_hevc_ctx *h = test->priv;
+	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
 	h->curr_poc = 4;
@@ -227,7 +226,7 @@ static void long_term_references_survive_poc_lsb_wrap(struct kunit *test)
 {
 	static const int pocs[] = { 250, 210, 70, 230 };
 	static const u16 rps[] = { 0x3ff6, 0x3fce, 0x6042, 0x60e2, RPS_END };
-	struct aml_hevc_ctx *h = test->priv;
+	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
 	h->curr_poc = 260;
@@ -267,7 +266,7 @@ static void long_term_references_survive_poc_lsb_wrap(struct kunit *test)
 
 static void previous_decoded_picture_can_be_long_term(struct kunit *test)
 {
-	struct aml_hevc_ctx *h = test->priv;
+	struct h265_dpb *h = test->priv;
 	int slot;
 
 	h->curr_poc = 326;
@@ -327,12 +326,9 @@ static void mv_storage_covers_edge_ctus(struct kunit *test)
 
 static void rps_and_output_own_picture_slots(struct kunit *test)
 {
-	struct aml_hevc_ctx *h = test->priv;
-	struct vb2_v4l2_buffer *output;
+	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
-	output = kunit_kzalloc(test, sizeof(*output), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, output);
 	h->nslots = 4;
 	h->curr_poc = 4;
 	h->nal_type = 1;
@@ -347,7 +343,7 @@ static void rps_and_output_own_picture_slots(struct kunit *test)
 	h->pic[0].poc = 0;
 	h->pic[1].poc = 2;
 	h->pic[2].poc = 3;
-	h->pic[2].output = output;
+	h->pic[2].output_pending = true;
 	h265_apply_rps(h);
 	KUNIT_EXPECT_TRUE(test, h->pic[0].referenced);
 	KUNIT_EXPECT_TRUE(test, h->pic[1].referenced);
@@ -357,7 +353,7 @@ static void rps_and_output_own_picture_slots(struct kunit *test)
 	h->pic[3].valid = true;
 	h->pic[3].referenced = true;
 	KUNIT_EXPECT_EQ(test, h265_free_slot(h), -ENOBUFS);
-	h->pic[2].output = NULL;
+	h->pic[2].output_pending = false;
 	KUNIT_EXPECT_EQ(test, h265_free_slot(h), 2);
 }
 
@@ -367,7 +363,7 @@ static void irap_releases_previous_references(struct kunit *test)
 		H265_NAL_BLA_W_LP, H265_NAL_BLA_W_RADL, H265_NAL_BLA_N_LP,
 		H265_NAL_IDR_W_RADL, H265_NAL_IDR_N_LP,
 	};
-	struct aml_hevc_ctx *h = test->priv;
+	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
 	h->curr_poc = 0;
@@ -387,15 +383,12 @@ static void output_orders_b_pictures_before_new_epoch(struct kunit *test)
 {
 	static const int pocs[] = { 0, 4, 2, 1, 0 };
 	static const int slots[] = { 0, 3, 2, 1, 4 };
-	struct aml_hevc_ctx *h = test->priv;
-	struct vb2_v4l2_buffer *outputs;
+	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
-	outputs = kunit_kcalloc(test, ARRAY_SIZE(pocs), sizeof(*outputs), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, outputs);
 	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
 		h->pic[i].poc = pocs[i];
-		h->pic[i].output = &outputs[i];
+		h->pic[i].output_pending = true;
 	}
 	/* A new IDR's POC 0 must follow the previous GOP's reordered pictures. */
 	h->pic[4].epoch = 1;
@@ -403,7 +396,7 @@ static void output_orders_b_pictures_before_new_epoch(struct kunit *test)
 		int slot = h265_next_output(h, true);
 
 		KUNIT_ASSERT_EQ(test, slot, slots[i]);
-		h->pic[slot].output = NULL;
+		h->pic[slot].output_pending = false;
 	}
 	KUNIT_EXPECT_EQ(test, h265_next_output(h, true), -1);
 }
@@ -411,27 +404,24 @@ static void output_orders_b_pictures_before_new_epoch(struct kunit *test)
 static void output_respects_each_pictures_reorder_limit(struct kunit *test)
 {
 	static const int pocs[] = { 4, 6, 8, 10, 2 };
-	struct aml_hevc_ctx *h = test->priv;
-	struct vb2_v4l2_buffer *outputs;
+	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
-	outputs = kunit_kcalloc(test, ARRAY_SIZE(pocs), sizeof(*outputs), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, outputs);
 	/* The initial sequence had no reordering; a later SPS requires four. */
 	h->reorder_limit = 0;
 	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
 		h->pic[i].poc = pocs[i];
 		h->pic[i].reorder_limit = 4;
 		if (i < 4)
-			h->pic[i].output = &outputs[i];
+			h->pic[i].output_pending = true;
 	}
 	h->pending = 4;
 	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), -1);
 	/* A later decoded picture has a lower POC and must precede POC 4. */
-	h->pic[4].output = &outputs[4];
+	h->pic[4].output_pending = true;
 	h->pending++;
 	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), 4);
-	h->pic[4].output = NULL;
+	h->pic[4].output_pending = false;
 	h->pending--;
 	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), -1);
 	KUNIT_EXPECT_EQ(test, h265_next_output(h, true), 0);
@@ -443,12 +433,9 @@ static void output_respects_each_pictures_reorder_limit(struct kunit *test)
 static void continuous_cra_keeps_leading_picture_order(struct kunit *test)
 {
 	static const int pocs[] = { 26, 27, 28, 29, 30, 31, 32, 25 };
-	struct aml_hevc_ctx *h = test->priv;
-	struct vb2_v4l2_buffer *outputs;
+	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
-	outputs = kunit_kcalloc(test, ARRAY_SIZE(pocs), sizeof(*outputs), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, outputs);
 	h->nal_type = H265_NAL_IDR_N_LP;
 	h->poc_random_access = H265_MAX_INT;
 	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
@@ -462,21 +449,21 @@ static void continuous_cra_keeps_leading_picture_order(struct kunit *test)
 		h->pic[i].epoch = h->epoch;
 		h->pic[i].reorder_limit = 7;
 		if (i < 7)
-			h->pic[i].output = &outputs[i];
+			h->pic[i].output_pending = true;
 	}
 	h->pending = 7;
 	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), -1);
 	h->nal_type = H265_NAL_RASL_R;
 	h->curr_poc = 25;
 	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
-	h->pic[7].output = &outputs[7];
+	h->pic[7].output_pending = true;
 	h->pending++;
 	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), 7);
 }
 
 static void restarted_cra_skips_unavailable_rasl(struct kunit *test)
 {
-	struct aml_hevc_ctx *h = test->priv;
+	struct h265_dpb *h = test->priv;
 
 	/* A source change rebuilt the picture pool before replaying this CRA. */
 	h->poc_random_access = H265_MAX_INT;
@@ -532,6 +519,3 @@ static struct kunit_suite hevc_test_suite = {
 };
 
 kunit_test_suite(hevc_test_suite);
-
-MODULE_IMPORT_NS("EXPORTED_FOR_KUNIT_TESTING");
-MODULE_LICENSE("GPL");
