@@ -203,19 +203,16 @@ static int hevc_get_frame(struct aml_vdec_ctx *ctx, bool flush, struct aml_vdec_
 static void hevc_get_format(struct aml_vdec_ctx *ctx, struct aml_vdec_stream_info *info)
 {
 	struct aml_hevc_ctx *h = ctx->codec_priv;
+	struct h265_crop crop = h265_display_crop(h->dpb.p);
 	u16 *p = h->dpb.p;
 
 	info->format = ctx->pix_fmt[AML_FMT_DST];
 	h265_capture_format(&info->format, h->dpb.pic_w, h->dpb.pic_h);
 	info->format.quantization = p[P_VIDEO_SIGNAL_TYPE] & BIT(9) ?
 		V4L2_QUANTIZATION_FULL_RANGE : V4L2_QUANTIZATION_LIM_RANGE;
-	info->crop = (struct v4l2_rect) { .width = h->dpb.pic_w, .height = h->dpb.pic_h };
-	if (p[P_CONFORMANCE_WINDOW_FLAG]) {
-		info->crop.left = 2 * p[P_CONF_WIN_LEFT_OFFSET];
-		info->crop.top = 2 * p[P_CONF_WIN_TOP_OFFSET];
-		info->crop.width -= info->crop.left + 2 * p[P_CONF_WIN_RIGHT_OFFSET];
-		info->crop.height -= info->crop.top + 2 * p[P_CONF_WIN_BOTTOM_OFFSET];
-	}
+	info->crop = (struct v4l2_rect) {
+		.left = crop.left, .top = crop.top, .width = crop.width, .height = crop.height,
+	};
 	h->dpb.reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
 	info->min_capture = h->dpb.reorder_limit + 2;
 	h->configured = false;
