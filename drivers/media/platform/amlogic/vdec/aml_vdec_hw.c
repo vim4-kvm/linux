@@ -1369,9 +1369,13 @@ int aml_hevc_prepare_hw(struct aml_vdec_hw *hw)
 	}
 	/* The T7 v0.4 package uses secure overlays; the loader supplies their address. */
 	arm_smccc_smc(0xb200000f, T7_HEVC_MMU_SWAP, 2, 1, 0, 0, 0, 0, &result);
+	dev_dbg(hw->dev, "HEVC secure firmware load: format=%#x core=2 swap=1 a0=%#lx\n",
+		T7_HEVC_MMU_SWAP, result.a0);
 	hw->hevc_fw_swap = !result.a0;
 	if (!hw->hevc_fw_swap) {
 		arm_smccc_smc(0xb200000f, 17, 0, 0, 0, 0, 0, 0, &result);
+		dev_dbg(hw->dev, "HEVC secure firmware fallback: format=17 core=0 swap=0 a0=%#lx\n",
+			result.a0);
 		if (result.a0)
 			return -EIO;
 	}
@@ -1380,6 +1384,7 @@ int aml_hevc_prepare_hw(struct aml_vdec_hw *hw)
 				  &hw->hevc_fw_swap_addr);
 		if (ret)
 			return ret;
+		dev_dbg(hw->dev, "HEVC secure overlay address: %#x\n", hw->hevc_fw_swap_addr);
 	}
 	hw->hevc_fw_loaded = true;
 	return 0;
