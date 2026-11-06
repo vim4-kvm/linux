@@ -399,12 +399,20 @@ configure:
 static u32 mpeg12_ref_spec(struct aml_vdec_ctx *ctx, struct mpeg12_canvas *c,
 			   u64 ts)
 {
+	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
 	struct vb2_queue *vq = v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx);
 	struct vb2_buffer *vb = vb2_find_buffer(vq, ts);
+	u32 spec;
 
-	if (!vb)
+	if (!vb) {
+		dev_dbg(hw->dev, "mpeg12 reference ts=%llu not found\n", ts);
 		return 0xffffffff;
-	return mpeg12_canvas_setup(ctx, c, vb);
+	}
+	spec = mpeg12_canvas_setup(ctx, c, vb);
+	if (spec == ~0u)
+		dev_dbg(hw->dev, "mpeg12 reference ts=%llu buffer=%u canvas failed\n",
+			ts, vb->index);
+	return spec;
 }
 
 static void mpeg12_job_done(struct aml_vdec_ctx *ctx, int result)
@@ -471,9 +479,10 @@ static int mpeg12_reference_canvases(struct aml_vdec_ctx *ctx,
 				     bool pair, u32 *ref0, u32 *ref1)
 {
 	struct aml_mpeg12_ctx *m = ctx->codec_priv;
-	u64 refs[2];
+	u64 refs[2] = { U64_MAX, U64_MAX };
 	u32 specs[2] = { ~0u, ~0u };
 	unsigned int count = mpeg12_reference_timestamps(pic, &m->fld_pic, pair, refs);
+	int ret;
 
 	if (count == 1) {
 		if (refs[0] != U64_MAX)
@@ -484,7 +493,12 @@ static int mpeg12_reference_canvases(struct aml_vdec_ctx *ctx,
 		if (refs[1] != U64_MAX)
 			specs[1] = mpeg12_ref_spec(ctx, &m->canvas[2], refs[1]);
 	}
-	return mpeg12_reference_registers(refs, specs, count, ref0, ref1);
+	ret = mpeg12_reference_registers(refs, specs, count, ref0, ref1);
+	if (ret)
+		dev_dbg(vdec_get_hw(ctx->dev)->dev,
+			"mpeg12 references rejected: count=%u forward=%llu backward=%llu canvases=%08x/%08x\n",
+			count, refs[0], refs[1], specs[0], specs[1]);
+	return ret;
 }
 
 static irqreturn_t mpeg12_isr(int irq, void *priv)
@@ -705,31 +719,40 @@ int aml_mpeg12_dec_run(void *priv)
 	const struct v4l2_ctrl_mpeg2_sequence *seq;
 	const struct v4l2_ctrl_mpeg2_picture *pic;
 	const struct v4l2_ctrl_mpeg2_quantisation *quant;
-	struct vb2_v4l2_buffer *src, *dst;
+	struct vb2_v4l2_buffer *src = NULL, *dst;
 	u32 rec, ref0 = 0xffffffff, ref1 = 0xffffffff;
+	const char *reason;
 	bool field, pair;
-	long ret;
+	long ret = -EINVAL;
 
 	seq = mpeg12_ctrl(ctx, V4L2_CID_STATELESS_MPEG2_SEQUENCE);
 	pic = mpeg12_ctrl(ctx, V4L2_CID_STATELESS_MPEG2_PICTURE);
 	quant = mpeg12_ctrl(ctx, V4L2_CID_STATELESS_MPEG2_QUANTISATION);
-	if (!seq || !pic || !quant)
-		return -EINVAL;
+	if (!seq || !pic || !quant) {
+		reason = "missing controls";
+		goto reject;
+	}
 
 	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
-	if (!src || !dst)
-		return -EINVAL;
+	if (!src || !dst) {
+		reason = "missing buffer";
+		goto reject;
+	}
 	if (!vb2_get_plane_payload(&src->vb2_buf, 0) ||
 	    vb2_get_plane_payload(&src->vb2_buf, 0) > vb2_plane_size(&src->vb2_buf, 0) ||
-	    !vb2_plane_vaddr(&src->vb2_buf, 0))
-		return -EINVAL;
+	    !vb2_plane_vaddr(&src->vb2_buf, 0)) {
+		reason = "invalid source payload";
+		goto reject;
+	}
 	if (seq->chroma_format != 1 || !seq->horizontal_size || !seq->vertical_size ||
 	    seq->horizontal_size > AML_VDEC_1080P_MAX_W ||
 	    seq->vertical_size > AML_VDEC_1080P_MAX_H ||
 	    seq->horizontal_size > ctx->pic_info.coded_width ||
-	    seq->vertical_size > ctx->pic_info.coded_height)
-		return -EINVAL;
+	    seq->vertical_size > ctx->pic_info.coded_height) {
+		reason = "invalid sequence dimensions or chroma";
+		goto reject;
+	}
 
 	field = pic->picture_structure != V4L2_MPEG2_PIC_FRAME;
 	pair = field && m->fld_pending &&
@@ -740,9 +763,10 @@ int aml_mpeg12_dec_run(void *priv)
 
 	if (field && !pair &&
 	    (src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF)) {
+		reason = "stash first field";
 		ret = mpeg12_stash_field(ctx, seq, pic, quant, src);
 		if (ret)
-			return ret;
+			goto reject;
 		dev_dbg(hw->dev, "mpeg12 stash field %u type %u\n",
 			pic->picture_structure,
 			 pic->picture_coding_type);
@@ -750,22 +774,31 @@ int aml_mpeg12_dec_run(void *priv)
 		return 0;
 	}
 	m->fld_pending = false;
-	if (field && !pair)
-		return -EINVAL;
+	if (field && !pair) {
+		dev_dbg(hw->dev, "mpeg12 field mismatch: saved ts=%llu structure=%u\n",
+			m->fld_ts, m->fld_pic.picture_structure);
+		reason = "unpaired field";
+		goto reject;
+	}
 
+	reason = "prepare input";
 	ret = mpeg12_prepare_input(ctx, seq, pic, quant, pair);
 	if (ret)
-		return ret;
+		goto reject;
 
 	mpeg12_restore_hw(ctx);
 
 	rec = mpeg12_canvas_setup(ctx, &m->canvas[0], &dst->vb2_buf);
-	if (rec == ~0u)
-		return -ENOMEM;
+	if (rec == ~0u) {
+		reason = "capture canvas";
+		ret = -ENOMEM;
+		goto reject;
+	}
 
+	reason = "reference canvases";
 	ret = mpeg12_reference_canvases(ctx, pic, pair, &ref0, &ref1);
 	if (ret)
-		return ret;
+		goto reject;
 	regmap_write(hw->map[DOS_BUS], MREG_REF0, ref0);
 	regmap_write(hw->map[DOS_BUS], MREG_REF1, ref1);
 	regmap_write(hw->map[DOS_BUS], REC_CANVAS_ADDR, rec);
@@ -801,9 +834,29 @@ int aml_mpeg12_dec_run(void *priv)
 			read_dos_reg(hw, VIFF_BIT_CNT),
 			read_dos_reg(hw, MREG_ERROR_COUNT));
 		ctx->decode_failed = true;
-		return -ETIMEDOUT;
+		reason = "microcode timeout";
+		ret = -ETIMEDOUT;
+		goto reject;
 	}
+	reason = "interrupted wait";
 	if (ret < 0)
-		return ret;
-	return ctx->decode_result;
+		goto reject;
+	ret = ctx->decode_result;
+	if (ret < 0) {
+		dev_dbg(hw->dev, "mpeg12 completion error: out=%u info=%08x errors=%u\n",
+			m->status, m->pic_info, read_dos_reg(hw, MREG_ERROR_COUNT));
+		reason = "microcode completion";
+		goto reject;
+	}
+	return ret;
+
+reject:
+	dev_dbg(hw->dev,
+		"mpeg12 rejected: %s ret=%ld ts=%llu type=%u structure=%u forward=%llu backward=%llu\n",
+		reason, ret, src ? src->vb2_buf.timestamp : U64_MAX,
+		pic ? pic->picture_coding_type : 0,
+		pic ? pic->picture_structure : 0,
+		pic ? pic->forward_ref_ts : U64_MAX,
+		pic ? pic->backward_ref_ts : U64_MAX);
+	return ret;
 }

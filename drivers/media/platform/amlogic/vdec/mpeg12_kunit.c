@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <kunit/test.h>
 #include <linux/module.h>
+#include <media/v4l2-mem2mem.h>
 
 #include "mpeg12.h"
 
@@ -62,6 +63,68 @@ static void unidirectional_b_references(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, mpeg12_reference_registers(refs, specs, count,
 							 &ref0, &ref1), -EINVAL);
 	KUNIT_EXPECT_EQ(test, mpeg12_reference_registers(refs, specs, 1,
+							 &ref0, &ref1), -EINVAL);
+}
+
+static void sony_zero_timestamp_anchor(struct kunit *test)
+{
+	struct v4l2_ctrl_mpeg2_picture first = {
+		.picture_coding_type = V4L2_MPEG2_PIC_CODING_TYPE_B,
+		.picture_structure = V4L2_MPEG2_PIC_TOP_FIELD,
+		.forward_ref_ts = U64_MAX, .backward_ref_ts = 0,
+	};
+	struct v4l2_ctrl_mpeg2_picture second = first;
+	struct vb2_v4l2_buffer *anchor, *output, *unused;
+	struct vb2_queue *queue;
+	u64 refs[2];
+	u32 specs[2] = { ~0u, 0x050504 };
+	u32 ref0, ref1;
+	unsigned int count;
+
+	queue = kunit_kzalloc(test, sizeof(*queue), GFP_KERNEL);
+	anchor = kunit_kzalloc(test, sizeof(*anchor), GFP_KERNEL);
+	output = kunit_kzalloc(test, sizeof(*output), GFP_KERNEL);
+	unused = kunit_kzalloc(test, sizeof(*unused), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, queue);
+	KUNIT_ASSERT_NOT_NULL(test, anchor);
+	KUNIT_ASSERT_NOT_NULL(test, output);
+	KUNIT_ASSERT_NOT_NULL(test, unused);
+	queue->max_num_buffers = 2;
+	queue->bufs = kunit_kcalloc(test, 2, sizeof(*queue->bufs), GFP_KERNEL);
+	queue->bufs_bitmap = kunit_kzalloc(test, sizeof(unsigned long), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, queue->bufs);
+	KUNIT_ASSERT_NOT_NULL(test, queue->bufs_bitmap);
+	queue->bufs[0] = &unused->vb2_buf;
+	queue->bufs[1] = &anchor->vb2_buf;
+	set_bit(0, queue->bufs_bitmap);
+	set_bit(1, queue->bufs_bitmap);
+	/* A never-decoded buffer also starts at zero; only copied timestamps count. */
+	KUNIT_EXPECT_PTR_EQ(test, vb2_find_buffer(queue, 0), NULL);
+	v4l2_m2m_buf_copy_metadata(output, anchor);
+	KUNIT_ASSERT_PTR_EQ(test, vb2_find_buffer(queue, 0), &anchor->vb2_buf);
+
+	/* r70 ts=1000 is a top/bottom B pair; ts=2000 is a frame B. */
+	second.picture_structure = V4L2_MPEG2_PIC_BOTTOM_FIELD;
+	count = mpeg12_reference_timestamps(&second, &first, true, refs);
+	KUNIT_ASSERT_EQ(test, count, 2);
+	KUNIT_EXPECT_EQ(test, refs[0], U64_MAX);
+	KUNIT_EXPECT_EQ(test, refs[1], 0);
+	KUNIT_ASSERT_EQ(test, mpeg12_reference_registers(refs, specs, count,
+							 &ref0, &ref1), 0);
+	KUNIT_EXPECT_EQ(test, ref0, ~0u);
+	KUNIT_EXPECT_EQ(test, ref1, specs[1]);
+	second.picture_structure = V4L2_MPEG2_PIC_FRAME;
+	count = mpeg12_reference_timestamps(&second, NULL, false, refs);
+	KUNIT_ASSERT_EQ(test, mpeg12_reference_registers(refs, specs, count,
+							 &ref0, &ref1), 0);
+	KUNIT_EXPECT_EQ(test, ref0, ~0u);
+	KUNIT_EXPECT_EQ(test, ref1, specs[1]);
+	/* Reusing the anchor for a later picture must invalidate lookup of zero. */
+	output->vb2_buf.timestamp = 3000;
+	v4l2_m2m_buf_copy_metadata(output, anchor);
+	KUNIT_EXPECT_PTR_EQ(test, vb2_find_buffer(queue, refs[1]), NULL);
+	specs[1] = ~0u;
+	KUNIT_EXPECT_EQ(test, mpeg12_reference_registers(refs, specs, count,
 							 &ref0, &ref1), -EINVAL);
 }
 
@@ -151,6 +214,7 @@ static void vbv_matrices_and_field_flags(struct kunit *test)
 static struct kunit_case mpeg12_test_cases[] = {
 	KUNIT_CASE(initial_field_pair_references),
 	KUNIT_CASE(unidirectional_b_references),
+	KUNIT_CASE(sony_zero_timestamp_anchor),
 	KUNIT_CASE(vbv_matrices_and_field_flags),
 	{}
 };
