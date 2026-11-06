@@ -1363,6 +1363,10 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 	}
 
 	switch (st) {
+	case H265_SEI_DAT:
+		/* This handshake is polled by firmware, without an MCPU request. */
+		wr(hw, HEVC_DEC_STATUS_REG, H265_SEI_DAT_DONE);
+		return IRQ_HANDLED;
 	case H265_NAL_SEARCH_DONE: {
 		int nal = read_dos_reg(hw, H265_CUR_NAL_UNIT_TYPE);
 		u32 parse = H265_DISCARD_NAL;
@@ -1439,6 +1443,7 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		h265_finish(h, h->cur < 0 ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR);
 		return IRQ_HANDLED;
 	case H265_DECPIC_DATA_ERROR:
+	case H265_DECODE_PARAMS_ERR:
 	case H265_DECODE_OVER_SIZE:
 	case H265_DECODE_TIMEOUT:
 		dev_err(hw->dev, "hevc: decoder reported %02x\n", st);
@@ -1446,8 +1451,8 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		h265_finish(h, VB2_BUF_STATE_ERROR);
 		return IRQ_HANDLED;
 	default:
-		dev_dbg(hw->dev, "hevc: unhandled status %02x\n", st);
-		h265_command(hw, H265_ACTION_DONE);
+		dev_err(hw->dev, "hevc: unhandled status %02x\n", st);
+		h265_finish(h, VB2_BUF_STATE_ERROR);
 		return IRQ_HANDLED;
 	}
 }
