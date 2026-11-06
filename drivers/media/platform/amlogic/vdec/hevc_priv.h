@@ -176,6 +176,8 @@ struct aml_hevc_ctx {
 	int tile_start_lcu_x, tile_start_lcu_y, tile_width_lcu, tile_height_lcu;
 };
 
+struct v4l2_rect h265_display_crop(const u16 *p);
+
 #if IS_ENABLED(CONFIG_KUNIT)
 size_t h265_mv_buf_size(u32 w, u32 h);
 void h265_apply_rps(struct aml_hevc_ctx *h);

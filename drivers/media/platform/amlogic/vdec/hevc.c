@@ -1041,10 +1041,6 @@ VISIBLE_IF_KUNIT int h265_validate_params(const u16 *p)
 	if (p[P_PIC_WIDTH] < H265_MIN_DIM || p[P_PIC_HEIGHT] < H265_MIN_DIM ||
 	    p[P_PIC_WIDTH] > H265_MAX_DIM || p[P_PIC_HEIGHT] > H265_MAX_HEIGHT)
 		return -EINVAL;
-	if (p[P_CONFORMANCE_WINDOW_FLAG] &&
-	    (2U * (p[P_CONF_WIN_LEFT_OFFSET] + p[P_CONF_WIN_RIGHT_OFFSET]) >= p[P_PIC_WIDTH] ||
-	     2U * (p[P_CONF_WIN_TOP_OFFSET] + p[P_CONF_WIN_BOTTOM_OFFSET]) >= p[P_PIC_HEIGHT]))
-		return -EINVAL;
 	/* An NV12 CAPTURE queue must not silently discard a Main10 stream's low bits. */
 	if (p[P_CHROMA_FORMAT_IDC] != 1 || p[P_BIT_DEPTH])
 		return -EOPNOTSUPP;
@@ -1911,13 +1907,7 @@ static void h265_source_change(struct aml_hevc_ctx *h)
 		old->plane_fmt[1].sizeimage >= h->format.plane_fmt[1].sizeimage;
 	h->format.quantization = p[P_VIDEO_SIGNAL_TYPE] & BIT(9) ?
 		V4L2_QUANTIZATION_FULL_RANGE : V4L2_QUANTIZATION_LIM_RANGE;
-	h->crop = (struct v4l2_rect) { .width = h->pic_w, .height = h->pic_h };
-	if (p[P_CONFORMANCE_WINDOW_FLAG]) {
-		h->crop.left = 2 * p[P_CONF_WIN_LEFT_OFFSET];
-		h->crop.top = 2 * p[P_CONF_WIN_TOP_OFFSET];
-		h->crop.width -= h->crop.left + 2 * p[P_CONF_WIN_RIGHT_OFFSET];
-		h->crop.height -= h->crop.top + 2 * p[P_CONF_WIN_BOTTOM_OFFSET];
-	}
+	h->crop = h265_display_crop(p);
 	h->reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
 	WRITE_ONCE(ctx->hevc_min_capture, h->reorder_limit + 2);
 	h->format_known = true;
