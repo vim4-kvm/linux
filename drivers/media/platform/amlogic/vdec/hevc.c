@@ -1493,8 +1493,7 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		u32 parse = H265_DISCARD_NAL;
 
 		if (nal == H265_NAL_EOS) {
-			h->curr_poc = H265_INVALID_POC;
-			h->poc_random_access = H265_MAX_INT;
+			h265_end_sequence(h);
 		} else if (nal == H265_NAL_VPS) {
 			parse = H265_NAL_UNIT_VPS;
 			h->have_vps = true;
@@ -1786,13 +1785,24 @@ VISIBLE_IF_KUNIT int h265_next_output(struct aml_hevc_ctx *h, bool flush)
 	int i, next = -1;
 
 	for (i = 0; i < H265_SLOTS; i++) {
+		struct h265_pic *pic = &h->pic[i];
+		int poc = pic->output_flush ? pic->output_poc : pic->poc;
+		int next_poc;
+
 		if (!h->pic[i].output)
 			continue;
-		if (next < 0 || h->pic[i].epoch < h->pic[next].epoch ||
-		    (h->pic[i].epoch == h->pic[next].epoch && h->pic[i].poc < h->pic[next].poc))
+		if (next < 0) {
+			next = i;
+			continue;
+		}
+		next_poc = h->pic[next].output_flush ?
+			h->pic[next].output_poc : h->pic[next].poc;
+		if (h->pic[i].epoch < h->pic[next].epoch ||
+		    (h->pic[i].epoch == h->pic[next].epoch && poc < next_poc))
 			next = i;
 	}
-	if (next >= 0 && !flush && h->pic[next].epoch == h->epoch &&
+	if (next >= 0 && !flush && !h->pic[next].output_flush &&
+	    h->pic[next].epoch == h->epoch &&
 	    h->pending <= h->pic[next].reorder_limit)
 		return -1;
 	return next;
@@ -1805,6 +1815,7 @@ static void h265_output(struct aml_hevc_ctx *h, int slot,
 	struct vb2_v4l2_buffer *vb = h->pic[slot].output;
 
 	h->pic[slot].output = NULL;
+	h->pic[slot].output_flush = false;
 	h->pending--;
 	vb->sequence = h->sequence++;
 	if (last)

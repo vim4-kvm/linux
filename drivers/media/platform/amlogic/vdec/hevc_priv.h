@@ -93,6 +93,9 @@ struct h265_pic {
 	u32 width, height;
 	int slice_type;
 	struct vb2_v4l2_buffer *output;
+	/* EOS invalidates reference POCs before the worker delivers pending output. */
+	bool output_flush;
+	int output_poc;
 	u32 epoch;
 	unsigned int reorder_limit;
 
@@ -177,6 +180,7 @@ struct aml_hevc_ctx {
 };
 
 struct v4l2_rect h265_display_crop(const u16 *p);
+void h265_end_sequence(struct aml_hevc_ctx *h);
 
 #if IS_ENABLED(CONFIG_KUNIT)
 size_t h265_mv_buf_size(u32 w, u32 h);

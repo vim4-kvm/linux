@@ -23,3 +23,23 @@ struct v4l2_rect h265_display_crop(const u16 *p)
 	crop.height -= height;
 	return crop;
 }
+
+void h265_end_sequence(struct aml_hevc_ctx *h)
+{
+	unsigned int i;
+
+	for (i = 0; i < H265_SLOTS; i++) {
+		struct h265_pic *pic = &h->pic[i];
+
+		/* Keep display order while immediately retiring reference identities. */
+		if (pic->output && !pic->output_flush) {
+			pic->output_poc = pic->poc;
+			pic->output_flush = true;
+		}
+		pic->poc = H265_INVALID_POC;
+		pic->referenced = false;
+		pic->long_term = false;
+	}
+	h->curr_poc = H265_INVALID_POC;
+	h->poc_random_access = H265_MAX_INT;
+}
