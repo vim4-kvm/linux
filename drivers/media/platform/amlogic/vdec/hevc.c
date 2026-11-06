@@ -1027,7 +1027,8 @@ VISIBLE_IF_KUNIT int h265_validate_params(const u16 *p)
 		return -EINVAL;
 	width_ctu = DIV_ROUND_UP(p[P_PIC_WIDTH], 1U << log2_ctu);
 	height_ctu = DIV_ROUND_UP(p[P_PIC_HEIGHT], 1U << log2_ctu);
-	if (p[P_SLICE_SEGMENT_ADDRESS] >= width_ctu * height_ctu)
+	if (!p[P_FIRST_SLICE_SEGMENT_IN_PIC_FLAG] &&
+	    p[P_SLICE_SEGMENT_ADDRESS] >= width_ctu * height_ctu)
 		return -EINVAL;
 	if (!(p[P_TILES_ENABLED_FLAG] & 1))
 		return 0;
@@ -1191,7 +1192,7 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 
 	wr(hw, HEVC_WAIT_FLAG, read_dos_reg(hw, HEVC_WAIT_FLAG) | 0x2);
 
-	if (p[P_SLICE_SEGMENT_ADDRESS] == 0) {
+	if (h->slice_segment_addr == 0) {
 		int sao_mem_unit = (h->lcu_size == 16 ? 9 : h->lcu_size == 32 ? 14 : 24) << 4;
 		int w_cu = h->lcu_x_num, h_cu = h->lcu_y_num;
 		int slot;
@@ -1236,7 +1237,7 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		h->tile_x = 0;
 		h->tile_y = 0;
 	} else if (h->tile_enabled) {
-		int t = h265_tile_index(h, p[P_SLICE_SEGMENT_ADDRESS], h->lcu_x_num);
+		int t = h265_tile_index(h, h->slice_segment_addr, h->lcu_x_num);
 
 		if (t != -1 && t != (h->tile_x | (h->tile_y << 8))) {
 			h->new_tile = true;

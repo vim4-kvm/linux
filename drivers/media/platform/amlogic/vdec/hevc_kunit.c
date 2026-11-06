@@ -129,6 +129,24 @@ static void tile_boundaries(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), -EOPNOTSUPP);
 }
 
+static void first_slice_ignores_absent_segment_address(struct kunit *test)
+{
+	struct aml_hevc_ctx *h = test->priv;
+
+	h->p[P_PIC_WIDTH] = 832;
+	h->p[P_PIC_HEIGHT] = 480;
+	h->p[P_FIRST_SLICE_SEGMENT_IN_PIC_FLAG] = 1;
+	/* The address syntax element is absent on the first slice. */
+	h->p[P_SLICE_SEGMENT_ADDRESS] = U16_MAX;
+	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), 0);
+	h->p[P_FIRST_SLICE_SEGMENT_IN_PIC_FLAG] = 0;
+	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), -EINVAL);
+	h->p[P_SLICE_SEGMENT_ADDRESS] = 26;
+	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), 0);
+	h->p[P_SLICE_SEGMENT_ADDRESS] = 13 * 8;
+	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), -EINVAL);
+}
+
 static void missing_and_reordered_references(struct kunit *test)
 {
 	static const int pocs[] = { 3, 5, 1 };
@@ -346,6 +364,7 @@ static void output_respects_each_pictures_reorder_limit(struct kunit *test)
 static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(poc_wrap_and_random_access),
 	KUNIT_CASE(invalid_firmware_parameters),
+	KUNIT_CASE(first_slice_ignores_absent_segment_address),
 	KUNIT_CASE(tile_boundaries),
 	KUNIT_CASE(missing_and_reordered_references),
 	KUNIT_CASE(capture_sao_capacity),
