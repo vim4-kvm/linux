@@ -197,13 +197,13 @@ int h265_headers_parse_au(struct h265_headers *headers, const u8 *data, size_t s
 			return -EINVAL;
 		type = (data[pos] >> 1) & 63;
 		bits = (struct h265_bits) { .data = data + pos + 2, .size = next - pos - 2 };
-		if (type == 33)
+		if (type == 33) {
 			ret = h265_sps(headers, &bits);
-		else if (type == 34)
+		} else if (type == 34) {
 			ret = h265_pps(headers, &bits);
-		else if (type < 32)
+		} else if (type < 32) {
 			ret = h265_slice(headers, &bits, type, data[pos + 1] & 7, au);
-		else if (type == 36 || type == 37) {
+		} else if (type == 36 || type == 37) {
 			if (au->has_picture)
 				au->cvs_boundary_after = true;
 			else
