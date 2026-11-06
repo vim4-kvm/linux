@@ -522,86 +522,132 @@ static void irap_releases_previous_references(struct kunit *test)
 	}
 }
 
-static void output_orders_b_pictures_before_new_epoch(struct kunit *test)
+static const struct h265_output_limits reorder_four = {
+	.max_dec_pic_buffering = 6, .max_num_reorder_pics = 4,
+};
+
+static void decoded_for_output(struct h265_dpb *h, unsigned int slot, int poc,
+			       const struct h265_output_limits *limits)
 {
-	static const int pocs[] = { 0, 4, 2, 1, 0 };
-	static const int slots[] = { 0, 3, 2, 1, 4 };
-	struct h265_dpb *h = test->priv;
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
-		h->pic[i].poc = pocs[i];
-		h->pic[i].output_pending = true;
-	}
-	/* A new IDR's POC 0 must follow the previous GOP's reordered pictures. */
-	h->pic[4].epoch = 1;
-	for (i = 0; i < ARRAY_SIZE(slots); i++) {
-		int slot = h265_next_output(h, true);
-
-		KUNIT_ASSERT_EQ(test, slot, slots[i]);
-		h->pic[slot].output_pending = false;
-	}
-	KUNIT_EXPECT_EQ(test, h265_next_output(h, true), -1);
+	h->pic[slot].valid = true;
+	h->pic[slot].referenced = true;
+	h->pic[slot].poc = poc;
+	h265_dpb_end_picture(h, slot, true, limits);
 }
 
-static void output_respects_each_pictures_reorder_limit(struct kunit *test)
+static void output_fifo_preserves_bumping_before_a_new_irap(struct kunit *test)
+{
+	struct h265_dpb *h = test->priv;
+	struct h265_picture_info info = { .irap = true, .no_rasl_output = true };
+
+	decoded_for_output(h, 0, 4, &reorder_four);
+	decoded_for_output(h, 1, 2, &reorder_four);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), -ENOENT);
+	h265_dpb_begin_picture(h, &info, &reorder_four);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 1);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 0);
+	decoded_for_output(h, 2, 0, &reorder_four);
+	h265_dpb_flush(h);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 2);
+	KUNIT_EXPECT_EQ(test, h->pending, 0U);
+}
+
+static void output_respects_the_active_sps_reorder_limit(struct kunit *test)
 {
 	static const int pocs[] = { 4, 6, 8, 10, 2 };
 	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
-	/* The initial sequence had no reordering; a later SPS requires four. */
-	h->reorder_limit = 0;
-	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
-		h->pic[i].poc = pocs[i];
-		h->pic[i].reorder_limit = 4;
-		if (i < 4)
-			h->pic[i].output_pending = true;
-	}
-	h->pending = 4;
-	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), -1);
-	/* A later decoded picture has a lower POC and must precede POC 4. */
-	h->pic[4].output_pending = true;
-	h->pending++;
-	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), 4);
-	h->pic[4].output_pending = false;
-	h->pending--;
-	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), -1);
-	KUNIT_EXPECT_EQ(test, h265_next_output(h, true), 0);
-	/* An IRAP epoch boundary flushes the older sequence's remaining output. */
-	h->epoch++;
-	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), 0);
+	for (i = 0; i < ARRAY_SIZE(pocs); i++)
+		decoded_for_output(h, i, pocs[i], &reorder_four);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 4);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), -ENOENT);
+	h265_dpb_flush(h);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 0);
+	h265_dpb_flush(h);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 1);
 }
 
 static void continuous_cra_keeps_leading_picture_order(struct kunit *test)
 {
 	static const int pocs[] = { 26, 27, 28, 29, 30, 31, 32, 25 };
+	const struct h265_output_limits limits = {
+		.max_dec_pic_buffering = 10, .max_num_reorder_pics = 7,
+	};
 	struct h265_dpb *h = test->priv;
 	unsigned int i;
 
 	h->nal_type = H265_NAL_IDR_N_LP;
 	h->poc_random_access = H265_MAX_INT;
 	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
-	KUNIT_ASSERT_EQ(test, h->epoch, 1U);
 	h->nal_type = H265_NAL_CRA;
 	h->curr_poc = 32;
 	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
-	KUNIT_EXPECT_EQ(test, h->epoch, 1U);
-	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
-		h->pic[i].poc = pocs[i];
-		h->pic[i].epoch = h->epoch;
-		h->pic[i].reorder_limit = 7;
-		if (i < 7)
-			h->pic[i].output_pending = true;
-	}
-	h->pending = 7;
-	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), -1);
-	h->nal_type = H265_NAL_RASL_R;
-	h->curr_poc = 25;
-	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
-	h->pic[7].output_pending = true;
-	h->pending++;
-	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), 7);
+	for (i = 0; i < ARRAY_SIZE(pocs); i++)
+		decoded_for_output(h, i, pocs[i], &limits);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 7);
+}
+
+static void cvs_boundary_discards_waiting_pictures_without_matching_old_pocs(struct kunit *test)
+{
+	struct h265_picture_info info = { .irap = true, .is_cra = true,
+		.no_rasl_output = true };
+	struct h265_dpb *h = test->priv;
+
+	decoded_for_output(h, 0, 42, &reorder_four);
+	decoded_for_output(h, 1, 44, &reorder_four);
+	h265_dpb_end_sequence(h);
+	KUNIT_EXPECT_TRUE(test, h->new_cvs);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), -ENOENT);
+	KUNIT_EXPECT_TRUE(test, h->pic[0].referenced);
+	h265_dpb_begin_picture(h, &info, &reorder_four);
+	KUNIT_EXPECT_FALSE(test, h->pic[0].referenced);
+	KUNIT_EXPECT_EQ(test, h265_pic_by_poc(h, 42, true), -1);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_discard(h), 0);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_discard(h), 1);
+	h265_dpb_flush(h);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), -ENOENT);
+	KUNIT_EXPECT_EQ(test, h->pending, 0U);
+}
+
+static void hidden_pictures_keep_references_and_fullness_bumps_before_decode(struct kunit *test)
+{
+	struct h265_dpb *h = test->priv;
+	const struct h265_output_limits limits = {
+		.max_dec_pic_buffering = 2, .max_num_reorder_pics = 4,
+	};
+	struct h265_picture_info info = {};
+
+	decoded_for_output(h, 0, 2, &reorder_four);
+	decoded_for_output(h, 1, 4, &reorder_four);
+	h->pic[0].referenced = false;
+	h265_dpb_begin_picture(h, &info, &limits);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 0);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), -ENOENT);
+	h->pic[2].valid = true;
+	h->pic[2].referenced = true;
+	h->pic[2].poc = 6;
+	h265_dpb_end_picture(h, 2, false, &reorder_four);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_discard(h), 2);
+	KUNIT_EXPECT_TRUE(test, h->pic[2].referenced);
+	KUNIT_EXPECT_TRUE(test, h->pic[1].needed_for_output);
+}
+
+static void latency_counts_only_later_output_pictures(struct kunit *test)
+{
+	struct h265_dpb *h = test->priv;
+	const struct h265_output_limits limits = {
+		.max_dec_pic_buffering = 6, .max_num_reorder_pics = 1,
+		.max_latency_increase_plus1 = 1,
+	};
+
+	decoded_for_output(h, 0, 4, &reorder_four);
+	decoded_for_output(h, 1, 2, &limits);
+	KUNIT_EXPECT_EQ(test, h->pic[0].latency_count, 1U);
+	KUNIT_EXPECT_EQ(test, h->pic[1].latency_count, 0U);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 1);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), 0);
+	KUNIT_EXPECT_EQ(test, h265_dpb_pop_output(h), -ENOENT);
 }
 
 static void restarted_cra_skips_unavailable_rasl(struct kunit *test)
@@ -614,7 +660,6 @@ static void restarted_cra_skips_unavailable_rasl(struct kunit *test)
 	h->curr_poc = 32;
 	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
 	KUNIT_EXPECT_EQ(test, h->poc_random_access, 32);
-	KUNIT_EXPECT_EQ(test, h->epoch, 1U);
 	h->nal_type = H265_NAL_RASL_R;
 	h->curr_poc = 28;
 	KUNIT_EXPECT_TRUE(test, h265_update_random_access(h));
@@ -626,7 +671,6 @@ static void restarted_cra_skips_unavailable_rasl(struct kunit *test)
 	h->nal_type = H265_NAL_IDR_N_LP;
 	h->curr_poc = 0;
 	KUNIT_EXPECT_FALSE(test, h265_update_random_access(h));
-	KUNIT_EXPECT_EQ(test, h->epoch, 2U);
 	KUNIT_EXPECT_EQ(test, h->poc_random_access, -H265_MAX_INT);
 	h->nal_type = H265_NAL_CRA;
 	h->curr_poc = 32;
@@ -634,6 +678,85 @@ static void restarted_cra_skips_unavailable_rasl(struct kunit *test)
 	h->nal_type = H265_NAL_RASL_R;
 	h->curr_poc = 25;
 	KUNIT_EXPECT_FALSE(test, h265_update_random_access(h));
+}
+
+#include "hevc_kunit_traces.h"
+
+static void check_trace_outputs(struct kunit *test, struct h265_dpb *h,
+				const u16 *expected, unsigned int count, unsigned int *seen)
+{
+	int slot;
+
+	while (h265_dpb_pop_discard(h) >= 0)
+		;
+	while ((slot = h265_dpb_pop_output(h)) >= 0) {
+		KUNIT_ASSERT_LT(test, *seen, count);
+		KUNIT_EXPECT_EQ(test, h->pic[slot].decode_idx, (u32)expected[(*seen)++]);
+	}
+}
+
+static void replay_output_trace(struct kunit *test, const struct h265_output_trace *trace,
+				unsigned int count, const u16 *expected, unsigned int outputs)
+{
+	struct h265_dpb *h = test->priv;
+	bool no_rasl = false;
+	unsigned int i, j, k, seen = 0;
+	int slot;
+
+	reset_params(h);
+	h->nslots = H265_SLOTS;
+	for (i = 0; i < count; i++) {
+		const struct h265_output_trace *p = &trace[i];
+		struct h265_picture_info info = {
+			.irap = p->nal >= 16 && p->nal <= 23, .is_cra = p->nal == 21,
+			.no_rasl_output = p->flags & 4, .no_output_of_prior_pics = p->flags & 2,
+			.first_picture = !h->decode_idx,
+		};
+		struct h265_output_limits limits = {
+			.max_dec_pic_buffering = p->buffering, .max_num_reorder_pics = p->reorder,
+		};
+
+		if (info.irap)
+			no_rasl = info.no_rasl_output;
+		if (no_rasl && (p->nal == 8 || p->nal == 9))
+			continue;
+		for (j = 0; j < H265_SLOTS; j++) {
+			if (!h->pic[j].referenced)
+				continue;
+			for (k = 0; k < p->nrefs; k++)
+				if (h->pic[j].poc == p->refs[k])
+					break;
+			h->pic[j].referenced = k < p->nrefs;
+		}
+		h265_dpb_begin_picture(h, &info, &limits);
+		check_trace_outputs(test, h, expected, outputs, &seen);
+		slot = h265_free_slot(h);
+		KUNIT_ASSERT_GE(test, slot, 0);
+		h->pic[slot] = (struct h265_pic) { .valid = true, .referenced = true,
+			.poc = p->poc, .decode_idx = h->decode_idx++ };
+		h265_dpb_end_picture(h, slot, p->flags & 1, &limits);
+		check_trace_outputs(test, h, expected, outputs, &seen);
+	}
+	h265_dpb_flush(h);
+	check_trace_outputs(test, h, expected, outputs, &seen);
+	KUNIT_EXPECT_EQ(test, seen, outputs);
+	KUNIT_EXPECT_EQ(test, h->pending, 0U);
+}
+
+static void conformance_output_prefix_traces(struct kunit *test)
+{
+	replay_output_trace(test, output_trace_0, ARRAY_SIZE(output_trace_0),
+			    output_expected_0, ARRAY_SIZE(output_expected_0));
+	replay_output_trace(test, output_trace_1, ARRAY_SIZE(output_trace_1),
+			    output_expected_1, ARRAY_SIZE(output_expected_1));
+	replay_output_trace(test, output_trace_2, ARRAY_SIZE(output_trace_2),
+			    output_expected_2, ARRAY_SIZE(output_expected_2));
+	replay_output_trace(test, output_trace_3, ARRAY_SIZE(output_trace_3),
+			    output_expected_3, ARRAY_SIZE(output_expected_3));
+	replay_output_trace(test, output_trace_4, ARRAY_SIZE(output_trace_4),
+			    output_expected_4, ARRAY_SIZE(output_expected_4));
+	replay_output_trace(test, output_trace_5, ARRAY_SIZE(output_trace_5),
+			    output_expected_5, ARRAY_SIZE(output_expected_5));
 }
 
 static struct kunit_case hevc_test_cases[] = {
@@ -652,10 +775,14 @@ static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(mv_storage_covers_edge_ctus),
 	KUNIT_CASE(rps_and_output_own_picture_slots),
 	KUNIT_CASE(irap_releases_previous_references),
-	KUNIT_CASE(output_orders_b_pictures_before_new_epoch),
-	KUNIT_CASE(output_respects_each_pictures_reorder_limit),
+	KUNIT_CASE(output_fifo_preserves_bumping_before_a_new_irap),
+	KUNIT_CASE(output_respects_the_active_sps_reorder_limit),
 	KUNIT_CASE(continuous_cra_keeps_leading_picture_order),
 	KUNIT_CASE(restarted_cra_skips_unavailable_rasl),
+	KUNIT_CASE(cvs_boundary_discards_waiting_pictures_without_matching_old_pocs),
+	KUNIT_CASE(hidden_pictures_keep_references_and_fullness_bumps_before_decode),
+	KUNIT_CASE(latency_counts_only_later_output_pictures),
+	KUNIT_CASE(conformance_output_prefix_traces),
 	{}
 };
 
