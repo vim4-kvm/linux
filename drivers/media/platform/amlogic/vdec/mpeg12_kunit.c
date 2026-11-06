@@ -28,6 +28,43 @@ static void initial_field_pair_references(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, refs[0], U64_MAX);
 }
 
+static void unidirectional_b_references(struct kunit *test)
+{
+	struct v4l2_ctrl_mpeg2_picture pic = {
+		.picture_coding_type = V4L2_MPEG2_PIC_CODING_TYPE_B,
+		.forward_ref_ts = U64_MAX, .backward_ref_ts = 0,
+	};
+	u64 refs[2];
+	u32 specs[2] = { ~0u, 0x030201 };
+	u32 ref0, ref1;
+	unsigned int count = mpeg12_reference_timestamps(&pic, NULL, false, refs);
+
+	/* The opening B fields in sony-ct1/ct2 have only a backward anchor. */
+	KUNIT_ASSERT_EQ(test, mpeg12_reference_registers(refs, specs, count,
+							 &ref0, &ref1), 0);
+	KUNIT_EXPECT_EQ(test, ref0, ~0u);
+	KUNIT_EXPECT_EQ(test, ref1, specs[1]);
+	refs[0] = 0;
+	refs[1] = U64_MAX;
+	specs[0] = specs[1];
+	specs[1] = ~0u;
+	KUNIT_ASSERT_EQ(test, mpeg12_reference_registers(refs, specs, count,
+							 &ref0, &ref1), 0);
+	KUNIT_EXPECT_EQ(test, ref0, specs[0]);
+	KUNIT_EXPECT_EQ(test, ref1, ~0u);
+	/* A declared reference that cannot be resolved must still fail. */
+	refs[1] = 1000;
+	KUNIT_EXPECT_EQ(test, mpeg12_reference_registers(refs, specs, count,
+							 &ref0, &ref1), -EINVAL);
+	refs[0] = U64_MAX;
+	refs[1] = U64_MAX;
+	specs[0] = ~0u;
+	KUNIT_EXPECT_EQ(test, mpeg12_reference_registers(refs, specs, count,
+							 &ref0, &ref1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, mpeg12_reference_registers(refs, specs, 1,
+							 &ref0, &ref1), -EINVAL);
+}
+
 static u32 header_bits(const u8 *data, unsigned int bit, unsigned int count)
 {
 	u32 value = 0;
@@ -113,6 +150,7 @@ static void vbv_matrices_and_field_flags(struct kunit *test)
 
 static struct kunit_case mpeg12_test_cases[] = {
 	KUNIT_CASE(initial_field_pair_references),
+	KUNIT_CASE(unidirectional_b_references),
 	KUNIT_CASE(vbv_matrices_and_field_flags),
 	{}
 };
