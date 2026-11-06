@@ -15,18 +15,6 @@
 
 #define AML_VDEC_DRV_NAME "aml-vdec-drv"
 
-static bool enable_t7;
-module_param(enable_t7, bool, 0400);
-MODULE_PARM_DESC(enable_t7, "Enable unverified T7 decode experiment; requires local RESET access");
-
-static bool allow_t7_power;
-module_param(allow_t7_power, bool, 0600);
-MODULE_PARM_DESC(allow_t7_power, "Allow T7 decoder runtime power management");
-
-static bool t7_snapshot_only = true;
-module_param(t7_snapshot_only, bool, 0400);
-MODULE_PARM_DESC(t7_snapshot_only, "Keep T7 decoder opens disabled during bring-up");
-
 static ssize_t power_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
@@ -63,11 +51,6 @@ static int fops_vcodec_open(struct file *file)
 	struct aml_vdec_ctx *ctx = NULL;
 	int ret = 0;
 
-	/* udev v4l_id opens a newly registered node. Do not let it power DOS. */
-	if (dec_dev->pvdec_data->has_dbus_ctrl &&
-	    (t7_snapshot_only || !READ_ONCE(allow_t7_power)))
-		return -EPERM;
-
 	ctx = kzalloc(node->desc->interface->context_size, GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
@@ -78,6 +61,7 @@ static int fops_vcodec_open(struct file *file)
 		goto err_open;
 	}
 	if (dec_dev->pvdec_data->has_dbus_ctrl) {
+		/* Metadata-only opens wake VDEC1, never the HEVC core. */
 		ret = pm_runtime_resume_and_get(&dec_dev->plat_dev->dev);
 		if (ret < 0)
 			goto err_open;
@@ -278,9 +262,6 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 	pdata = of_device_get_match_data(&pdev->dev);
 	if (!pdata)
 		return -ENODEV;
-	if (pdata->has_dbus_ctrl && !enable_t7)
-		return -ENODEV;
-
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
@@ -426,9 +407,6 @@ static int aml_vdec_runtime_resume(struct device *dev)
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
 	int ret;
 
-	if (vdec->pvdec_data->has_dbus_ctrl &&
-	    (t7_snapshot_only || !READ_ONCE(allow_t7_power)))
-		return -EPERM;
 	if (vdec->pvdec_data->has_dbus_ctrl) {
 		ret = meson_t7_dos_get(dev, true);
 		if (ret)
