@@ -103,8 +103,6 @@ static void h265_free_pics(struct aml_hevc_ctx *h)
 		if (pic->mv_v)
 			dma_free_coherent(dev, h->mv_size, pic->mv_v, pic->mv_p);
 		memset(pic, 0, sizeof(*pic));
-		memset(&h->dpb.pic[i], 0, sizeof(h->dpb.pic[i]));
-		h->capture[i] = NULL;
 	}
 	h->body_size = 0;
 	h->hdr_size = 0;
@@ -247,8 +245,6 @@ int h265_hw_alloc_pictures(struct aml_hevc_ctx *h)
 		return 0;
 
 	h265_free_pics(h);
-	/* Reallocation discards all references preceding the next random access. */
-	h->dpb.poc_random_access = H265_MAX_INT;
 	for (i = 0; i < h->dpb.nslots; i++) {
 		struct h265_buffer *pic = &h->buffers[i];
 
@@ -263,7 +259,6 @@ int h265_hw_alloc_pictures(struct aml_hevc_ctx *h)
 			return -ENOMEM;
 		}
 		memset(pic->mv_v, 0, mv);
-		h->dpb.pic[i].poc = H265_INVALID_POC;
 	}
 	h->body_size = body;
 	h->hdr_size = hdr;
@@ -756,6 +751,41 @@ static void h265_read_rpm(struct aml_hevc_ctx *h)
 }
 
 /* Returns 0 to decode, 1 to skip, 2 to configure after stop, or a negative error. */
+static int h265_begin_picture(struct aml_hevc_ctx *h)
+{
+	struct h265_picture_info info;
+	int ret;
+
+	if (h->picture_started)
+		return h->skip_picture ? 1 : 0;
+	if (!h->au.has_picture)
+		return -EINVAL;
+	if (h->dpb.new_cvs) {
+		h->dpb.poc_random_access = H265_MAX_INT;
+		h->dpb.prev_tid0_poc = 0;
+		h->dpb.new_cvs = false;
+	}
+	info = (struct h265_picture_info) {
+		.irap = h->dpb.nal_type >= 16 && h->dpb.nal_type <= 23,
+		.is_cra = h->dpb.nal_type == H265_NAL_CRA,
+		.first_picture = !h->dpb.decode_idx,
+		.no_output_of_prior_pics = h->au.picture.no_output_of_prior_pics,
+	};
+	info.no_rasl_output = info.irap && (!info.is_cra ||
+		h->dpb.poc_random_access == H265_MAX_INT);
+	h265_update_poc(&h->dpb);
+	h->skip_picture = h265_update_random_access(&h->dpb);
+	if (!h->skip_picture) {
+		ret = h265_resolve_rps(&h->dpb, &h->dpb.rps);
+		if (ret)
+			return ret;
+		h265_apply_rps(&h->dpb, &h->dpb.rps);
+		h265_dpb_begin_picture(&h->dpb, &info, &h->au.picture.limits);
+	}
+	h->picture_started = true;
+	return h->skip_picture ? 1 : 0;
+}
+
 static int h265_slice_header(struct aml_hevc_ctx *h)
 {
 	struct aml_vdec_hw *hw = h->hw;
@@ -817,16 +847,21 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 	h->dpb.lcu_x_num = DIV_ROUND_UP(h->dpb.pic_w, h->dpb.lcu_size);
 	h->dpb.lcu_y_num = DIV_ROUND_UP(h->dpb.pic_h, h->dpb.lcu_size);
 	h->dpb.lcu_total = h->dpb.lcu_x_num * h->dpb.lcu_y_num;
-	h->dpb.nslots = clamp_t(int, p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0] + 3,
+	h->dpb.nslots = clamp_t(int, h->au.picture.limits.max_dec_pic_buffering + 2,
 				4, H265_SLOTS);
+	if (!h->dpb.slice_segment_addr) {
+		ret = h265_begin_picture(h);
+		if (ret)
+			return ret;
+		dev_dbg(hw->dev, "hevc: SPS/RPM output limits buffering=%u/%u reorder=%u/%u\n",
+			h->au.picture.limits.max_dec_pic_buffering,
+			p[P_SPS_MAX_DEC_PIC_BUFFERING_MINUS1_0] + 1,
+			h->au.picture.limits.max_num_reorder_pics, p[P_SPS_NUM_REORDER_PICS_0]);
+	}
 	/* Leave the firmware paused before it can DMA into picture storage. */
 	if (!h->configured || h->alloc_w != h->dpb.pic_w || h->alloc_h != h->dpb.pic_h ||
 	    h->alloc_nslots != h->dpb.nslots)
 		return 2;
-
-	h265_update_poc(&h->dpb);
-	if (h265_update_random_access(&h->dpb))
-		return 1;
 
 	wr(hw, HEVC_WAIT_FLAG, read_dos_reg(hw, HEVC_WAIT_FLAG) | 0x2);
 
@@ -837,10 +872,6 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		int slot;
 
 		h->dpb.new_pic = true;
-		ret = h265_resolve_rps(&h->dpb, &h->dpb.rps);
-		if (ret)
-			return ret;
-		h265_apply_rps(&h->dpb, &h->dpb.rps);
 
 		slot = h265_free_slot(&h->dpb);
 		if (slot < 0) {
@@ -856,8 +887,6 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		h->dpb.pic[slot].height = h->dpb.pic_h;
 		h->dpb.pic[slot].decode_idx = h->dpb.decode_idx++;
 		h->dpb.pic[slot].slice_type = h->dpb.slice_type;
-		h->dpb.pic[slot].epoch = h->dpb.epoch;
-		h->dpb.pic[slot].reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
 
 		h265_fill_mmu_map(h);
 
@@ -874,7 +903,7 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		h->dpb.new_pic = false;
 	}
 
-	if (h->dpb.iprev_poc != h->dpb.curr_poc) {
+	if (h->dpb.new_pic || h->dpb.iprev_poc != h->dpb.curr_poc) {
 		h->dpb.new_tile = true;
 		h->dpb.tile_x = 0;
 		h->dpb.tile_y = 0;
@@ -911,9 +940,9 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 			struct h265_pic *pic = &h->dpb.pic[i];
 
 			if (pic->valid)
-				dev_dbg(hw->dev, "hevc: DPB slot=%d poc=%d ref=%d lt=%d size=%ux%u epoch=%u\n",
+				dev_dbg(hw->dev, "hevc: DPB slot=%d poc=%d ref=%d lt=%d size=%ux%u\n",
 					i, pic->poc, pic->referenced, pic->long_term,
-					pic->width, pic->height, pic->epoch);
+					pic->width, pic->height);
 		}
 		return ret;
 	}
@@ -1064,8 +1093,7 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		u32 parse = H265_DISCARD_NAL;
 
 		if (nal == H265_NAL_EOS) {
-			h->dpb.curr_poc = H265_INVALID_POC;
-			h->dpb.poc_random_access = H265_MAX_INT;
+			/* The host's AU metadata applies this boundary in byte order. */
 		} else if (nal == H265_NAL_VPS) {
 			parse = H265_NAL_UNIT_VPS;
 			h->have_vps = true;
