@@ -115,6 +115,10 @@ struct h265_pic {
 	unsigned int reorder_limit;
 };
 
+struct h265_crop {
+	u32 left, top, width, height;
+};
+
 struct h265_tile {
 	int start_cu_x, start_cu_y, width, height;
 	u32 sao_vb, sao_abv;
@@ -179,6 +183,7 @@ void h265_update_tiles(struct h265_dpb *h, int w_cu, int h_cu,
 		       int sao_mem_unit);
 int h265_tile_index(struct h265_dpb *h, int cu_adr, int w_lcu);
 int h265_validate_params(const u16 *p);
+struct h265_crop h265_display_crop(const u16 *p);
 void h265_update_poc(struct h265_dpb *h);
 bool h265_update_random_access(struct h265_dpb *h);
 int h265_free_slot(struct h265_dpb *h);
