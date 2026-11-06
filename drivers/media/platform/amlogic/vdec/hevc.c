@@ -230,21 +230,21 @@ static size_t h265_hdr_alloc_size(u32 w, u32 h)
 	return 0x10000;
 }
 
-static size_t h265_mv_buf_size(u32 w, u32 h, int lcu_size)
+VISIBLE_IF_KUNIT size_t h265_mv_buf_size(u32 w, u32 h)
 {
-	int unit = lcu_size == 64 ? 0x200 : lcu_size == 32 ? 0x80 : 0x20;
-	u32 xn = DIV_ROUND_UP(w, lcu_size), yn = DIV_ROUND_UP(h, lcu_size);
+	/* A partial 64x64 CTU still occupies a complete 0x200-byte MV unit. */
+	u32 xn = DIV_ROUND_UP(w, 64), yn = DIV_ROUND_UP(h, 64);
 
-	return ALIGN(xn * yn * unit, SZ_64K);
+	return ALIGN(xn * yn * 0x200, SZ_64K);
 }
+EXPORT_SYMBOL_IF_KUNIT(h265_mv_buf_size);
 
 static int h265_alloc_pics(struct aml_hevc_ctx *h)
 {
 	struct device *dev = h->hw->dev;
 	u32 w = h->pic_w, ht = h->pic_h;
 	size_t body = ALIGN(h265_comp_body_size(w, ht, h->ten_bit), PAGE_SIZE);
-	/* Size the MV buffers for the smallest LCU, so they fit any. */
-	size_t mv = h265_mv_buf_size(w, ht, 16);
+	size_t mv = h265_mv_buf_size(w, ht);
 	size_t hdr = h265_hdr_alloc_size(w, ht);
 	int i;
 
@@ -509,7 +509,7 @@ static bool h265_rps_poc(struct aml_hevc_ctx *h, int i, int *poc, bool *used, bo
 /* apply_ref_pic_set(): everything the current RPS does not name stops being
  * a reference.
  */
-static void h265_apply_rps(struct aml_hevc_ctx *h)
+VISIBLE_IF_KUNIT void h265_apply_rps(struct aml_hevc_ctx *h)
 {
 	int i, j;
 
@@ -541,6 +541,7 @@ static void h265_apply_rps(struct aml_hevc_ctx *h)
 			pic->referenced = false;
 	}
 }
+EXPORT_SYMBOL_IF_KUNIT(h265_apply_rps);
 
 /*
  * Entry @c of a reference list built from the short-term pictures in @first
@@ -937,6 +938,11 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 	v |= BIT(8);			/* NV12 */
 	v &= ~(3 << 14);
 	v |= 2 << 14;			/* line align 64 */
+	/* The V4L path reapplies these DBLK controls for every slice. */
+	v2 = 0x57 << 8;
+	if (h->pic_w >= 1280)
+		v2 |= BIT(4);
+	wr(hw, HEVC_DBLK_CFGB, v2);
 	wr(hw, HEVC_SAO_CTRL1, v);
 
 	v = read_dos_reg(hw, HEVCD_IPP_AXIIF_CONFIG);
@@ -1092,7 +1098,7 @@ VISIBLE_IF_KUNIT void h265_update_poc(struct aml_hevc_ctx *h)
 }
 EXPORT_SYMBOL_IF_KUNIT(h265_update_poc);
 
-static int h265_free_slot(struct aml_hevc_ctx *h)
+VISIBLE_IF_KUNIT int h265_free_slot(struct aml_hevc_ctx *h)
 {
 	int i;
 
@@ -1101,6 +1107,7 @@ static int h265_free_slot(struct aml_hevc_ctx *h)
 			return i;
 	return -ENOBUFS;
 }
+EXPORT_SYMBOL_IF_KUNIT(h265_free_slot);
 
 /* Returns 0 to decode, 1 to skip, 2 to configure after stop, or a negative error. */
 static int h265_slice_header(struct aml_hevc_ctx *h)
@@ -1703,7 +1710,7 @@ int aml_hevc_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selection *s)
 	return ret;
 }
 
-static int h265_next_output(struct aml_hevc_ctx *h)
+VISIBLE_IF_KUNIT int h265_next_output(struct aml_hevc_ctx *h)
 {
 	int i, next = -1;
 
@@ -1716,6 +1723,7 @@ static int h265_next_output(struct aml_hevc_ctx *h)
 	}
 	return next;
 }
+EXPORT_SYMBOL_IF_KUNIT(h265_next_output);
 
 static void h265_output(struct aml_hevc_ctx *h, int slot,
 			enum vb2_buffer_state state, bool last)
