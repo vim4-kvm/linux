@@ -81,9 +81,12 @@ static int stateful_test_init(struct kunit *test)
 	}
 	spin_lock_init(&f->m2m.out_q_ctx.rdy_spinlock);
 	INIT_LIST_HEAD(&f->m2m.out_q_ctx.rdy_queue);
+	f->m2m.out_q_ctx.q.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+	f->input.vb.vb2_buf.vb2_queue = &f->m2m.out_q_ctx.q;
 	spin_lock_init(&f->m2m.cap_q_ctx.rdy_spinlock);
 	INIT_LIST_HEAD(&f->m2m.cap_q_ctx.rdy_queue);
 	capture = &f->m2m.cap_q_ctx.q;
+	capture->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	spin_lock_init(&capture->done_lock);
 	INIT_LIST_HEAD(&capture->done_list);
 	init_waitqueue_head(&capture->done_wq);
