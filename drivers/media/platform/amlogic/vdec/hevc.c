@@ -406,13 +406,14 @@ static void h265_prot_init(struct aml_hevc_ctx *h)
 	h265_config_workspace(h);
 	h265_init_decoder(h);
 
-	wr(hw, HEVC_WAIT_FLAG, 1);
+	/* The aligned input starts at byte zero, with no invalid prefix to skip. */
+	wr(hw, HEVC_WAIT_FLAG, 0);
 	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
 	wr(hw, HEVC_ASSIST_MBOX0_MASK, 1);
 	wr(hw, HEVC_PSCALE_CTRL, 0);
 	wr(hw, H265_DEBUG_REG1, 0);
-	/* check vps/sps/pps/i-slice in ucode */
-	wr(hw, H265_NAL_SEARCH_CTL, 0x8);
+	/* Observe each header handshake until the first format has been parsed. */
+	wr(hw, H265_NAL_SEARCH_CTL, h->format_known ? 0x8 : 0x1);
 	wr(hw, H265_DECODE_STOP_POS, 0);
 	h265_config_decode_mode(h);
 
@@ -443,6 +444,8 @@ static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 	memcpy(h->stream_v, data, size);
 	memset(h->stream_v + size, 0, h->stream_size - size);
 	h->payload = size;
+	dev_dbg(hw->dev, "hevc: input bytes=%zu prefix=%*ph start=%pad skip=0\n",
+		size, (int)min_t(size_t, size, 16), h->stream_v, &h->stream_p);
 
 	wr(hw, HEVC_STREAM_START_ADDR, h->stream_p);
 	wr(hw, HEVC_STREAM_END_ADDR, h->stream_p + h->stream_size - 1);
@@ -1324,11 +1327,49 @@ static void h265_finish(struct aml_hevc_ctx *h, enum vb2_buffer_state state)
 	wake_up(&ctx->queue);
 }
 
+static void h265_dump_start(struct aml_vdec_hw *hw, const char *phase)
+{
+	dev_dbg(hw->dev,
+		"hevc: %s reset=%08x mpsr=%08x cpsr=%08x pc=%08x status=%08x irq=%08x mask=%08x\n",
+		phase, read_dos_reg(hw, DOS_SW_RESET3), read_dos_reg(hw, HEVC_MPSR),
+		read_dos_reg(hw, HEVC_CPSR), read_dos_reg(hw, HEVC_MPC_E),
+		read_dos_reg(hw, HEVC_DEC_STATUS_REG), hw->hevc_irq_status,
+		read_dos_reg(hw, HEVC_ASSIST_MBOX0_MASK));
+	dev_dbg(hw->dev,
+		"hevc: %s stream=%08x..%08x rd=%08x wr=%08x control=%08x fifo=%08x\n",
+		phase, read_dos_reg(hw, HEVC_STREAM_START_ADDR),
+		read_dos_reg(hw, HEVC_STREAM_END_ADDR), read_dos_reg(hw, HEVC_STREAM_RD_PTR),
+		read_dos_reg(hw, HEVC_STREAM_WR_PTR), read_dos_reg(hw, HEVC_STREAM_CONTROL),
+		read_dos_reg(hw, HEVC_STREAM_FIFO_CTL));
+	dev_dbg(hw->dev,
+		"hevc: %s wait=%08x size=%08x shift=%08x shift_status=%08x parser_irq=%08x mode_or_nal=%08x search=%08x\n",
+		phase, read_dos_reg(hw, HEVC_WAIT_FLAG), read_dos_reg(hw, H265_DECODE_SIZE),
+		read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT), read_dos_reg(hw, HEVC_SHIFT_STATUS),
+		read_dos_reg(hw, HEVC_PARSER_INT_CONTROL), read_dos_reg(hw, H265_DECODE_MODE),
+		read_dos_reg(hw, H265_NAL_SEARCH_CTL));
+	dev_dbg(hw->dev,
+		"hevc: %s mailbox_irq=%08x fiq_sel=%08x mcpu_group=%08x mcpu_mask=%08x mcpu_req=%08x\n",
+		phase, read_dos_reg(hw, HEVC_ASSIST_MBOX0_IRQ_REG),
+		read_dos_reg(hw, HEVC_ASSIST_MBOX0_FIQ_SEL),
+		read_dos_reg(hw, HEVC_MCPU_INTR_GRP), read_dos_reg(hw, HEVC_MCPU_INTR_MSK),
+		read_dos_reg(hw, HEVC_MCPU_INTR_REQ));
+	dev_dbg(hw->dev,
+		"hevc: %s parser_status=%08x parser_core=%08x debug_g=%08x debug_h=%08x rpm_or_info=%08x lmem_cmd=%08x lmem_dma=%08x level=%08x\n",
+		phase, read_dos_reg(hw, HEVC_PARSER_INT_STATUS),
+		read_dos_reg(hw, HEVC_PARSER_CORE_CONTROL), read_dos_reg(hw, H265_DEBUG_REG1),
+		read_dos_reg(hw, H265_DECODE_MODE2), read_dos_reg(hw, HEVC_RPM_BUFFER),
+		read_dos_reg(hw, H265_LMEM_DUMP_ADR), read_dos_reg(hw, HEVC_LMEM_DMA_CTRL),
+		read_dos_reg(hw, HEVC_STREAM_LEVEL));
+}
+
 static void h265_command(struct aml_vdec_hw *hw, u32 cmd)
 {
 	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
 	wr(hw, HEVC_DEC_STATUS_REG, cmd);
 	wr(hw, HEVC_MCPU_INTR_REQ, AMRISC_MAIN_REQ);
+	dev_dbg(hw->dev, "hevc: command=%02x status=%08x request=%08x\n",
+		cmd, read_dos_reg(hw, HEVC_DEC_STATUS_REG),
+		read_dos_reg(hw, HEVC_MCPU_INTR_REQ));
 }
 
 static void h265_picture_done(struct aml_hevc_ctx *h)
@@ -1347,6 +1388,8 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 	u32 status = hw->hevc_irq_status;
 	u32 st = status & 0xff;
 
+	dev_dbg(hw->dev, "hevc: irq status=%08x pc=%08x shift=%08x\n",
+		status, read_dos_reg(hw, HEVC_MPC_E), read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT));
 	if (h->finished)
 		return IRQ_HANDLED;
 	if (status == U32_MAX) {
@@ -1391,6 +1434,7 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		}
 		dev_dbg(hw->dev, "hevc: nal %d -> %02x\n", nal, parse);
 		h265_command(hw, parse);
+		h265_dump_start(hw, "header-reply");
 		return IRQ_HANDLED;
 	}
 	case H265_SLICE_SEGMENT_DONE: {
@@ -1542,21 +1586,37 @@ int aml_hevc_dec_run(void *priv)
 	if (ret)
 		goto stop;
 
+	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
+	/* Publish the initial command before resetting and releasing the CPUs. */
+	wr(hw, HEVC_DEC_STATUS_REG, H265_ACTION_DONE);
+	h265_dump_start(hw, "before-reset");
+	/*
+	 * amhevc_start() uses three readbacks before and after CPU reset
+	 * to flush writes and provide a settling delay.
+	 */
+	read_dos_reg(hw, DOS_SW_RESET3);
+	read_dos_reg(hw, DOS_SW_RESET3);
+	read_dos_reg(hw, DOS_SW_RESET3);
 	wr(hw, DOS_SW_RESET3, BIT(12) | BIT(11));
 	wr(hw, DOS_SW_RESET3, 0);
-	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
-	wr(hw, HEVC_DEC_STATUS_REG, 0);
-	wr(hw, HEVC_CPSR, 0);
+	read_dos_reg(hw, DOS_SW_RESET3);
+	read_dos_reg(hw, DOS_SW_RESET3);
+	read_dos_reg(hw, DOS_SW_RESET3);
+	h265_dump_start(hw, "after-reset");
 	wr(hw, HEVC_MPSR, 1);
+	h265_dump_start(hw, "after-start");
 
 	/* m2m cancellation waits for this bounded job and the subsequent DMA stop. */
 	elapsed = wait_event_timeout(ctx->queue, READ_ONCE(ctx->int_cond),
 				     msecs_to_jiffies(H265_TIMEOUT_MS));
 	ret = elapsed ? ctx->decode_result : -ETIMEDOUT;
-	if (!elapsed)
-		dev_err(hw->dev, "hevc: timeout, status %02x pc %08x shift %08x\n",
-			hw->hevc_irq_status, read_dos_reg(hw, HEVC_MPC_E),
+	if (!elapsed) {
+		h265_dump_start(hw, "timeout");
+		dev_err(hw->dev, "hevc: timeout, irq %02x status %02x pc %08x shift %08x\n",
+			hw->hevc_irq_status, read_dos_reg(hw, HEVC_DEC_STATUS_REG),
+			read_dos_reg(hw, HEVC_MPC_E),
 			read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT));
+	}
 stop:
 	stop_ret = aml_hevc_stop_hw(hw);
 	if (stop_ret)
