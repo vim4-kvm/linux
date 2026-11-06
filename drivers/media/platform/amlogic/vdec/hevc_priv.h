@@ -94,6 +94,7 @@ struct h265_pic {
 	int slice_type;
 	struct vb2_v4l2_buffer *output;
 	u32 epoch;
+	unsigned int reorder_limit;
 
 	void *body_v, *hdr_v, *mv_v;
 	dma_addr_t body_p, hdr_p, mv_p;
@@ -179,7 +180,7 @@ struct aml_hevc_ctx {
 size_t h265_mv_buf_size(u32 w, u32 h);
 void h265_apply_rps(struct aml_hevc_ctx *h);
 int h265_free_slot(struct aml_hevc_ctx *h);
-int h265_next_output(struct aml_hevc_ctx *h);
+int h265_next_output(struct aml_hevc_ctx *h, bool flush);
 int h265_validate_params(const u16 *p);
 void h265_update_tiles(struct aml_hevc_ctx *h, int w_cu, int h_cu,
 		       int sao_mem_unit);

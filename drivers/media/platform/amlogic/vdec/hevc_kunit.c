@@ -303,12 +303,44 @@ static void output_orders_b_pictures_before_new_epoch(struct kunit *test)
 	/* A new IDR's POC 0 must follow the previous GOP's reordered pictures. */
 	h->pic[4].epoch = 1;
 	for (i = 0; i < ARRAY_SIZE(slots); i++) {
-		int slot = h265_next_output(h);
+		int slot = h265_next_output(h, true);
 
 		KUNIT_ASSERT_EQ(test, slot, slots[i]);
 		h->pic[slot].output = NULL;
 	}
-	KUNIT_EXPECT_EQ(test, h265_next_output(h), -1);
+	KUNIT_EXPECT_EQ(test, h265_next_output(h, true), -1);
+}
+
+static void output_respects_each_pictures_reorder_limit(struct kunit *test)
+{
+	static const int pocs[] = { 4, 6, 8, 10, 2 };
+	struct aml_hevc_ctx *h = test->priv;
+	struct vb2_v4l2_buffer *outputs;
+	unsigned int i;
+
+	outputs = kunit_kcalloc(test, ARRAY_SIZE(pocs), sizeof(*outputs), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, outputs);
+	/* The initial sequence had no reordering; a later SPS requires four. */
+	h->reorder_limit = 0;
+	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
+		h->pic[i].poc = pocs[i];
+		h->pic[i].reorder_limit = 4;
+		if (i < 4)
+			h->pic[i].output = &outputs[i];
+	}
+	h->pending = 4;
+	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), -1);
+	/* A later decoded picture has a lower POC and must precede POC 4. */
+	h->pic[4].output = &outputs[4];
+	h->pending++;
+	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), 4);
+	h->pic[4].output = NULL;
+	h->pending--;
+	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), -1);
+	KUNIT_EXPECT_EQ(test, h265_next_output(h, true), 0);
+	/* An IRAP epoch boundary flushes the older sequence's remaining output. */
+	h->epoch++;
+	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), 0);
 }
 
 static struct kunit_case hevc_test_cases[] = {
@@ -321,6 +353,7 @@ static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(rps_and_output_own_picture_slots),
 	KUNIT_CASE(irap_releases_previous_references),
 	KUNIT_CASE(output_orders_b_pictures_before_new_epoch),
+	KUNIT_CASE(output_respects_each_pictures_reorder_limit),
 	{}
 };
 

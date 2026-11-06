@@ -1205,6 +1205,7 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		h->pic[slot].decode_idx = h->decode_idx++;
 		h->pic[slot].slice_type = h->slice_type;
 		h->pic[slot].epoch = h->epoch;
+		h->pic[slot].reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
 
 		h265_fill_mmu_map(h);
 
@@ -1709,7 +1710,7 @@ int aml_hevc_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selection *s)
 	return ret;
 }
 
-VISIBLE_IF_KUNIT int h265_next_output(struct aml_hevc_ctx *h)
+VISIBLE_IF_KUNIT int h265_next_output(struct aml_hevc_ctx *h, bool flush)
 {
 	int i, next = -1;
 
@@ -1720,6 +1721,9 @@ VISIBLE_IF_KUNIT int h265_next_output(struct aml_hevc_ctx *h)
 		    (h->pic[i].epoch == h->pic[next].epoch && h->pic[i].poc < h->pic[next].poc))
 			next = i;
 	}
+	if (next >= 0 && !flush && h->pic[next].epoch == h->epoch &&
+	    h->pending <= h->pic[next].reorder_limit)
+		return -1;
 	return next;
 }
 EXPORT_SYMBOL_IF_KUNIT(h265_next_output);
@@ -1742,7 +1746,7 @@ static void h265_flush_pending(struct aml_hevc_ctx *h,
 {
 	int slot;
 
-	while ((slot = h265_next_output(h)) >= 0)
+	while ((slot = h265_next_output(h, true)) >= 0)
 		h265_output(h, slot, state, last && h->pending == 1);
 }
 
@@ -1920,8 +1924,7 @@ void aml_hevc_device_run(struct aml_vdec_ctx *ctx)
 			h265_end_capture(ctx, true);
 		}
 	} else {
-		while ((slot = h265_next_output(h)) >= 0 &&
-		       (h->pending > h->reorder_limit || h->pic[slot].epoch < h->epoch))
+		while ((slot = h265_next_output(h, false)) >= 0)
 			h265_output(h, slot, VB2_BUF_STATE_DONE, false);
 	}
 	/* Publish drain events before either queue can report its final buffer. */
