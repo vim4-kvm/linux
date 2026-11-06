@@ -399,12 +399,20 @@ configure:
 static u32 mpeg12_ref_spec(struct aml_vdec_ctx *ctx, struct mpeg12_canvas *c,
 			   u64 ts)
 {
+	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
 	struct vb2_queue *vq = v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx);
 	struct vb2_buffer *vb = vb2_find_buffer(vq, ts);
+	u32 spec;
 
-	if (!vb)
+	if (!vb) {
+		dev_dbg(hw->dev, "mpeg12 reference ts=%llu not found\n", ts);
 		return 0xffffffff;
-	return mpeg12_canvas_setup(ctx, c, vb);
+	}
+	spec = mpeg12_canvas_setup(ctx, c, vb);
+	if (spec == ~0u)
+		dev_dbg(hw->dev, "mpeg12 reference ts=%llu buffer=%u canvas failed\n",
+			ts, vb->index);
+	return spec;
 }
 
 static void mpeg12_job_done(struct aml_vdec_ctx *ctx, int result)
@@ -440,28 +448,55 @@ mpeg12_reference_timestamps(const struct v4l2_ctrl_mpeg2_picture *pic,
 }
 EXPORT_SYMBOL_IF_KUNIT(mpeg12_reference_timestamps);
 
+VISIBLE_IF_KUNIT int mpeg12_reference_registers(const u64 refs[2],
+						const u32 specs[2], unsigned int count,
+						u32 *ref0, u32 *ref1)
+{
+	*ref0 = ~0u;
+	*ref1 = ~0u;
+	if (!count)
+		return 0;
+	if (count == 1) {
+		if (specs[0] == ~0u)
+			return -EINVAL;
+		*ref0 = specs[0];
+		*ref1 = specs[0];
+		return 0;
+	}
+	/* A leading B picture can predict solely from the newer anchor. */
+	if ((refs[0] == U64_MAX && refs[1] == U64_MAX) ||
+	    (refs[0] != U64_MAX && specs[0] == ~0u) ||
+	    (refs[1] != U64_MAX && specs[1] == ~0u))
+		return -EINVAL;
+	/*
+	 * Supply a valid older canvas to the microcode. Backward-only B
+	 * pictures never sample it, so it can alias the newer anchor.
+	 */
+	*ref0 = refs[0] == U64_MAX ? specs[1] : specs[0];
+	*ref1 = specs[1];
+	return 0;
+}
+EXPORT_SYMBOL_IF_KUNIT(mpeg12_reference_registers);
+
 static int mpeg12_reference_canvases(struct aml_vdec_ctx *ctx,
 				     const struct v4l2_ctrl_mpeg2_picture *pic,
 				     bool pair, u32 *ref0, u32 *ref1)
 {
 	struct aml_mpeg12_ctx *m = ctx->codec_priv;
-	u64 refs[2];
+	u64 refs[2] = { U64_MAX, U64_MAX };
+	u32 specs[2] = { ~0u, ~0u };
 	unsigned int count = mpeg12_reference_timestamps(pic, &m->fld_pic, pair, refs);
 
-	*ref0 = ~0u;
-	*ref1 = ~0u;
 	if (count == 1) {
-		*ref1 = mpeg12_ref_spec(ctx, &m->canvas[2], refs[0]);
-		*ref0 = *ref1;
-		if (*ref1 == ~0u)
-			return -EINVAL;
+		if (refs[0] != U64_MAX)
+			specs[0] = mpeg12_ref_spec(ctx, &m->canvas[2], refs[0]);
 	} else if (count == 2) {
-		*ref0 = mpeg12_ref_spec(ctx, &m->canvas[1], refs[0]);
-		*ref1 = mpeg12_ref_spec(ctx, &m->canvas[2], refs[1]);
-		if (*ref0 == ~0u || *ref1 == ~0u)
-			return -EINVAL;
+		if (refs[0] != U64_MAX)
+			specs[0] = mpeg12_ref_spec(ctx, &m->canvas[1], refs[0]);
+		if (refs[1] != U64_MAX)
+			specs[1] = mpeg12_ref_spec(ctx, &m->canvas[2], refs[1]);
 	}
-	return 0;
+	return mpeg12_reference_registers(refs, specs, count, ref0, ref1);
 }
 
 static irqreturn_t mpeg12_isr(int irq, void *priv)
@@ -782,5 +817,12 @@ int aml_mpeg12_dec_run(void *priv)
 	}
 	if (ret < 0)
 		return ret;
-	return ctx->decode_result;
+	ret = ctx->decode_result;
+	if (ret < 0)
+		dev_dbg(hw->dev,
+			"mpeg12 completion error: ts=%llu type=%u structure=%u forward=%llu backward=%llu out=%u info=%08x errors=%u\n",
+			src->vb2_buf.timestamp, pic->picture_coding_type,
+			pic->picture_structure, pic->forward_ref_ts, pic->backward_ref_ts,
+			m->status, m->pic_info, read_dos_reg(hw, MREG_ERROR_COUNT));
+	return ret;
 }
