@@ -238,6 +238,8 @@ int h264_reference_pic_num(struct aml_h264_ctx *h264,
 			   const struct h264_decode_buf_spec *ref);
 void h264_prune_picture_slots(struct aml_h264_ctx *h264, u64 timestamp, bool held);
 int h264_get_picture_slots(struct aml_h264_ctx *h264, u64 timestamp);
+bool h264_reference_missing(struct aml_h264_ctx *h264,
+			    u64 timestamp, bool buffer_present);
 int h264_resolve_reference(struct aml_h264_ctx *h264,
 			   struct h264_decode_buf_spec *ref);
 bool h264_use_placeholder_canvas(struct aml_h264_ctx *h264,

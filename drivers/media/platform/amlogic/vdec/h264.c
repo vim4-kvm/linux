@@ -1088,6 +1088,14 @@ static int get_canvas_pos(struct aml_h264_ctx *h264_ctx, u64 timestamp)
 	return -ENOENT;
 }
 
+VISIBLE_IF_KUNIT bool h264_reference_missing(struct aml_h264_ctx *h264,
+					     u64 timestamp, bool buffer_present)
+{
+	/* A dequeued vb2 buffer may retain a retired picture's timestamp. */
+	return !buffer_present || get_canvas_pos(h264, timestamp) < 0;
+}
+EXPORT_SYMBOL_IF_KUNIT(h264_reference_missing);
+
 static int allocate_canvas_pos(struct aml_h264_ctx *h264_ctx, u64 timestamp)
 {
 	int i = get_canvas_pos(h264_ctx, timestamp);
@@ -1200,10 +1208,20 @@ static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *
 	h264_ctx->missing_dpb = 0;
 	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
 		const struct v4l2_h264_dpb_entry *dpb = &decode->dpb[i];
+		bool gaps = ctrls->sps->flags & V4L2_H264_SPS_FLAG_GAPS_IN_FRAME_NUM_VALUE_ALLOWED;
 
-		if ((dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_VALID) &&
-		    !vb2_find_buffer(vq, dpb->reference_ts))
+		if (!(dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_VALID))
+			continue;
+		vb = vb2_find_buffer(vq, dpb->reference_ts);
+		if (h264_reference_missing(h264_ctx, dpb->reference_ts, !!vb)) {
 			h264_ctx->missing_dpb |= BIT(i);
+			/* The ABI has no non-existing flag: keep unexpected losses observable. */
+			dev_dbg(hw->dev,
+				"decode spec missing storage: dpb %d ts %llu buffer %d canvas %d flags %#x gaps %d\n",
+				i, dpb->reference_ts, !!vb,
+				get_canvas_pos(h264_ctx, dpb->reference_ts), dpb->flags,
+				gaps);
+		}
 	}
 
 	if (hw->has_internal_canvas && !h264_ctx->new_pic_flag)
@@ -1216,8 +1234,11 @@ static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *
 	h264_set_buffer_address(ctx, &h264_ctx->curr_spec, vb);
 
 	ret = h264_get_picture_slots(h264_ctx, vb->timestamp);
-	if (ret)
+	if (ret) {
+		dev_dbg(hw->dev, "decode spec current slots: ts %llu error %d\n",
+			vb->timestamp, ret);
 		return ret;
+	}
 
 references:
 	/* Slice types and list modifications may change within one picture. */
@@ -1240,16 +1261,24 @@ references:
 			u64 timestamp = refs[i].dpb->reference_ts;
 
 			ret = h264_resolve_reference(h264_ctx, &refs[i]);
-			if (ret)
+			if (ret) {
+				dev_dbg(hw->dev,
+					"decode spec reference slots: list %d index %d ts %llu error %d\n",
+					list, i, timestamp, ret);
 				return ret;
+			}
 			if (refs[i].placeholder) {
 				dev_dbg(hw->dev, "gap placeholder list %d index %d dpb %d\n",
 					list, i, refs[i].dpb_index);
 				continue;
 			}
 			vb = vb2_find_buffer(vq, timestamp);
-			if (!vb)
+			if (!vb) {
+				dev_dbg(hw->dev,
+					"decode spec buffer lookup: list %d index %d ts %llu error %d\n",
+					list, i, timestamp, -EINVAL);
 				return -EINVAL;
+			}
 			h264_set_buffer_address(ctx, &refs[i], vb);
 		}
 	}
