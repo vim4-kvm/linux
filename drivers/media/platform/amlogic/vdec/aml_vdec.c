@@ -230,6 +230,7 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 	struct aml_vdec_dev *dev = ctx->dev;
 	struct vb2_v4l2_buffer *src_buf, *dst_buf;
 	struct media_request *src_req;
+	const char *stage = "control setup";
 	int ret = 0;
 	const char *fw_path = dev->pvdec_data->fw_path[ctx->curr_dec_type];
 
@@ -256,6 +257,7 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 		if (ret)
 			goto complete_request;
 	}
+	stage = "buffer pins";
 	ret = aml_vdec_get_buffer_pins(ctx);
 	if (ret)
 		goto complete_request;
@@ -266,6 +268,7 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 	dos_enable(dev->dec_hw);
 	/* incase of bus hang in stop_streaming */
 	ctx->dos_clk_en = 1;
+	stage = "core reset";
 	ret = aml_vdec_reset_core(dev->dec_hw, ctx->curr_dec_type);
 	if (ret) {
 		/* Isolation/reset failed: do not retry MMIO or return DMA ownership. */
@@ -273,10 +276,12 @@ static void m2mops_vdec_device_run(void *m2m_priv)
 		goto complete_request;
 	}
 
+	stage = "firmware load";
 	ret = load_firmware(dev->dec_hw, fw_path, ctx->curr_dec_type);
 	if (ret)
 		goto stop_job;
 
+	stage = "codec run";
 	ret = ctx->codec_ops->run(ctx);
 
 stop_job:
@@ -287,6 +292,10 @@ stop_job:
 	 */
 	aml_vdec_stop_job(ctx);
 complete_request:
+	if (ret < 0 && ctx->curr_dec_type == CODEC_TYPE_MPEG2)
+		dev_dbg(&dev->plat_dev->dev,
+			"mpeg12 request failed: stage=%s ts=%llu ret=%d\n",
+			stage, src_buf->vb2_buf.timestamp, ret);
 	if (src_req)
 		v4l2_ctrl_request_complete(src_req, &ctx->ctrl_handler);
 	if (ret < 0 || dev->dec_hw->faulted)
