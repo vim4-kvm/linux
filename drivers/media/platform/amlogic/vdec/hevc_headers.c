@@ -192,16 +192,20 @@ int h265_headers_parse_au(struct h265_headers *headers, const u8 *data, size_t s
 		int ret = 0;
 
 		next = h265_start_code(data, size, pos);
-		if (next - pos < 2 || data[pos] & 0x81 || data[pos + 1] & 0xf8 ||
+		if (next - pos < 2 || data[pos] & 0x80 ||
 		    !(data[pos + 1] & 7))
 			return -EINVAL;
+		if (data[pos] & 1 || data[pos + 1] & 0xf8) {
+			start = next;
+			continue;
+		}
 		type = (data[pos] >> 1) & 63;
 		bits = (struct h265_bits) { .data = data + pos + 2, .size = next - pos - 2 };
 		if (type == 33) {
 			ret = h265_sps(headers, &bits);
 		} else if (type == 34) {
 			ret = h265_pps(headers, &bits);
-		} else if (type < 32) {
+		} else if (type <= 9 || (type >= 16 && type <= 21)) {
 			ret = h265_slice(headers, &bits, type, data[pos + 1] & 7, au);
 		} else if (type == 36 || type == 37) {
 			if (au->has_picture)

@@ -83,10 +83,67 @@ static void malformed_headers_do_not_install_partial_parameters(struct kunit *te
 	KUNIT_EXPECT_FALSE(test, au.has_picture);
 }
 
+static void nonzero_layer_nals_leave_main_picture_intact(struct kunit *test)
+{
+	/* Truncated enhancement PPS, enhancement EOS and slice around main VCL. */
+	u8 data[] = {
+		0, 0, 1, 0x44, 9,
+		0, 0, 1, 0x48, 9, 0x80,
+		0, 0, 1, 2, 1, 0xd8, 0x9e,
+		0, 0, 1, 2, 9, 0x80,
+	};
+	struct h265_headers *headers = kunit_kzalloc(test, sizeof(*headers), GFP_KERNEL);
+	struct h265_au_info au;
+
+	KUNIT_ASSERT_NOT_NULL(test, headers);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, opflag_params,
+						    sizeof(opflag_params), &au), 0);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, data, sizeof(data), &au), 0);
+	KUNIT_EXPECT_TRUE(test, au.has_picture);
+	KUNIT_EXPECT_EQ(test, au.picture.nal_type, (u8)1);
+	KUNIT_EXPECT_FALSE(test, au.picture.pic_output);
+	KUNIT_EXPECT_FALSE(test, au.cvs_boundary_before);
+	KUNIT_EXPECT_FALSE(test, au.cvs_boundary_after);
+	/* Header constraints still apply to ignored enhancement NALs. */
+	data[3] |= 0x80;
+	KUNIT_EXPECT_EQ(test, h265_headers_parse_au(headers, data, sizeof(data), &au), -EINVAL);
+	data[3] &= ~0x80;
+	data[4] = 8;
+	KUNIT_EXPECT_EQ(test, h265_headers_parse_au(headers, data, sizeof(data), &au), -EINVAL);
+}
+
+static void reserved_vcl_nals_leave_main_picture_intact(struct kunit *test)
+{
+	u8 data[] = {
+		0, 0, 1, 0, 1, 0x80,
+		0, 0, 1, 2, 1, 0xd8, 0x9e,
+		0, 0, 1, 0, 1, 0x80,
+	};
+	struct h265_headers *headers = kunit_kzalloc(test, sizeof(*headers), GFP_KERNEL);
+	struct h265_au_info au;
+	u8 type;
+
+	KUNIT_ASSERT_NOT_NULL(test, headers);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, opflag_params,
+						    sizeof(opflag_params), &au), 0);
+	for (type = 10; type < 32; type++) {
+		if (type >= 16 && type <= 21)
+			continue;
+		data[3] = type << 1;
+		data[16] = type << 1;
+		KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, data, sizeof(data), &au), 0);
+		KUNIT_EXPECT_TRUE(test, au.has_picture);
+		KUNIT_EXPECT_EQ(test, au.picture.nal_type, (u8)1);
+		KUNIT_EXPECT_FALSE(test, au.picture.pic_output);
+	}
+}
+
 static struct kunit_case hevc_headers_cases[] = {
 	KUNIT_CASE(output_flags_and_parameter_replacement),
 	KUNIT_CASE(highest_sublayer_limits_and_cvs_markers),
 	KUNIT_CASE(malformed_headers_do_not_install_partial_parameters),
+	KUNIT_CASE(nonzero_layer_nals_leave_main_picture_intact),
+	KUNIT_CASE(reserved_vcl_nals_leave_main_picture_intact),
 	{}
 };
 
