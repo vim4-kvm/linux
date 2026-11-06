@@ -151,6 +151,7 @@ struct h264_decode_buf_spec {
 	int u_canvas_index;
 	int v_canvas_index;
 	u8 used;
+	bool placeholder;
 	u8 long_term_flag;
 	u8 fields;
 	enum h264_picture_structure structure;
@@ -197,6 +198,7 @@ struct aml_h264_ctx {
 	struct h264_decode_buf_spec ref_list0_unreordered[V4L2_H264_REF_LIST_LEN + 1];
 	struct h264_decode_buf_spec ref_list1_unreordered[V4L2_H264_REF_LIST_LEN + 1];
 	u8 list_size[2];
+	u16 missing_dpb;
 	u32 canvas_pos_map;
 	u32 configured_canvas_map;
 	struct h264_canvas ref_canvas[V4L2_H264_NUM_DPB_ENTRIES + 1];
@@ -236,6 +238,10 @@ int h264_reference_pic_num(struct aml_h264_ctx *h264,
 			   const struct h264_decode_buf_spec *ref);
 void h264_prune_picture_slots(struct aml_h264_ctx *h264, u64 timestamp, bool held);
 int h264_get_picture_slots(struct aml_h264_ctx *h264, u64 timestamp);
+int h264_resolve_reference(struct aml_h264_ctx *h264,
+			   struct h264_decode_buf_spec *ref);
+bool h264_use_placeholder_canvas(struct aml_h264_ctx *h264,
+				 struct h264_decode_buf_spec *ref);
 enum h264_picture_structure
 h264_reference_structure(enum h264_picture_structure original, u8 fields);
 enum h264_picture_structure

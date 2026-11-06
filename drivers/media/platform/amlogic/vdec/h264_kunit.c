@@ -429,6 +429,81 @@ static void timestamp_picture_slots(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, h->colocated_buf_map, 0);
 }
 
+static void gap_reference_storage(struct kunit *test)
+{
+	static const struct v4l2_ctrl_h264_sps sps = {};
+	struct aml_h264_ctx *h = test->priv;
+	struct v4l2_ctrl_h264_decode_params *decode;
+	struct h264_decode_buf_spec *ref;
+	int canvas, mv, index = 0;
+
+	decode = kunit_kzalloc(test, sizeof(*decode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, decode);
+	h->ctrl_ref.decode = decode;
+	h->ctrl_ref.sps = &sps;
+	h->colocated_buf_num = 3;
+	decode->nal_ref_idc = 1;
+	decode->frame_num = 15;
+	decode->dpb[0].flags = V4L2_H264_DPB_ENTRY_FLAG_VALID |
+			       V4L2_H264_DPB_ENTRY_FLAG_ACTIVE;
+	decode->dpb[0].fields = V4L2_H264_FRAME_REF;
+	decode->dpb[0].frame_num = 13;
+	decode->dpb[0].pic_num = 13;
+	h->mslice.slice_type = P_SLICE;
+	h->mslice.num_ref_idx_l0 = 1;
+	h->curr_spec.structure = H264_PICTURE_FRAME;
+	KUNIT_ASSERT_EQ(test, h264_get_picture_slots(h, 0), 0);
+	canvas = h->curr_spec.canvas_pos;
+	mv = h->curr_spec.col_buf_index;
+	h264_prune_picture_slots(h, 24000, false);
+	KUNIT_ASSERT_EQ(test, h264_get_picture_slots(h, 24000), 0);
+	h264_config_ref_lists(h->v4l2_ctx);
+	ref = &h->ref_list0[0];
+
+	/* A successful vb2 lookup of timestamp zero is a real reference. */
+	KUNIT_ASSERT_EQ(test, h264_resolve_reference(h, ref), 0);
+	KUNIT_EXPECT_FALSE(test, ref->placeholder);
+	KUNIT_EXPECT_EQ(test, ref->canvas_pos, canvas);
+	KUNIT_EXPECT_EQ(test, ref->col_buf_index, mv);
+	ref->y_canvas_index = 7;
+	KUNIT_EXPECT_FALSE(test, h264_use_placeholder_canvas(h, ref));
+	KUNIT_EXPECT_EQ(test, ref->y_canvas_index, 7);
+
+	/* The same timestamp with no backing buffer must not retain old slots. */
+	h->missing_dpb = BIT(0);
+	h264_prune_picture_slots(h, 24000, true);
+	KUNIT_EXPECT_EQ(test, h->canvas_pos_map, BIT(h->curr_spec.canvas_pos));
+	KUNIT_EXPECT_EQ(test, h->colocated_buf_map, BIT(h->curr_spec.col_buf_index));
+	h->curr_spec.y_dma_addr = 0x100000;
+	h->curr_spec.c_dma_addr = 0x200000;
+	KUNIT_ASSERT_EQ(test, h264_resolve_reference(h, ref), 0);
+	KUNIT_EXPECT_TRUE(test, ref->placeholder);
+	KUNIT_EXPECT_EQ(test, ref->canvas_pos, h->curr_spec.canvas_pos);
+	KUNIT_EXPECT_EQ(test, ref->col_buf_index, -1);
+	KUNIT_EXPECT_EQ(test, ref->y_dma_addr, h->curr_spec.y_dma_addr);
+	KUNIT_EXPECT_EQ(test, ref->c_dma_addr, h->curr_spec.c_dma_addr);
+	KUNIT_EXPECT_PTR_EQ(test, ref->dpb, &decode->dpb[0]);
+	KUNIT_EXPECT_EQ(test, h->list_size[0], 1);
+	h264_copy_ref_list(h, 0);
+	h264_reorder_short_term(&h->mslice, 0, 13, &index);
+	KUNIT_EXPECT_EQ(test, index, 1);
+	KUNIT_EXPECT_TRUE(test, ref->placeholder);
+	KUNIT_EXPECT_EQ(test, h264_reference_pic_num(h, ref), 13);
+	/* S4 allocates indices after reference resolution; borrow them only then. */
+	ref->y_canvas_index = -1;
+	ref->u_canvas_index = -1;
+	ref->v_canvas_index = -1;
+	h->curr_spec.y_canvas_index = 23;
+	h->curr_spec.u_canvas_index = 24;
+	h->curr_spec.v_canvas_index = 24;
+	KUNIT_EXPECT_TRUE(test, h264_use_placeholder_canvas(h, ref));
+	KUNIT_EXPECT_EQ(test, ref->y_canvas_index, 23);
+	KUNIT_EXPECT_EQ(test, ref->u_canvas_index, 24);
+	KUNIT_EXPECT_EQ(test, ref->v_canvas_index, 24);
+	KUNIT_EXPECT_EQ(test, h->canvas_pos_map, BIT(h->curr_spec.canvas_pos));
+	KUNIT_EXPECT_EQ(test, h->colocated_buf_map, BIT(h->curr_spec.col_buf_index));
+}
+
 static void paired_field_reference_view(struct kunit *test)
 {
 	enum h264_picture_structure view;
@@ -483,6 +558,7 @@ static void field_picture_numbers(struct kunit *test)
 static struct kunit_case h264_test_cases[] = {
 	KUNIT_CASE(field_picture_numbers),
 	KUNIT_CASE(timestamp_picture_slots),
+	KUNIT_CASE(gap_reference_storage),
 	KUNIT_CASE(paired_field_reference_view),
 	KUNIT_CASE(original_picture_structure),
 	KUNIT_CASE(colocated_mv_layout),
