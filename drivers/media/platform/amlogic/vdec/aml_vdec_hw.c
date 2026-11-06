@@ -61,10 +61,11 @@ void dos_enable(struct aml_vdec_hw *hw)
 	regmap_update_bits(hw->map[DOS_BUS], MDEC_PIC_DC_CTRL, (1 << 31), 0);
 }
 
-int aml_vdec_reset_core(struct aml_vdec_hw *hw, unsigned int codec)
+int aml_vdec_reset_core(struct aml_vdec_hw *hw, const struct aml_vdec_reset_profile *profile)
 {
 	unsigned int mask = BIT(21);
-	unsigned int reset = BIT(3) | BIT(4) | BIT(5) | BIT(7) | BIT(8) | BIT(9);
+	unsigned int reset = profile ? profile->mask :
+		BIT(3) | BIT(4) | BIT(5) | BIT(7) | BIT(8) | BIT(9);
 	unsigned int power = 0;
 	unsigned int value;
 	unsigned int i;
@@ -85,12 +86,10 @@ int aml_vdec_reset_core(struct aml_vdec_hw *hw, unsigned int codec)
 		regmap_update_bits(hw->map[DMC_BUS], 0x0, mask, 0);
 		usleep_range(60, 70);
 	}
-	if (codec == CODEC_TYPE_MPEG2) {
-		/* MPEG-2 starts without saved IQ/IDCT or microcontroller state. */
+	if (profile && profile->preserve_power_ctl) {
 		ret = regmap_read(hw->map[DOS_BUS], POWER_CTL_VLD, &power);
 		if (ret)
 			return ret;
-		reset |= GENMASK(31, 4);
 	}
 	ret = regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, reset);
 	if (ret)
@@ -98,7 +97,7 @@ int aml_vdec_reset_core(struct aml_vdec_hw *hw, unsigned int codec)
 	ret = regmap_write(hw->map[DOS_BUS], DOS_SW_RESET0, 0);
 	if (ret)
 		return ret;
-	if (codec == CODEC_TYPE_MPEG2) {
+	if (profile && profile->preserve_power_ctl) {
 		ret = regmap_write(hw->map[DOS_BUS], POWER_CTL_VLD, power);
 		if (ret)
 			return ret;
@@ -232,7 +231,7 @@ int aml_vdec_write_internal_canvas(struct aml_vdec_hw *hw, u8 index,
 	return regmap_multi_reg_write(hw->map[DOS_BUS], regs, ARRAY_SIZE(regs));
 }
 
-int load_firmware(struct aml_vdec_hw *hw, const char *path, unsigned int codec)
+int load_firmware(struct aml_vdec_hw *hw, const char *path, const struct aml_codec_ops *codec)
 {
 	const struct firmware *fw;
 	struct device *dev = hw->dev;
@@ -244,33 +243,16 @@ int load_firmware(struct aml_vdec_hw *hw, const char *path, unsigned int codec)
 
 	if (hw->has_dbus_ctrl) {
 		struct arm_smccc_res result;
-		u32 format;
+		u32 format = codec->secure_format;
 
-		switch (codec) {
-		case CODEC_TYPE_H264:
-			format = 15;
-			break;
-		case CODEC_TYPE_MPEG2:
-			format = 0x4d31324d; /* MPEG12_MULTI: tag M12M. */
-			break;
-		case CODEC_TYPE_MJPEG:
-			format = 6;
-			break;
-		default:
+		if (!format)
 			return -EINVAL;
-		}
 		arm_smccc_smc(0xb200000f, format, 0, 0, 0, 0, 0, 0, &result);
 		if ((s32)result.a0) {
 			dev_err(dev, "secure firmware %#x load failed: %#lx\n", format, result.a0);
 			return -EIO;
 		}
-		if (codec != CODEC_TYPE_H264)
-			return 0;
-		ret = regmap_read(hw->map[DOS_BUS], AV_SCRATCH_G, &hw->vdec1.secure_swap);
-		if (ret)
-			return ret;
-		dev_dbg(dev, "secure H264 loaded, scratch G=%#x\n", hw->vdec1.secure_swap);
-		return 0;
+		return codec->post_load ? codec->post_load(hw) : 0;
 	}
 
 	ret = request_firmware(&fw, path, dev);
@@ -318,7 +300,7 @@ int load_firmware(struct aml_vdec_hw *hw, const char *path, unsigned int codec)
 		}
 	}
 
-	/* Only h264 needs this step */
+	/* Load the optional codec extension after the base IMEM image. */
 	if (hw->vdec1.ops.load_firmware_ex) {
 		ret = hw->vdec1.ops.load_firmware_ex(hw->vdec1.priv,
 						  mc_addr,

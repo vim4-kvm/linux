@@ -827,6 +827,12 @@ int aml_mpeg12_dec_run(void *priv)
 	return ret;
 }
 
+/* MPEG-2 starts without saved IQ/IDCT or microcontroller state. */
+const struct aml_vdec_reset_profile aml_mpeg12_reset_profile = {
+	.mask = BIT(3) | GENMASK(31, 4),
+	.preserve_power_ctl = true,
+};
+
 const struct v4l2_ctrl_config aml_mpeg12_controls[AML_MPEG12_NUM_CONTROLS] = {
 	{ .id = V4L2_CID_STATELESS_MPEG2_SEQUENCE },
 	{ .id = V4L2_CID_STATELESS_MPEG2_PICTURE },

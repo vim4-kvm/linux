@@ -2299,6 +2299,17 @@ void aml_h264_finish(void *priv)
 	h264_ctx->init_flag = 0;
 }
 
+int aml_h264_firmware_loaded(struct aml_vdec_hw *hw)
+{
+	int ret;
+
+	ret = regmap_read(hw->map[DOS_BUS], AV_SCRATCH_G, &hw->vdec1.secure_swap);
+	if (ret)
+		return ret;
+	dev_dbg(hw->dev, "secure H264 loaded, scratch G=%#x\n", hw->vdec1.secure_swap);
+	return 0;
+}
+
 const struct v4l2_ctrl_config aml_h264_controls[AML_H264_NUM_CONTROLS] = {
 	{
 		.id = V4L2_CID_STATELESS_H264_DECODE_PARAMS,

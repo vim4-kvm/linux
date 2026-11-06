@@ -300,6 +300,9 @@ void aml_h264_exit(void *priv);
 int aml_h264_dec_run(void *priv);
 void aml_h264_finish(void *priv);
 
+struct aml_vdec_hw;
+int aml_h264_firmware_loaded(struct aml_vdec_hw *hw);
+
 #define AML_H264_NUM_CONTROLS 8
 extern const struct v4l2_ctrl_config aml_h264_controls[AML_H264_NUM_CONTROLS];
 
