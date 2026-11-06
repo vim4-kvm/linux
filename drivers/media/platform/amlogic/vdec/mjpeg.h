@@ -34,7 +34,6 @@ int aml_mjpeg_init(void *priv);
 void aml_mjpeg_prepare(void *priv);
 void aml_mjpeg_finish(void *priv);
 void aml_mjpeg_exit(void *priv);
-int aml_mjpeg_dec_run(void *priv);
 
 #if IS_ENABLED(CONFIG_KUNIT)
 bool mjpeg_supported(const u8 *p, u32 len, u32 max_width, u32 max_height);

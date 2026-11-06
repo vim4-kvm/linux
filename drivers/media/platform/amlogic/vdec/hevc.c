@@ -93,25 +93,6 @@ int aml_hevc_configure(void *priv)
 	return ret;
 }
 
-int aml_hevc_dec_run(void *priv)
-{
-	struct aml_vdec_ctx *ctx = priv;
-	struct aml_hevc_ctx *h = ctx->codec_priv;
-	struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->m2m_ctx);
-	int ret;
-
-	if (!src || h->hw->faulted)
-		return -EINVAL;
-	ret = h265_hw_alloc_workspace(h);
-	if (ret)
-		return ret;
-	ret = h265_set_dw_target(h);
-	if (ret)
-		return ret;
-	return h265_hw_run(h, vb2_plane_vaddr(&src->vb2_buf, 0),
-			   vb2_get_plane_payload(&src->vb2_buf, 0));
-}
-
 void h265_capture_format(struct v4l2_pix_format_mplane *fmt, u32 width, u32 height)
 {
 	u32 chroma;
@@ -154,17 +135,36 @@ int aml_hevc_try_fmt(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 static int hevc_prepare(struct aml_vdec_ctx *ctx)
 {
 	struct aml_hevc_ctx *h = ctx->codec_priv;
+	int ret;
 
-	if (h->stateful->format_known && !h->configured)
-		return aml_hevc_configure(ctx);
-	return 0;
+	if (h->stateful->format_known && !h->configured) {
+		ret = aml_hevc_configure(ctx);
+		if (ret)
+			return ret;
+	}
+	if (!v4l2_m2m_next_src_buf(ctx->m2m_ctx) || h->hw->faulted)
+		return -EINVAL;
+	ret = h265_hw_alloc_workspace(h);
+	if (ret)
+		return ret;
+	return h265_set_dw_target(h);
 }
 
 static int hevc_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
 		       struct vb2_v4l2_buffer *dst, struct aml_vdec_decode_result *result)
 {
 	struct aml_hevc_ctx *h = ctx->codec_priv;
-	int ret = aml_hevc_dec_run(ctx);
+	int ret, stop_ret;
+
+	ret = h265_hw_run(h, vb2_plane_vaddr(&src->vb2_buf, 0),
+			  vb2_get_plane_payload(&src->vb2_buf, 0));
+	stop_ret = aml_vdec_job_stop(ctx);
+	if (stop_ret)
+		return stop_ret;
+	if (ret < 0 && h->dpb.cur >= 0) {
+		h->dpb.pic[h->dpb.cur].valid = false;
+		h->dpb.pic[h->dpb.cur].referenced = false;
+	}
 
 	if (ret < 0)
 		return ret;
@@ -234,6 +234,7 @@ static const u32 hevc_formats[] = { V4L2_PIX_FMT_HEVC, V4L2_PIX_FMT_NV12M };
 const struct aml_vdec_node_desc aml_vdec_hevc_node = {
 	.interface = &aml_vdec_stateful_interface,
 	.stateful_ops = &aml_hevc_stateful_ops,
+	.job_ops = &aml_hevc_job_ops,
 	.formats = hevc_formats,
 	.num_formats = ARRAY_SIZE(hevc_formats),
 	.default_output = V4L2_PIX_FMT_HEVC,

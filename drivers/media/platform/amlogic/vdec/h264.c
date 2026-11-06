@@ -1798,22 +1798,22 @@ static irqreturn_t h264_threaded_isr_func(int irq, void *priv)
 		break;
 	case H264_SLICE_DATA_DONE:
 		h264_ctx->decode_pic_count++;
-		ctx->decode_result = 0;
-		ctx->int_cond = 1;
-		wake_up_interruptible(&ctx->queue);
+		ctx->job->decode_result = 0;
+		ctx->job->int_cond = 1;
+		wake_up_interruptible(&ctx->job->queue);
 		break;
 	default:
-		ctx->decode_result = -EIO;
-		ctx->int_cond = 1;
-		wake_up_interruptible(&ctx->queue);
+		ctx->job->decode_result = -EIO;
+		ctx->job->int_cond = 1;
+		wake_up_interruptible(&ctx->job->queue);
 		break;
 	}
 	goto irq_handled;
 header_error:
 	/* Keep every allocated canvas until the worker confirms DMA stop. */
-	ctx->decode_result = -EIO;
-	ctx->int_cond = 1;
-	wake_up_interruptible(&ctx->queue);
+	ctx->job->decode_result = -EIO;
+	ctx->job->int_cond = 1;
+	wake_up_interruptible(&ctx->job->queue);
 irq_handled:
 	return IRQ_HANDLED;
 }
@@ -2093,12 +2093,8 @@ void aml_h264_exit(void *priv)
 		return;
 	h264_ctx->param_set = 0;
 
-	if (ctx->dos_clk_en && aml_stop_vdec_hw(dec_hw)) {
-		aml_vdec_fault(ctx);
+	if (aml_vdec_job_stop(ctx))
 		return;
-	}
-	ctx->dos_clk_en = false;
-	aml_h264_finish(ctx);
 	if (h264_ctx->input_vaddr)
 		dma_free_coherent(dec_hw->dev, h264_ctx->input_size,
 				  h264_ctx->input_vaddr, h264_ctx->input_dma);
@@ -2234,7 +2230,7 @@ int aml_h264_dec_run(void *priv)
 
 	h264_ctx->new_pic_flag = 1;
 	h264_ctx->configured_canvas_map = 0;
-	ctx->decode_result = -EIO;
+	ctx->job->decode_result = -EIO;
 	h264_config_params(ctx);
 
 	ret = h264_prepare_input(ctx);
@@ -2260,18 +2256,18 @@ int aml_h264_dec_run(void *priv)
 	regmap_update_bits(dec_hw->map[DOS_BUS], VDEC_ASSIST_MMC_CTRL1,
 			   (1 << 3), 0);
 
-	if (dec_hw->has_dbus_ctrl && !ctx->diag_started) {
+	if (dec_hw->has_dbus_ctrl && !ctx->job->diag_started) {
 		h264_snapshot(ctx, "prepared");
-		ctx->diag_started = true;
+		ctx->job->diag_started = true;
 	}
 	aml_start_vdec_hw(dec_hw);
 	h264_ctx->init_flag = 1;
 
 	regmap_write(dec_hw->map[DOS_BUS], DPB_STATUS_REG, H264_ACTION_SEARCH_HEAD);
 
-	ret = wait_event_interruptible_timeout(ctx->queue, READ_ONCE(ctx->int_cond),
+	ret = wait_event_interruptible_timeout(ctx->job->queue, READ_ONCE(ctx->job->int_cond),
 					       msecs_to_jiffies(DECODER_TIMEOUT_MS));
-	ctx->int_cond = 0;
+	ctx->job->int_cond = 0;
 	if (!ret) {
 		ret = -ETIMEDOUT;
 		dev_err(&ctx->dev->plat_dev->dev, "dec timeout=%u\n", DECODER_TIMEOUT_MS);
@@ -2283,7 +2279,7 @@ int aml_h264_dec_run(void *priv)
 	}
 
 	if (ret > 0)
-		ret = ctx->decode_result;
+		ret = ctx->job->decode_result;
 
 	return ret;
 }

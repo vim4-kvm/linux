@@ -40,8 +40,14 @@ struct aml_vdec_stateful_ops {
 extern const struct aml_vdec_stateful_ops aml_hevc_stateful_ops;
 extern const struct aml_vdec_stateful_ops aml_mjpeg_stateful_ops;
 
+struct aml_vdec_stateless_ctx {
+	struct aml_vdec_ctx ctx;
+	struct aml_vdec_job job;
+};
+
 struct aml_vdec_stateful_ctx {
 	struct aml_vdec_ctx ctx;
+	struct aml_vdec_job job;
 	/* Serializes stateful metadata and retained CAPTURE buffers. */
 	struct mutex lock;
 	struct aml_vdec_frame frame;
@@ -62,6 +68,8 @@ extern const struct v4l2_m2m_ops aml_vdec_m2m_ops;
 extern const struct v4l2_ioctl_ops aml_vdec_stateless_ioctl_ops;
 extern const struct v4l2_ioctl_ops aml_vdec_stateful_ioctl_ops;
 
+int aml_vdec_job_acquire(struct aml_vdec_ctx *ctx);
+void aml_vdec_job_release(struct aml_vdec_ctx *ctx);
 void aml_vdec_run_pair(struct aml_vdec_ctx *ctx);
 int vidioc_vdec_querycap(struct file *file, void *priv,
 			 struct v4l2_capability *cap);
