@@ -48,7 +48,8 @@ static ssize_t power_test_show(struct device *dev, struct device_attribute *attr
 
 	/* Cached result only: reading this file never powers up the decoder. */
 	return sysfs_emit(buf, "passed=%u DOS_SW_RESET0=%#x\n",
-			 READ_ONCE(hw->power_test_passed), READ_ONCE(hw->power_test_reset));
+			 READ_ONCE(hw->diag.power_test_passed),
+			 READ_ONCE(hw->diag.power_test_reset));
 }
 
 static ssize_t power_test_store(struct device *dev, struct device_attribute *attr,
@@ -64,7 +65,7 @@ static ssize_t power_test_store(struct device *dev, struct device_attribute *att
 	mutex_lock(&vdec->dev_mutex);
 	if (!READ_ONCE(allow_t7_power))
 		ret = -EPERM;
-	else if (vdec->open_count || vdec->dec_hw->probe_step || !pm_runtime_suspended(dev))
+	else if (vdec->open_count || vdec->dec_hw->diag.probe_step || !pm_runtime_suspended(dev))
 		ret = -EBUSY;
 	else
 		ret = aml_vdec_t7_power_test(vdec->dec_hw);
@@ -79,7 +80,7 @@ static ssize_t mdec_test_show(struct device *dev, struct device_attribute *attr,
 	struct aml_vdec_hw *hw = vdec->dec_hw;
 
 	return sysfs_emit(buf, "passed=%u MDEC_PIC_DC_CTRL=%#x\n",
-			 READ_ONCE(hw->mdec_test_passed), READ_ONCE(hw->mdec_test_value));
+			 READ_ONCE(hw->diag.mdec_test_passed), READ_ONCE(hw->diag.mdec_test_value));
 }
 
 static ssize_t mdec_test_store(struct device *dev, struct device_attribute *attr,
@@ -95,7 +96,7 @@ static ssize_t mdec_test_store(struct device *dev, struct device_attribute *attr
 	mutex_lock(&vdec->dev_mutex);
 	if (t7_snapshot_only || !READ_ONCE(allow_t7_power))
 		ret = -EPERM;
-	else if (vdec->open_count || vdec->dec_hw->probe_step || !pm_runtime_suspended(dev))
+	else if (vdec->open_count || vdec->dec_hw->diag.probe_step || !pm_runtime_suspended(dev))
 		ret = -EBUSY;
 	else
 		ret = aml_vdec_t7_mdec_test(vdec->dec_hw);
@@ -110,7 +111,8 @@ static ssize_t hevc_test_show(struct device *dev, struct device_attribute *attr,
 	struct aml_vdec_hw *hw = vdec->dec_hw;
 
 	return sysfs_emit(buf, "passed=%u parser_version=%#x\n",
-			 READ_ONCE(hw->hevc_test_passed), READ_ONCE(hw->hevc_parser_version));
+			 READ_ONCE(hw->diag.hevc_test_passed),
+			 READ_ONCE(hw->diag.hevc_parser_version));
 }
 
 static ssize_t hevc_test_store(struct device *dev, struct device_attribute *attr,
@@ -141,8 +143,8 @@ static ssize_t hevc_core_test_show(struct device *dev, struct device_attribute *
 	struct aml_vdec_hw *hw = vdec->dec_hw;
 
 	return sysfs_emit(buf, "passed=%u axi_front=%#x axi_back=%#x\n",
-			 READ_ONCE(hw->hevc_core_test_passed), READ_ONCE(hw->hevc_axi_front),
-			 READ_ONCE(hw->hevc_axi_back));
+			 READ_ONCE(hw->diag.hevc_core_test_passed), READ_ONCE(hw->hevc.axi_front),
+			 READ_ONCE(hw->hevc.axi_back));
 }
 
 static ssize_t hevc_core_test_store(struct device *dev, struct device_attribute *attr,
@@ -176,7 +178,7 @@ static ssize_t register_step_show(struct device *dev, struct device_attribute *a
 	/* Cached status only: reading sysfs cannot touch the DOS aperture. */
 	mutex_lock(&vdec->dev_mutex);
 	count = sysfs_emit(buf, "step=%u value=%#x failed=%u\n",
-			   hw->probe_step, hw->probe_value, hw->probe_failed);
+			   hw->diag.probe_step, hw->diag.probe_value, hw->diag.probe_failed);
 	mutex_unlock(&vdec->dev_mutex);
 	return count;
 }
@@ -233,8 +235,8 @@ static int fops_vcodec_open(struct file *file)
 	/* udev v4l_id opens a newly registered node. Do not let it power DOS. */
 	if (dec_dev->pvdec_data->has_dbus_ctrl &&
 	    (t7_snapshot_only || !READ_ONCE(allow_t7_power) ||
-	     !READ_ONCE(dec_dev->dec_hw->power_test_passed) ||
-	     !READ_ONCE(dec_dev->dec_hw->mdec_test_passed)))
+	     !READ_ONCE(dec_dev->dec_hw->diag.power_test_passed) ||
+	     !READ_ONCE(dec_dev->dec_hw->diag.mdec_test_passed)))
 		return -EPERM;
 
 	ctx = kzalloc(node->desc->interface->context_size, GFP_KERNEL);
@@ -608,8 +610,8 @@ static int aml_vdec_runtime_resume(struct device *dev)
 
 	if (vdec->pvdec_data->has_dbus_ctrl &&
 	    (t7_snapshot_only || !READ_ONCE(allow_t7_power) ||
-	     !READ_ONCE(vdec->dec_hw->power_test_passed) ||
-	     !READ_ONCE(vdec->dec_hw->mdec_test_passed)))
+	     !READ_ONCE(vdec->dec_hw->diag.power_test_passed) ||
+	     !READ_ONCE(vdec->dec_hw->diag.mdec_test_passed)))
 		return -EPERM;
 	return vdec_enable(vdec->dec_hw);
 }

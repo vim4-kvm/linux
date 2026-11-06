@@ -111,114 +111,78 @@ struct pm_pd_s {
 	int ref_count;
 };
 
-/**
- * struct aml_vdec_hw - decoder hardware resources definition
- * @pdev: Pointer to struct platform_device.
- * @dev: Pointer to struct device.
- * @map: Regmaps for the decoder and memory request register banks.
- * @pm_mutex: Mutex for pm->pd_data.
- * @canvas: External canvas provider on hardware without an internal LUT.
- * @pm: Pointer to struct power_manager_s.
- * @hw_ops: Hardware resource operation functions. See struct aml_vdec_hw_ops.
- * @gates: Clk instance used by curr decoder context.
- * @dec_irq: Irq registered.
- * @curr_ctx: Pointer to curr decoder context.
- * @has_dbus_ctrl: Isolate VDEC through DOS instead of DMC; no local PD writes.
- * @has_internal_canvas: Use the decoder's private canvas LUT.
- * @canvas_endian_remap: Revision requires byte-switch remap with LUT endian bits.
- * @faulted: DMA ownership could not be returned; reset the system to recover.
- * @powered: Domain and functional clocks are held.
- * @power_test_passed: Explicit read-only DOS access and power-off succeeded.
- * @power_test_reset: Cached DOS_SW_RESET0 sample; not a silicon identifier.
- * @mdec_test_passed: Explicit MDEC read and subsequent power-off succeeded.
- * @mdec_test_value: Cached MDEC_PIC_DC_CTRL sample.
- * @secure_swap: Scratch G supplied by the secure microcode loader.
- * @irq_count: Hard IRQ entries, including entries without an active job.
- * @threaded_irq_count: Threaded IRQ entries.
- * @nic3_dev: Parent domain held explicitly for DOS-top access before VDEC on.
- * @nic3_held: An explicit parent runtime PM reference is owned.
- * @clocks_held: DOS bus and VDEC functional clocks are owned.
- * @probe_step: Last completed single-register diagnostic step, zero if idle.
- * @probe_value: Cached value of the last diagnostic read.
- * @probe_en0: DOS-top gate sample, including the shared HCODEC bits.
- * @probe_failed: A failed diagnostic prohibits another attempt in this probe.
- * @probe_pinned: Module reference held across diagnostic sysfs writes.
- * @clkctrl: Clock provider's regmap, used only to verify physical gate state.
- * @apb_gates: CPU APB bridge gates retained during experimental T7 power-on.
- * @apb_held: APB references remain held until secure power-off completes.
- * @vdec_p0: Functional clock path selected by the live T7 vendor decoder.
- * @hevc_p0: HEVC front-end functional clock parent.
- * @hevcb: HEVC back-end functional clock.
- * @hevcb_p0: HEVC back-end functional clock parent.
- * @has_hevc: Complete HEVC resources were described by firmware.
- * @hevc_powered: This driver holds HEVC power and clock references.
- * @hevc_test_passed: Explicit HEVC power preflight completed.
- * @hevc_parser_version: Cached parser version from preflight.
- * @hevc_core_test_passed: Firmware load and idle stop check completed.
- * @hevc_axi_front: Cached front-end AXI stop status.
- * @hevc_axi_back: Cached back-end AXI stop status.
- * @hevc_irq: HEVC mailbox interrupt number.
- * @hevc_irq_enabled: Interrupt delivery is enabled for the active job.
- * @hevc_fw_loaded: Firmware is loaded for the current power lifetime.
- * @hevc_fw_swap: The loaded firmware uses secure overlays.
- * @hevc_fw_swap_addr: Overlay address returned by the secure loader.
- * @hevc_irq_status: Status published by the hard interrupt handler.
- * @hevc_irq_thread: Active codec callback, cleared after interrupt synchronization.
- * @hevc_priv: Active codec callback argument.
- */
-struct aml_vdec_hw {
-	struct platform_device *pdev;
-	struct device *dev;
-	struct regmap *map[MAX_REG_BUS];
-	struct mutex pm_mutex;
-	struct meson_canvas *canvas;
-	const struct power_manager_s *pm;
-	struct aml_vdec_hw_ops hw_ops;
-	struct clk_bulk_data gates[DOS_CLK_MAX];
-	int dec_irq;
-	void *curr_ctx;
-	bool has_dbus_ctrl;
-	bool has_internal_canvas;
-	bool canvas_endian_remap;
-	bool faulted;
+/* Shared DOS resources and the two independently stopped hardware cores. */
+
+struct aml_vdec1_core {
+	/* DOS bus and VDEC functional clocks, enabled as the original pair. */
+	struct clk_bulk_data *gates;
+	struct clk *parent;
+	struct aml_vdec_hw_ops ops;
+	int irq;
+	void *priv;
 	bool powered;
+	bool clocks_held;
+	u32 secure_swap;
+	u32 irq_count;
+	u32 threaded_irq_count;
+};
+
+struct aml_hevc_core {
+	struct clk_bulk_data *front;
+	struct clk *front_parent;
+	struct clk *back;
+	struct clk *back_parent;
+	bool present;
+	bool powered;
+	int irq;
+	bool irq_enabled;
+	bool fw_loaded;
+	bool fw_swap;
+	u32 fw_swap_addr;
+	u32 irq_status;
+	u32 axi_front;
+	u32 axi_back;
+	irqreturn_t (*irq_thread)(int irq, void *priv);
+	void *priv;
+};
+
+struct aml_vdec_diagnostics {
 	bool power_test_passed;
 	u32 power_test_reset;
 	bool mdec_test_passed;
 	u32 mdec_test_value;
-	u32 secure_swap;
-	u32 irq_count;
-	u32 threaded_irq_count;
-	struct device *nic3_dev;
-	bool nic3_held;
-	bool clocks_held;
 	u32 probe_step;
 	u32 probe_value;
 	u32 probe_en0;
 	bool probe_failed;
 	bool probe_pinned;
-	struct regmap *clkctrl;
-	struct clk_bulk_data apb_gates[2];
-	bool apb_held;
-	struct clk *vdec_p0;
-	struct clk *hevc_p0;
-	struct clk *hevcb;
-	struct clk *hevcb_p0;
-	bool has_hevc;
-	bool hevc_powered;
 	bool hevc_test_passed;
 	u32 hevc_parser_version;
 	bool hevc_core_test_passed;
-	u32 hevc_axi_front;
-	u32 hevc_axi_back;
-	int hevc_irq;
-	bool hevc_irq_enabled;
-	bool hevc_fw_loaded;
-	bool hevc_fw_swap;
-	u32 hevc_fw_swap_addr;
-	u32 hevc_irq_status;
-	irqreturn_t (*hevc_irq_thread)(int irq, void *priv);
-	void *hevc_priv;
+};
+
+struct aml_vdec_hw {
+	struct aml_vdec1_core vdec1;
+	struct aml_hevc_core hevc;
+	struct aml_vdec_diagnostics diag;
+	/* Contiguous registration storage; cores retain their own clock views. */
+	struct clk_bulk_data clock_data[DOS_CLK_MAX];
+	struct platform_device *pdev;
+	struct device *dev;
+	struct regmap *map[MAX_REG_BUS];
+	/* Serializes power-domain references shared by both cores. */
+	struct mutex pm_mutex;
+	struct meson_canvas *canvas;
+	const struct power_manager_s *pm;
+	bool has_dbus_ctrl;
+	bool has_internal_canvas;
+	bool canvas_endian_remap;
+	bool faulted;
+	struct device *nic3_dev;
+	bool nic3_held;
+	struct regmap *clkctrl;
+	struct clk_bulk_data apb_gates[2];
+	bool apb_held;
 };
 
 /**

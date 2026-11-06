@@ -23,9 +23,9 @@ void aml_vdec_fault(struct aml_vdec_ctx *ctx)
 
 	if (xchg(&hw->faulted, true))
 		return;
-	if (hw->powered) {
+	if (hw->vdec1.powered) {
 		regmap_write(hw->map[DOS_BUS], VDEC_ASSIST_MBOX1_MASK, 0);
-		disable_irq(hw->dec_irq);
+		disable_irq(hw->vdec1.irq);
 	}
 	/* Pin driver, device, codec DMA and the exclusive DOS lease until reset. */
 	__module_get(THIS_MODULE);
@@ -85,7 +85,7 @@ void aml_vdec_run_pair(struct aml_vdec_ctx *ctx)
 	if (ret)
 		goto complete_request;
 	/* m2m owns the hardware until stop has drained IRQ and DMA activity. */
-	WRITE_ONCE(dev->dec_hw->curr_ctx, ctx->codec_priv);
+	WRITE_ONCE(dev->dec_hw->vdec1.priv, ctx->codec_priv);
 	if (ctx->codec_ops->prepare)
 		ctx->codec_ops->prepare(ctx);
 	dos_enable(dev->dec_hw);
@@ -118,7 +118,7 @@ complete_request:
 		goto err_cancel_job;
 
 	aml_vdec_put_buffer_pins(ctx);
-	WRITE_ONCE(dev->dec_hw->curr_ctx, NULL);
+	WRITE_ONCE(dev->dec_hw->vdec1.priv, NULL);
 	ctx->node->interface->finish_job(ctx, VB2_BUF_STATE_DONE);
 	return;
 
@@ -126,7 +126,7 @@ err_cancel_job:
 	aml_vdec_stop_job(ctx);
 	aml_vdec_put_buffer_pins(ctx);
 	if (!dev->dec_hw->faulted)
-		WRITE_ONCE(dev->dec_hw->curr_ctx, NULL);
+		WRITE_ONCE(dev->dec_hw->vdec1.priv, NULL);
 	ctx->node->interface->finish_job(ctx, VB2_BUF_STATE_ERROR);
 }
 

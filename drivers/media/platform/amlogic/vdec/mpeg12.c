@@ -512,7 +512,7 @@ static irqreturn_t mpeg12_threaded_isr(int irq, void *priv)
 {
 	struct aml_vdec_dev *dev = priv;
 	struct aml_vdec_hw *hw = dev->dec_hw;
-	struct aml_mpeg12_ctx *m = hw->curr_ctx;
+	struct aml_mpeg12_ctx *m = hw->vdec1.priv;
 	struct aml_vdec_ctx *ctx;
 	u32 reg;
 
@@ -665,9 +665,9 @@ void aml_mpeg12_prepare(void *priv)
 	struct aml_vdec_ctx *ctx = priv;
 	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
 
-	hw->hw_ops.irq_handler = mpeg12_isr;
-	hw->hw_ops.irq_threaded_func = mpeg12_threaded_isr;
-	hw->hw_ops.load_firmware_ex = NULL;
+	hw->vdec1.ops.irq_handler = mpeg12_isr;
+	hw->vdec1.ops.irq_threaded_func = mpeg12_threaded_isr;
+	hw->vdec1.ops.load_firmware_ex = NULL;
 }
 
 void aml_mpeg12_finish(void *priv)

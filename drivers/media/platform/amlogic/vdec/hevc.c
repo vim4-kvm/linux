@@ -41,7 +41,7 @@ int aml_hevc_init(void *priv)
 	struct aml_vdec_hw *hw = ctx->dev->dec_hw;
 	struct aml_hevc_ctx *h;
 
-	if (!hw || !hw->has_hevc)
+	if (!hw || !hw->hevc.present)
 		return -ENODEV;
 	h = kzalloc_obj(*h);
 	if (!h)
@@ -82,7 +82,7 @@ int aml_hevc_configure(void *priv)
 	struct aml_hevc_ctx *h = ctx->codec_priv;
 	int ret;
 
-	if (h->hw->faulted || h->hw->hevc_irq_enabled)
+	if (h->hw->faulted || h->hw->hevc.irq_enabled)
 		return -EIO;
 	if (!h->dpb.pic_w || !h->dpb.pic_h)
 		return -EINVAL;
