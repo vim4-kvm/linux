@@ -6,6 +6,8 @@
 #ifndef _AML_MPEG12_H_
 #define _AML_MPEG12_H_
 
+#include <media/v4l2-ctrls.h>
+
 #include <kunit/visibility.h>
 #include <linux/v4l2-controls.h>
 
@@ -65,5 +67,8 @@ void aml_mpeg12_prepare(void *priv);
 void aml_mpeg12_finish(void *priv);
 void aml_mpeg12_exit(void *priv);
 int aml_mpeg12_dec_run(void *priv);
+
+#define AML_MPEG12_NUM_CONTROLS 3
+extern const struct v4l2_ctrl_config aml_mpeg12_controls[AML_MPEG12_NUM_CONTROLS];
 
 #endif

@@ -19,7 +19,7 @@
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
 
-#include "aml_vdec_drv.h"
+#include "aml_vdec.h"
 #include "aml_vdec_hw.h"
 #include "mjpeg.h"
 
@@ -489,3 +489,26 @@ int aml_mjpeg_dec_run(void *priv)
 				      ctx->pix_fmt[AML_FMT_DST].plane_fmt[0].sizeimage);
 	return ctx->decode_result;
 }
+
+static void jpeg_set_colors(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
+			    struct v4l2_pix_format_mplane *fmt)
+{
+	fmt->colorspace = V4L2_COLORSPACE_SRGB;
+	fmt->xfer_func = V4L2_XFER_FUNC_SRGB;
+	fmt->ycbcr_enc = V4L2_YCBCR_ENC_601;
+	/* The JPEG firmware converts full-range input to limited-range YUV. */
+	fmt->quantization = V4L2_TYPE_IS_OUTPUT(type) ?
+		V4L2_QUANTIZATION_FULL_RANGE : V4L2_QUANTIZATION_LIM_RANGE;
+}
+
+static const u32 jpeg_formats[] = { V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_YUV420 };
+
+const struct aml_vdec_node_desc aml_vdec_jpeg_node = {
+	.interface = &aml_vdec_stateful_interface,
+	.formats = jpeg_formats,
+	.num_formats = ARRAY_SIZE(jpeg_formats),
+	.default_output = V4L2_PIX_FMT_MJPEG,
+	.default_capture = V4L2_PIX_FMT_YUV420,
+	.set_colors = jpeg_set_colors,
+	.run = aml_vdec_run_pair,
+};

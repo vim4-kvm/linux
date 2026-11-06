@@ -1657,3 +1657,15 @@ void dev_destroy_hw_resources(void *priv)
 
 	dev_dbg(hw->dev, "##Amlogic hw resource release OK##\n");
 }
+
+bool aml_vdec_core_present(struct aml_vdec_hw *hw, enum vdec_type_e core)
+{
+	switch (core) {
+	case VDEC_1:
+		return true;
+	case VDEC_HEVC:
+		return hw->has_hevc;
+	default:
+		return false;
+	}
+}

@@ -225,7 +225,8 @@ ATTRIBUTE_GROUPS(aml_vdec);
 
 static int fops_vcodec_open(struct file *file)
 {
-	struct aml_vdec_dev *dec_dev = video_drvdata(file);
+	struct aml_vdec_node *node = video_drvdata(file);
+	struct aml_vdec_dev *dec_dev = node->dev;
 	struct aml_vdec_ctx *ctx = NULL;
 	int ret = 0;
 
@@ -251,8 +252,7 @@ static int fops_vcodec_open(struct file *file)
 			goto err_open;
 	}
 	ctx->dev = dec_dev;
-	ctx->is_jpeg = video_devdata(file) == dec_dev->jpeg_vfd;
-	ctx->is_hevc = video_devdata(file) == dec_dev->hevc_vfd;
+	ctx->node = node->desc;
 	mutex_init(&ctx->hevc_lock);
 	ctx->hevc_min_capture = 1;
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
@@ -271,11 +271,11 @@ static int fops_vcodec_open(struct file *file)
 	}
 
 	ctx->fh.m2m_ctx = ctx->m2m_ctx;
-	if (ctx->is_hevc) {
+	if (ctx->node->buffered_capture) {
 		v4l2_m2m_set_dst_buffered(ctx->m2m_ctx, true);
 		ctx->m2m_ctx->ignore_cap_streaming = true;
 	}
-	ret = aml_vdec_ctrls_setup(ctx);
+	ret = ctx->node->interface->controls_init(ctx);
 	if (ret) {
 		v4l2_err(&dec_dev->v4l2_dev, "Failed to init all ctrls (%d)", ret);
 		goto err_ctrls_setup;
@@ -303,7 +303,7 @@ err_open:
 
 static int fops_vcodec_release(struct file *file)
 {
-	struct aml_vdec_dev *dec_dev = video_drvdata(file);
+	struct aml_vdec_dev *dec_dev = fh_to_dec_ctx(file)->dev;
 	struct aml_vdec_ctx *ctx = fh_to_dec_ctx(file);
 
 	mutex_lock(&dec_dev->dev_mutex);
@@ -337,7 +337,7 @@ static const struct v4l2_file_operations aml_vdec_fops = {
 static const struct video_device dec_dev = {
 	.name = "aml_dev_drv",
 	.fops = &aml_vdec_fops,
-	.ioctl_ops = &aml_vdec_ioctl_ops,
+	.ioctl_ops = &aml_vdec_stateless_ioctl_ops,
 	.release = video_device_release,
 	.vfl_dir = VFL_DIR_M2M,
 	.device_caps = V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING,
@@ -357,7 +357,7 @@ static int aml_vdec_register_interface(struct aml_vdec_dev *dev,
 	u32 flags = MEDIA_LNK_FL_IMMUTABLE | MEDIA_LNK_FL_ENABLED;
 
 	/* Both video interfaces use the same DMA engines and decoder scheduler. */
-	processor = media_entity_remote_pad_unique(&dev->vfd->entity, MEDIA_PAD_FL_SINK);
+	processor = media_entity_remote_pad_unique(&dev->nodes[0].vfd->entity, MEDIA_PAD_FL_SINK);
 	if (IS_ERR(processor))
 		return PTR_ERR(processor);
 	sink = media_entity_remote_pad_unique(processor->entity, MEDIA_PAD_FL_SINK);
@@ -367,7 +367,7 @@ static int aml_vdec_register_interface(struct aml_vdec_dev *dev,
 				    VIDEO_MAJOR, vfd->minor);
 	if (!intf)
 		return -ENOMEM;
-	if (!media_create_intf_link(&dev->vfd->entity, &intf->intf, flags) ||
+	if (!media_create_intf_link(&dev->nodes[0].vfd->entity, &intf->intf, flags) ||
 	    !media_create_intf_link(sink->entity, &intf->intf, flags)) {
 		media_devnode_remove(intf);
 		return -ENOMEM;
@@ -376,34 +376,64 @@ static int aml_vdec_register_interface(struct aml_vdec_dev *dev,
 	return 0;
 }
 
-static int aml_vdec_register_stateful(struct aml_vdec_dev *dev, const char *name,
-				      struct video_device **result,
-				      struct media_intf_devnode **intf)
+static int aml_vdec_alloc_node(struct aml_vdec_dev *dev, unsigned int index)
 {
+	const struct aml_vdec_node_info *info = &dev->pvdec_data->nodes[index];
+	struct aml_vdec_node *node = &dev->nodes[index];
 	struct video_device *vfd;
-	int ret;
 
-	/* Stateful codecs have separate queues from the media-request interface. */
 	vfd = video_device_alloc();
 	if (!vfd)
 		return -ENOMEM;
 	*vfd = dec_dev;
-	strscpy(vfd->name, name, sizeof(vfd->name));
+	strscpy(vfd->name, info->name, sizeof(vfd->name));
 	vfd->v4l2_dev = &dev->v4l2_dev;
 	vfd->lock = &dev->dev_mutex;
-	video_set_drvdata(vfd, dev);
-	*result = vfd;
-	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
-	if (!ret) {
-		ret = aml_vdec_register_interface(dev, vfd, intf);
-		if (!ret)
-			return 0;
-		video_unregister_device(vfd);
-	} else {
-		video_device_release(vfd);
+	vfd->ioctl_ops = info->desc->interface->ioctl_ops;
+	node->dev = dev;
+	node->desc = info->desc;
+	node->vfd = vfd;
+	video_set_drvdata(vfd, node);
+	return 0;
+}
+
+static int aml_vdec_register_node(struct aml_vdec_dev *dev, unsigned int index)
+{
+	struct aml_vdec_node *node = &dev->nodes[index];
+	int ret;
+
+	if (!node->vfd) {
+		ret = aml_vdec_alloc_node(dev, index);
+		if (ret)
+			return ret;
 	}
-	*result = NULL;
+	ret = video_register_device(node->vfd, VFL_TYPE_VIDEO, -1);
+	if (ret)
+		return ret;
+	if (index)
+		ret = aml_vdec_register_interface(dev, node->vfd, &node->intf);
 	return ret;
+}
+
+static void aml_vdec_unregister_nodes(struct aml_vdec_dev *dev, unsigned int first)
+{
+	struct aml_vdec_node *node;
+	unsigned int i = dev->pvdec_data->num_nodes;
+
+	while (i > first) {
+		node = &dev->nodes[--i];
+		if (node->intf) {
+			media_devnode_remove(node->intf);
+			node->intf = NULL;
+		}
+		if (!node->vfd)
+			continue;
+		if (video_is_registered(node->vfd))
+			video_unregister_device(node->vfd);
+		else
+			video_device_release(node->vfd);
+		node->vfd = NULL;
+	}
 }
 
 static int aml_vdec_drv_probe(struct platform_device *pdev)
@@ -412,6 +442,7 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 	struct aml_vdec_dev *dev;
 	struct video_device *vfd_dec;
 	struct aml_vdec_hw *hw;
+	unsigned int i;
 	int ret = 0;
 
 	pdata = of_device_get_match_data(&pdev->dev);
@@ -441,17 +472,17 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_lease;
 
-	vfd_dec = video_device_alloc();
-	if (!vfd_dec) {
-		v4l2_err(&dev->v4l2_dev, "Failed to allocate video device\n");
+	dev->pvdec_data = pdata;
+	dev->nodes = devm_kcalloc(&pdev->dev, pdata->num_nodes,
+				  sizeof(*dev->nodes), GFP_KERNEL);
+	if (!dev->nodes) {
 		ret = -ENOMEM;
 		goto err_device_alloc;
 	}
-	*vfd_dec = dec_dev;
-	vfd_dec->v4l2_dev = &dev->v4l2_dev;
-	vfd_dec->lock = &dev->dev_mutex;
-	video_set_drvdata(vfd_dec, dev);
-	dev->vfd = vfd_dec;
+	ret = aml_vdec_alloc_node(dev, 0);
+	if (ret)
+		goto err_device_alloc;
+	vfd_dec = dev->nodes[0].vfd;
 	platform_set_drvdata(pdev, dev);
 
 	hw = devm_kzalloc(&pdev->dev, sizeof(*hw), GFP_KERNEL);
@@ -461,7 +492,6 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 	}
 	dev->dec_hw = hw;
 
-	dev->pvdec_data = pdata;
 	ret = dev->pvdec_data->req_hw_resource(dev);
 	if (ret < 0)
 		goto err_dec_mem_init;
@@ -478,7 +508,7 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		pm_runtime_set_suspended(&pdev->dev);
 		pm_runtime_enable(&pdev->dev);
 	}
-	ret = video_register_device(vfd_dec, VFL_TYPE_VIDEO, -1);
+	ret = aml_vdec_register_node(dev, 0);
 	if (ret) {
 		v4l2_err(&dev->v4l2_dev, "Failed to register video device");
 		goto err_vid_dev_register;
@@ -502,21 +532,18 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		v4l2_err(&dev->v4l2_dev, "Failed to register media device");
 		goto err_media_dev_register;
 	}
-	if (pdata->has_dbus_ctrl) {
-		ret = aml_vdec_register_stateful(dev, "aml_jpeg_decoder",
-						 &dev->jpeg_vfd, &dev->jpeg_intf);
-		if (!ret && hw->has_hevc)
-			ret = aml_vdec_register_stateful(dev, "aml_hevc_decoder",
-							 &dev->hevc_vfd, &dev->hevc_intf);
-		if (!ret)
-			return 0;
-		if (dev->jpeg_vfd) {
-			media_devnode_remove(dev->jpeg_intf);
-			video_unregister_device(dev->jpeg_vfd);
+	for (i = 1; i < pdata->num_nodes; i++) {
+		if (!aml_vdec_core_present(hw, pdata->nodes[i].core))
+			continue;
+		ret = aml_vdec_register_node(dev, i);
+		if (ret) {
+			aml_vdec_unregister_nodes(dev, 1);
+			media_device_unregister(&dev->mdev);
+			goto err_media_dev_register;
 		}
-		media_device_unregister(&dev->mdev);
-		goto err_media_dev_register;
 	}
+	if (pdata->has_dbus_ctrl)
+		return 0;
 	ret = vdec_enable(dev->dec_hw);
 	if (ret) {
 		media_device_unregister(&dev->mdev);
@@ -536,10 +563,7 @@ err_hw_init:
 	dev->pvdec_data->destroy_hw_resource(dev);
 	dev->dec_hw = NULL;
 err_dec_mem_init:
-	if (video_is_registered(vfd_dec))
-		video_unregister_device(vfd_dec);
-	else
-		video_device_release(vfd_dec);
+	aml_vdec_unregister_nodes(dev, 0);
 err_device_alloc:
 	v4l2_device_unregister(&dev->v4l2_dev);
 err_lease:
@@ -560,14 +584,7 @@ static void aml_vdec_drv_remove(struct platform_device *pdev)
 		vdec_disable(dev->dec_hw);
 	}
 
-	if (dev->jpeg_vfd) {
-		media_devnode_remove(dev->jpeg_intf);
-		video_unregister_device(dev->jpeg_vfd);
-	}
-	if (dev->hevc_vfd) {
-		media_devnode_remove(dev->hevc_intf);
-		video_unregister_device(dev->hevc_vfd);
-	}
+	aml_vdec_unregister_nodes(dev, 1);
 	if (media_devnode_is_registered(dev->mdev.devnode)) {
 		media_device_unregister(&dev->mdev);
 		media_device_cleanup(&dev->mdev);
@@ -575,8 +592,7 @@ static void aml_vdec_drv_remove(struct platform_device *pdev)
 
 	if (dev->m2m_dev_dec)
 		v4l2_m2m_release(dev->m2m_dev_dec);
-	if (dev->vfd)
-		video_unregister_device(dev->vfd);
+	aml_vdec_unregister_nodes(dev, 0);
 	if (dev->dec_hw) {
 		dev->pvdec_data->destroy_hw_resource(dev);
 		dev->dec_hw = NULL;

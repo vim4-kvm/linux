@@ -161,6 +161,32 @@ static struct aml_video_fmt aml_t7_video_formats[] = {
 	},
 };
 
+static const u32 stateless_formats[] = {
+	V4L2_PIX_FMT_H264_SLICE, V4L2_PIX_FMT_MPEG2_SLICE,
+	V4L2_PIX_FMT_NV21M, V4L2_PIX_FMT_NV21, V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_NV12,
+};
+
+static const struct aml_vdec_ctrl_set stateless_controls[] = {
+	{
+		.controls = aml_mpeg12_controls,
+		.num_controls = AML_MPEG12_NUM_CONTROLS,
+		.requires_internal_canvas = true,
+	}, {
+		.controls = aml_h264_controls,
+		.num_controls = AML_H264_NUM_CONTROLS,
+	},
+};
+
+const struct aml_vdec_node_desc aml_vdec_stateless_node = {
+	.interface = &aml_vdec_stateless_interface,
+	.formats = stateless_formats,
+	.control_sets = stateless_controls,
+	.num_control_sets = ARRAY_SIZE(stateless_controls),
+	.num_formats = ARRAY_SIZE(stateless_formats),
+	.default_output = V4L2_PIX_FMT_H264_SLICE,
+	.default_capture = V4L2_PIX_FMT_NV12,
+};
+
 static const struct aml_codec_ops aml_S4_dec_ops[] = {
 	[CODEC_TYPE_HEVC] = {
 		.init = aml_hevc_init,
@@ -189,7 +215,19 @@ static const struct aml_codec_ops aml_S4_dec_ops[] = {
 	},
 };
 
+static const struct aml_vdec_node_info aml_s4_nodes[] = {
+	{ &aml_vdec_stateless_node, "aml_dev_drv", VDEC_1 },
+};
+
+static const struct aml_vdec_node_info aml_t7_nodes[] = {
+	{ &aml_vdec_stateless_node, "aml_dev_drv", VDEC_1 },
+	{ &aml_vdec_jpeg_node, "aml_jpeg_decoder", VDEC_1 },
+	{ &aml_vdec_hevc_node, "aml_hevc_decoder", VDEC_HEVC },
+};
+
 const struct aml_dev_platform_data aml_vdec_s4_pdata = {
+	.nodes = aml_s4_nodes,
+	.num_nodes = ARRAY_SIZE(aml_s4_nodes),
 	.codec_ops = aml_S4_dec_ops,
 	.dec_fmt = aml_s4_video_formats,
 	.num_fmts = ARRAY_SIZE(aml_s4_video_formats),
@@ -206,6 +244,8 @@ const struct aml_dev_platform_data aml_vdec_s4_pdata = {
  * firmware and DMC isolation. The restricted experiment is opt-in at probe.
  */
 const struct aml_dev_platform_data aml_vdec_t7_pdata = {
+	.nodes = aml_t7_nodes,
+	.num_nodes = ARRAY_SIZE(aml_t7_nodes),
 	.codec_ops = aml_S4_dec_ops,
 	.dec_fmt = aml_t7_video_formats,
 	.num_fmts = ARRAY_SIZE(aml_t7_video_formats),

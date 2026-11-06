@@ -826,3 +826,9 @@ int aml_mpeg12_dec_run(void *priv)
 			m->status, m->pic_info, read_dos_reg(hw, MREG_ERROR_COUNT));
 	return ret;
 }
+
+const struct v4l2_ctrl_config aml_mpeg12_controls[AML_MPEG12_NUM_CONTROLS] = {
+	{ .id = V4L2_CID_STATELESS_MPEG2_SEQUENCE },
+	{ .id = V4L2_CID_STATELESS_MPEG2_PICTURE },
+	{ .id = V4L2_CID_STATELESS_MPEG2_QUANTISATION }
+};
