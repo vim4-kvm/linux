@@ -356,6 +356,8 @@ static int vidioc_vdec_enum_fmt(struct aml_vdec_ctx *ctx,
 
 		if (j == f->index) {
 			f->pixelformat = fmt->fourcc;
+			if (ctx->is_hevc && is_output)
+				f->flags |= V4L2_FMT_FLAG_DYN_RESOLUTION;
 			strscpy(f->description, fmt->name,
 				sizeof(f->description));
 			return 0;
