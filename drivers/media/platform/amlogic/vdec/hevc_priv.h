@@ -55,6 +55,11 @@ struct aml_hevc_ctx {
 
 };
 
+int h265_hw_alloc_workspace(struct aml_hevc_ctx *h);
+int h265_hw_alloc_pictures(struct aml_hevc_ctx *h);
+void h265_hw_free(struct aml_hevc_ctx *h);
+int h265_hw_run(struct aml_hevc_ctx *h, const void *data, size_t size);
+
 size_t h265_mv_buf_size(u32 w, u32 h);
 void h265_capture_format(struct v4l2_pix_format_mplane *fmt, u32 width, u32 height);
 
