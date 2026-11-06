@@ -170,6 +170,8 @@ struct pm_pd_s {
  * @hevc_irq: HEVC mailbox interrupt number.
  * @hevc_irq_enabled: Interrupt delivery is enabled for the active job.
  * @hevc_fw_loaded: Firmware is loaded for the current power lifetime.
+ * @hevc_fw_swap: The loaded firmware uses secure overlays.
+ * @hevc_fw_swap_addr: Overlay address returned by the secure loader.
  * @hevc_irq_status: Status published by the hard interrupt handler.
  * @hevc_irq_thread: Active codec callback, cleared after interrupt synchronization.
  * @hevc_priv: Active codec callback argument.
@@ -222,6 +224,8 @@ struct aml_vdec_hw {
 	int hevc_irq;
 	bool hevc_irq_enabled;
 	bool hevc_fw_loaded;
+	bool hevc_fw_swap;
+	u32 hevc_fw_swap_addr;
 	u32 hevc_irq_status;
 	irqreturn_t (*hevc_irq_thread)(int irq, void *priv);
 	void *hevc_priv;

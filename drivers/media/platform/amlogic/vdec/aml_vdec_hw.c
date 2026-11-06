@@ -20,9 +20,11 @@
 #include "aml_vdec_drv.h"
 #include "aml_vdec_hw.h"
 #include "aml_vdec_platform.h"
+#include "hevc_regs.h"
 
 #define MHz     (1000000)
 #define MC_SIZE (4096 * 16)
+#define T7_HEVC_MMU_SWAP 0x32363553 /* firmware tag '265S' */
 
 static const struct soc_device_attribute canvas_endian_quirks[] = {
 	{ .family = "Amlogic Meson", .revision = "36:c - *" },
@@ -1104,6 +1106,8 @@ static int t7_hevc_power_off(struct aml_vdec_hw *hw)
 	if (!hw->hevc_powered)
 		return 0;
 	hw->hevc_fw_loaded = false;
+	hw->hevc_fw_swap = false;
+	hw->hevc_fw_swap_addr = 0;
 	clk_disable_unprepare(hw->hevcb);
 	clk_disable_unprepare(hw->gates[HEVCF_MUX].clk);
 	ret = pm_runtime_put_sync_suspend(hw->pm->pd_data[VDEC_HEVC].dev);
@@ -1357,13 +1361,26 @@ int aml_hevc_prepare_hw(struct aml_vdec_hw *hw)
 	if (ret)
 		goto fault;
 	/* Core resets retain IMEM. Never carry this cache across a PM reference release. */
-	if (hw->hevc_fw_loaded)
+	if (hw->hevc_fw_loaded) {
+		if (hw->hevc_fw_swap)
+			return regmap_write(hw->map[DOS_BUS], HEVC_STREAM_SWAP_BUFFER2,
+					    hw->hevc_fw_swap_addr);
 		return 0;
-	/* HEVC_MMU, legacy core routing: secure firmware selects its HEVC target. */
-	arm_smccc_smc(0xb200000f, 17, 0, 0, 0, 0, 0, 0, &result);
-	dev_info(hw->dev, "HEVC secure firmware load: a0=%#lx\n", result.a0);
-	if (result.a0)
-		return -EIO;
+	}
+	/* The T7 v0.4 package uses secure overlays; the loader supplies their address. */
+	arm_smccc_smc(0xb200000f, T7_HEVC_MMU_SWAP, 2, 1, 0, 0, 0, 0, &result);
+	hw->hevc_fw_swap = !result.a0;
+	if (!hw->hevc_fw_swap) {
+		arm_smccc_smc(0xb200000f, 17, 0, 0, 0, 0, 0, 0, &result);
+		if (result.a0)
+			return -EIO;
+	}
+	if (hw->hevc_fw_swap) {
+		ret = regmap_read(hw->map[DOS_BUS], HEVC_STREAM_SWAP_BUFFER2,
+				  &hw->hevc_fw_swap_addr);
+		if (ret)
+			return ret;
+	}
 	hw->hevc_fw_loaded = true;
 	return 0;
 fault:
