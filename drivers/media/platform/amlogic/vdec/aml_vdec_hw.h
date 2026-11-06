@@ -158,9 +158,6 @@ struct aml_vdec_diagnostics {
 	u32 probe_en0;
 	bool probe_failed;
 	bool probe_pinned;
-	bool hevc_test_passed;
-	u32 hevc_parser_version;
-	bool hevc_core_test_passed;
 };
 
 struct aml_vdec_hw {
@@ -224,8 +221,8 @@ int vdec_disable(struct aml_vdec_hw *hw);
 int aml_vdec_t7_power_state(struct aml_vdec_hw *hw, s32 *vdec, s32 *nic3);
 int aml_vdec_t7_power_test(struct aml_vdec_hw *hw);
 int aml_vdec_t7_mdec_test(struct aml_vdec_hw *hw);
-int aml_vdec_t7_hevc_test(struct aml_vdec_hw *hw);
-int aml_vdec_t7_hevc_core_test(struct aml_vdec_hw *hw);
+int aml_hevc_power_on(struct aml_vdec_hw *hw);
+int aml_hevc_power_off(struct aml_vdec_hw *hw);
 int aml_hevc_prepare_hw(struct aml_vdec_hw *hw);
 int aml_hevc_enable_irq(struct aml_vdec_hw *hw,
 			irqreturn_t (*thread)(int irq, void *priv), void *priv);
