@@ -684,6 +684,85 @@ static void restarted_cra_skips_unavailable_rasl(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, h265_update_random_access(h));
 }
 
+#include "hevc_output_traces.c"
+
+static void check_trace_outputs(struct kunit *test, struct h265_dpb *h,
+				const u16 *expected, unsigned int count, unsigned int *seen)
+{
+	int slot;
+
+	while (h265_dpb_pop_discard(h) >= 0)
+		;
+	while ((slot = h265_dpb_pop_output(h)) >= 0) {
+		KUNIT_ASSERT_LT(test, *seen, count);
+		KUNIT_EXPECT_EQ(test, h->pic[slot].decode_idx, (u32)expected[(*seen)++]);
+	}
+}
+
+static void replay_output_trace(struct kunit *test, const struct h265_output_trace *trace,
+				unsigned int count, const u16 *expected, unsigned int outputs)
+{
+	struct h265_dpb *h = test->priv;
+	bool no_rasl = false;
+	unsigned int i, j, k, seen = 0;
+	int slot;
+
+	reset_params(h);
+	h->nslots = H265_SLOTS;
+	for (i = 0; i < count; i++) {
+		const struct h265_output_trace *p = &trace[i];
+		struct h265_picture_info info = {
+			.irap = p->nal >= 16 && p->nal <= 23, .is_cra = p->nal == 21,
+			.no_rasl_output = p->flags & 4, .no_output_of_prior_pics = p->flags & 2,
+			.first_picture = !h->decode_idx,
+		};
+		struct h265_output_limits limits = {
+			.max_dec_pic_buffering = p->buffering, .max_num_reorder_pics = p->reorder,
+		};
+
+		if (info.irap)
+			no_rasl = info.no_rasl_output;
+		if (no_rasl && (p->nal == 8 || p->nal == 9))
+			continue;
+		for (j = 0; j < H265_SLOTS; j++) {
+			if (!h->pic[j].referenced)
+				continue;
+			for (k = 0; k < p->nrefs; k++)
+				if (h->pic[j].poc == p->refs[k])
+					break;
+			h->pic[j].referenced = k < p->nrefs;
+		}
+		h265_dpb_begin_picture(h, &info, &limits);
+		check_trace_outputs(test, h, expected, outputs, &seen);
+		slot = h265_free_slot(h);
+		KUNIT_ASSERT_GE(test, slot, 0);
+		h->pic[slot] = (struct h265_pic) { .valid = true, .referenced = true,
+			.poc = p->poc, .decode_idx = h->decode_idx++ };
+		h265_dpb_end_picture(h, slot, p->flags & 1, &limits);
+		check_trace_outputs(test, h, expected, outputs, &seen);
+	}
+	h265_dpb_flush(h);
+	check_trace_outputs(test, h, expected, outputs, &seen);
+	KUNIT_EXPECT_EQ(test, seen, outputs);
+	KUNIT_EXPECT_EQ(test, h->pending, 0U);
+}
+
+static void conformance_output_prefix_traces(struct kunit *test)
+{
+	replay_output_trace(test, output_trace_0, ARRAY_SIZE(output_trace_0),
+			    output_expected_0, ARRAY_SIZE(output_expected_0));
+	replay_output_trace(test, output_trace_1, ARRAY_SIZE(output_trace_1),
+			    output_expected_1, ARRAY_SIZE(output_expected_1));
+	replay_output_trace(test, output_trace_2, ARRAY_SIZE(output_trace_2),
+			    output_expected_2, ARRAY_SIZE(output_expected_2));
+	replay_output_trace(test, output_trace_3, ARRAY_SIZE(output_trace_3),
+			    output_expected_3, ARRAY_SIZE(output_expected_3));
+	replay_output_trace(test, output_trace_4, ARRAY_SIZE(output_trace_4),
+			    output_expected_4, ARRAY_SIZE(output_expected_4));
+	replay_output_trace(test, output_trace_5, ARRAY_SIZE(output_trace_5),
+			    output_expected_5, ARRAY_SIZE(output_expected_5));
+}
+
 static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(poc_wrap_and_random_access),
 	KUNIT_CASE(invalid_firmware_parameters),
@@ -707,6 +786,7 @@ static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(cvs_boundary_discards_waiting_pictures_without_matching_old_pocs),
 	KUNIT_CASE(hidden_pictures_keep_references_and_fullness_bumps_before_decode),
 	KUNIT_CASE(latency_counts_only_later_output_pictures),
+	KUNIT_CASE(conformance_output_prefix_traces),
 	{}
 };
 
