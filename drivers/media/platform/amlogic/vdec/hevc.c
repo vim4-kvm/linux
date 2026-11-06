@@ -2051,3 +2051,24 @@ int aml_hevc_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd 
 	mutex_unlock(&ctx->hevc_lock);
 	return ret;
 }
+
+static const u32 hevc_formats[] = { V4L2_PIX_FMT_HEVC, V4L2_PIX_FMT_NV12M };
+
+const struct aml_vdec_node_desc aml_vdec_hevc_node = {
+	.interface = &aml_vdec_stateful_interface,
+	.formats = hevc_formats,
+	.num_formats = ARRAY_SIZE(hevc_formats),
+	.default_output = V4L2_PIX_FMT_HEVC,
+	.default_capture = V4L2_PIX_FMT_NV12M,
+	.output_flags = V4L2_FMT_FLAG_DYN_RESOLUTION,
+	.events = BIT(V4L2_EVENT_SOURCE_CHANGE) | BIT(V4L2_EVENT_EOS),
+	.buffered_capture = true,
+	.try_format = aml_hevc_try_fmt,
+	.get_selection = aml_hevc_get_selection,
+	.decoder_cmd = aml_hevc_decoder_cmd,
+	.start_capture = aml_hevc_start_capture,
+	.cancel_output = aml_hevc_cancel_output,
+	.last_buffer = aml_hevc_last_buffer_done,
+	.run = aml_hevc_device_run,
+	.job_ready = aml_hevc_job_ready,
+};
