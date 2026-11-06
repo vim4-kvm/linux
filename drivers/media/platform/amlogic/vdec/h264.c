@@ -697,12 +697,14 @@ static void config_b_reflist(struct aml_h264_ctx *h264_ctx,
 }
 
 static const struct v4l2_h264_dpb_entry *
-get_dpb_by_timestamp(const struct v4l2_ctrl_h264_decode_params *decode, u64 timestamp)
+get_dpb_by_timestamp(const struct aml_h264_ctx *h264, u64 timestamp)
 {
+	const struct v4l2_ctrl_h264_decode_params *decode = h264->ctrl_ref.decode;
 	int i;
 
 	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
-		if ((decode->dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE) &&
+		if (!(h264->missing_dpb & BIT(i)) &&
+		    (decode->dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE) &&
 		    decode->dpb[i].reference_ts == timestamp)
 			return &decode->dpb[i];
 	}
@@ -1122,7 +1124,7 @@ h264_prune_picture_slots(struct aml_h264_ctx *h264_ctx, u64 timestamp, bool held
 
 		if (held && reference_ts == timestamp)
 			continue;
-		if (!get_dpb_by_timestamp(decode, reference_ts))
+		if (!get_dpb_by_timestamp(h264_ctx, reference_ts))
 			h264_ctx->colocated_buf_map &= ~BIT(i);
 	}
 
@@ -1131,7 +1133,7 @@ h264_prune_picture_slots(struct aml_h264_ctx *h264_ctx, u64 timestamp, bool held
 
 		if (held && reference_ts == timestamp)
 			continue;
-		if (!get_dpb_by_timestamp(decode, reference_ts))
+		if (!get_dpb_by_timestamp(h264_ctx, reference_ts))
 			h264_ctx->canvas_pos_map &= ~BIT(i);
 	}
 }
@@ -1154,6 +1156,24 @@ VISIBLE_IF_KUNIT int h264_get_picture_slots(struct aml_h264_ctx *h264, u64 times
 }
 EXPORT_SYMBOL_IF_KUNIT(h264_get_picture_slots);
 
+VISIBLE_IF_KUNIT int h264_resolve_reference(struct aml_h264_ctx *h264,
+					    struct h264_decode_buf_spec *ref)
+{
+	ref->placeholder = h264->missing_dpb & BIT(ref->dpb_index);
+	if (ref->placeholder) {
+		/* Gap pictures retain list positions but own no decoded storage. */
+		ref->canvas_pos = h264->curr_spec.canvas_pos;
+		ref->col_buf_index = -1;
+		ref->y_dma_addr = h264->curr_spec.y_dma_addr;
+		ref->c_dma_addr = h264->curr_spec.c_dma_addr;
+		return 0;
+	}
+	ref->canvas_pos = get_canvas_pos(h264, ref->dpb->reference_ts);
+	ref->col_buf_index = get_col_buf_index(h264, ref->dpb->reference_ts);
+	return ref->canvas_pos < 0 ? ref->canvas_pos : 0;
+}
+EXPORT_SYMBOL_IF_KUNIT(h264_resolve_reference);
+
 static void h264_set_buffer_address(struct aml_vdec_ctx *ctx,
 				    struct h264_decode_buf_spec *spec,
 				    struct vb2_buffer *vb)
@@ -1175,6 +1195,16 @@ static int h264_config_decode_spec(struct aml_vdec_hw *hw, struct aml_vdec_ctx *
 	struct vb2_v4l2_buffer *vb2_v4l2;
 	struct vb2_queue *vq;
 	int i, list, ret;
+
+	vq = v4l2_m2m_get_vq(ctx->m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+	h264_ctx->missing_dpb = 0;
+	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
+		const struct v4l2_h264_dpb_entry *dpb = &decode->dpb[i];
+
+		if ((dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_VALID) &&
+		    !vb2_find_buffer(vq, dpb->reference_ts))
+			h264_ctx->missing_dpb |= BIT(i);
+	}
 
 	if (hw->has_internal_canvas && !h264_ctx->new_pic_flag)
 		goto references;
@@ -1200,8 +1230,6 @@ references:
 
 	h264_config_ref_lists(ctx);
 
-	vq = v4l2_m2m_get_vq(ctx->m2m_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-
 	for (list = 0; list < 2; list++) {
 		struct h264_decode_buf_spec *refs;
 
@@ -1211,10 +1239,16 @@ references:
 		for (i = 0; i < h264_ctx->list_size[list]; i++) {
 			u64 timestamp = refs[i].dpb->reference_ts;
 
-			refs[i].canvas_pos = get_canvas_pos(h264_ctx, timestamp);
-			refs[i].col_buf_index = get_col_buf_index(h264_ctx, timestamp);
+			ret = h264_resolve_reference(h264_ctx, &refs[i]);
+			if (ret)
+				return ret;
+			if (refs[i].placeholder) {
+				dev_dbg(hw->dev, "gap placeholder list %d index %d dpb %d\n",
+					list, i, refs[i].dpb_index);
+				continue;
+			}
 			vb = vb2_find_buffer(vq, timestamp);
-			if (refs[i].canvas_pos < 0 || !vb)
+			if (!vb)
 				return -EINVAL;
 			h264_set_buffer_address(ctx, &refs[i], vb);
 		}
@@ -1302,7 +1336,7 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 			    decode->top_field_order_cnt)
 				info0 |= 0x100;
 		} else if (h264_ctx->canvas_pos_map & BIT(j)) {
-			dpb = get_dpb_by_timestamp(decode, canvas->timestamp);
+			dpb = get_dpb_by_timestamp(h264_ctx, canvas->timestamp);
 			if (dpb && (dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE)) {
 				info0 = h264_buffer_info(canvas->structure, dpb->fields);
 				if (dpb->bottom_field_order_cnt <
@@ -1408,6 +1442,10 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 	if (h264_ctx->list_size[1]) {
 		int index = h264_ctx->ref_list1[0].col_buf_index;
 
+		if (h264_ctx->ref_list1[0].placeholder) {
+			dev_dbg(hw->dev, "gap placeholder selected as colocated reference\n");
+			return -EINVAL;
+		}
 		if (index < 0 || index >= h264_ctx->colocated_buf_num)
 			return -EINVAL;
 		reference_structure = h264_reference_structure(h264_ctx->colocated_structure[index],
@@ -1496,6 +1534,19 @@ static int h264_config_decode_buf(struct aml_vdec_hw *hw,
 	return 0;
 }
 
+VISIBLE_IF_KUNIT bool h264_use_placeholder_canvas(struct aml_h264_ctx *h264,
+						  struct h264_decode_buf_spec *ref)
+{
+	if (!ref->placeholder)
+		return false;
+	/* External canvas indices exist only after configuring the current picture. */
+	ref->y_canvas_index = h264->curr_spec.y_canvas_index;
+	ref->u_canvas_index = h264->curr_spec.u_canvas_index;
+	ref->v_canvas_index = h264->curr_spec.v_canvas_index;
+	return true;
+}
+EXPORT_SYMBOL_IF_KUNIT(h264_use_placeholder_canvas);
+
 static int get_canvas_index(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
 {
 	struct aml_h264_ctx *h264_ctx = (struct aml_h264_ctx *)hw->curr_ctx;
@@ -1509,6 +1560,8 @@ static int get_canvas_index(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
 	if (h264_ctx->list_size[0] > 0) {
 		for (i = 0; i < h264_ctx->list_size[0]; i++) {
 			buf = &h264_ctx->ref_list0[i];
+			if (h264_use_placeholder_canvas(h264_ctx, buf))
+				continue;
 			ret = config_decode_canvas(hw, buf, h264_ctx->mb_width,
 						   h264_ctx->mb_height);
 			if (ret)
@@ -1519,6 +1572,8 @@ static int get_canvas_index(struct aml_vdec_hw *hw, struct aml_vdec_ctx *ctx)
 	if (h264_ctx->list_size[1] > 0) {
 		for (i = 0; i < h264_ctx->list_size[1]; i++) {
 			buf = &h264_ctx->ref_list1[i];
+			if (h264_use_placeholder_canvas(h264_ctx, buf))
+				continue;
 			ret = config_decode_canvas(hw, buf, h264_ctx->mb_width,
 						   h264_ctx->mb_height);
 			if (ret)
@@ -1532,7 +1587,7 @@ static void release_canvas_index(struct aml_vdec_hw *hw,
 				 struct h264_decode_buf_spec *buf)
 {
 	/* Internal LUT ownership ends only after the worker has stopped DMA. */
-	if (hw->has_internal_canvas) {
+	if (hw->has_internal_canvas || buf->placeholder) {
 		buf->y_canvas_index = -1;
 		buf->u_canvas_index = -1;
 		buf->v_canvas_index = -1;
