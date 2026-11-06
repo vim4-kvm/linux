@@ -20,6 +20,11 @@ struct aml_hevc_ctx {
 	int rounds;
 	bool have_picture;
 	bool finished;
+	struct h265_headers headers;
+	struct h265_au_info au;
+	bool have_au;
+	bool picture_started;
+	bool skip_picture;
 
 	/* workspace */
 	void *ws_v;
