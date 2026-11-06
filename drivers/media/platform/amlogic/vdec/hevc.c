@@ -255,6 +255,8 @@ static int h265_alloc_pics(struct aml_hevc_ctx *h)
 		return 0;
 
 	h265_free_pics(h);
+	/* Reallocation discards all references preceding the next random access. */
+	h->poc_random_access = H265_MAX_INT;
 	for (i = 0; i < h->nslots; i++) {
 		struct h265_pic *pic = &h->pic[i];
 
@@ -1130,6 +1132,31 @@ VISIBLE_IF_KUNIT void h265_update_poc(struct aml_hevc_ctx *h)
 }
 EXPORT_SYMBOL_IF_KUNIT(h265_update_poc);
 
+/* Track coded-sequence boundaries and RASL pictures needing older references. */
+VISIBLE_IF_KUNIT bool h265_update_random_access(struct aml_hevc_ctx *h)
+{
+	bool idr = h->nal_type == H265_NAL_IDR_W_RADL ||
+		   h->nal_type == H265_NAL_IDR_N_LP;
+	bool bla = h->nal_type >= H265_NAL_BLA_W_LP && h->nal_type <= H265_NAL_BLA_N_LP;
+	bool first = h->poc_random_access == H265_MAX_INT;
+
+	if (!h->slice_segment_addr && (idr || bla || (first && h->nal_type == H265_NAL_CRA)))
+		h->epoch++;
+	if (first || idr) {
+		if (bla || h->nal_type == H265_NAL_CRA)
+			h->poc_random_access = h->curr_poc;
+		else
+			h->poc_random_access = -H265_MAX_INT;
+	} else if (bla) {
+		h->poc_random_access = h->curr_poc;
+	} else if (h->curr_poc < h->poc_random_access &&
+		   (h->nal_type == H265_NAL_RASL_N || h->nal_type == H265_NAL_RASL_R)) {
+		return true;
+	}
+	return false;
+}
+EXPORT_SYMBOL_IF_KUNIT(h265_update_random_access);
+
 VISIBLE_IF_KUNIT int h265_free_slot(struct aml_hevc_ctx *h)
 {
 	int i;
@@ -1206,21 +1233,8 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		return 2;
 
 	h265_update_poc(h);
-	/* skip RASL pictures after the CRA/BLA the stream starts on */
-	if (h->poc_random_access == H265_MAX_INT) {
-		if (h->nal_type == H265_NAL_CRA || h->nal_type == H265_NAL_BLA_W_LP ||
-		    h->nal_type == H265_NAL_BLA_W_RADL || h->nal_type == H265_NAL_BLA_N_LP)
-			h->poc_random_access = h->curr_poc;
-		else
-			h->poc_random_access = -H265_MAX_INT;
-	} else if (h->nal_type == H265_NAL_BLA_W_LP ||
-		   h->nal_type == H265_NAL_BLA_W_RADL ||
-		   h->nal_type == H265_NAL_BLA_N_LP) {
-		h->poc_random_access = h->curr_poc;
-	} else if (h->curr_poc < h->poc_random_access &&
-		   (h->nal_type == H265_NAL_RASL_N || h->nal_type == H265_NAL_RASL_R)) {
+	if (h265_update_random_access(h))
 		return 1;
-	}
 
 	wr(hw, HEVC_WAIT_FLAG, read_dos_reg(hw, HEVC_WAIT_FLAG) | 0x2);
 
@@ -1230,8 +1244,6 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		int slot;
 
 		h->new_pic = true;
-		if (h->nal_type >= H265_NAL_BLA_W_LP && h->nal_type <= H265_NAL_CRA)
-			h->epoch++;
 		h265_apply_rps(h);
 
 		slot = h265_free_slot(h);

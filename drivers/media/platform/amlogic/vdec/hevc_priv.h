@@ -186,6 +186,7 @@ void h265_update_tiles(struct aml_hevc_ctx *h, int w_cu, int h_cu,
 		       int sao_mem_unit);
 int h265_set_ref_lists(struct aml_hevc_ctx *h);
 void h265_update_poc(struct aml_hevc_ctx *h);
+bool h265_update_random_access(struct aml_hevc_ctx *h);
 void h265_capture_format(struct v4l2_pix_format_mplane *fmt, u32 width, u32 height);
 #endif
 

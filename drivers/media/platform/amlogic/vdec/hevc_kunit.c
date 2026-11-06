@@ -440,6 +440,72 @@ static void output_respects_each_pictures_reorder_limit(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), 0);
 }
 
+static void continuous_cra_keeps_leading_picture_order(struct kunit *test)
+{
+	static const int pocs[] = { 26, 27, 28, 29, 30, 31, 32, 25 };
+	struct aml_hevc_ctx *h = test->priv;
+	struct vb2_v4l2_buffer *outputs;
+	unsigned int i;
+
+	outputs = kunit_kcalloc(test, ARRAY_SIZE(pocs), sizeof(*outputs), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, outputs);
+	h->nal_type = H265_NAL_IDR_N_LP;
+	h->poc_random_access = H265_MAX_INT;
+	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
+	KUNIT_ASSERT_EQ(test, h->epoch, 1U);
+	h->nal_type = H265_NAL_CRA;
+	h->curr_poc = 32;
+	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
+	KUNIT_EXPECT_EQ(test, h->epoch, 1U);
+	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
+		h->pic[i].poc = pocs[i];
+		h->pic[i].epoch = h->epoch;
+		h->pic[i].reorder_limit = 7;
+		if (i < 7)
+			h->pic[i].output = &outputs[i];
+	}
+	h->pending = 7;
+	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), -1);
+	h->nal_type = H265_NAL_RASL_R;
+	h->curr_poc = 25;
+	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
+	h->pic[7].output = &outputs[7];
+	h->pending++;
+	KUNIT_EXPECT_EQ(test, h265_next_output(h, false), 7);
+}
+
+static void restarted_cra_skips_unavailable_rasl(struct kunit *test)
+{
+	struct aml_hevc_ctx *h = test->priv;
+
+	/* A source change rebuilt the picture pool before replaying this CRA. */
+	h->poc_random_access = H265_MAX_INT;
+	h->nal_type = H265_NAL_CRA;
+	h->curr_poc = 32;
+	KUNIT_ASSERT_FALSE(test, h265_update_random_access(h));
+	KUNIT_EXPECT_EQ(test, h->poc_random_access, 32);
+	KUNIT_EXPECT_EQ(test, h->epoch, 1U);
+	h->nal_type = H265_NAL_RASL_R;
+	h->curr_poc = 28;
+	KUNIT_EXPECT_TRUE(test, h265_update_random_access(h));
+	h->nal_type = H265_NAL_RASL_N;
+	KUNIT_EXPECT_TRUE(test, h265_update_random_access(h));
+	/* RADL pictures do not require the discarded pre-CRA references. */
+	h->nal_type = 6;
+	KUNIT_EXPECT_FALSE(test, h265_update_random_access(h));
+	h->nal_type = H265_NAL_IDR_N_LP;
+	h->curr_poc = 0;
+	KUNIT_EXPECT_FALSE(test, h265_update_random_access(h));
+	KUNIT_EXPECT_EQ(test, h->epoch, 2U);
+	KUNIT_EXPECT_EQ(test, h->poc_random_access, -H265_MAX_INT);
+	h->nal_type = H265_NAL_CRA;
+	h->curr_poc = 32;
+	KUNIT_EXPECT_FALSE(test, h265_update_random_access(h));
+	h->nal_type = H265_NAL_RASL_R;
+	h->curr_poc = 25;
+	KUNIT_EXPECT_FALSE(test, h265_update_random_access(h));
+}
+
 static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(poc_wrap_and_random_access),
 	KUNIT_CASE(invalid_firmware_parameters),
@@ -454,6 +520,8 @@ static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(irap_releases_previous_references),
 	KUNIT_CASE(output_orders_b_pictures_before_new_epoch),
 	KUNIT_CASE(output_respects_each_pictures_reorder_limit),
+	KUNIT_CASE(continuous_cra_keeps_leading_picture_order),
+	KUNIT_CASE(restarted_cra_skips_unavailable_rasl),
 	{}
 };
 
