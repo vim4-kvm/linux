@@ -8,10 +8,43 @@
 
 #include "aml_vdec_drv.h"
 
+struct aml_vdec_frame {
+	struct vb2_v4l2_buffer *buffer;
+	/* No codec-owned output buffer remains after this frame is taken. */
+	bool final;
+};
+
+struct aml_vdec_decode_result {
+	bool format_changed;
+	bool picture;
+	unsigned int slot;
+	u32 flags;
+};
+
+struct aml_vdec_stream_info {
+	struct v4l2_pix_format_mplane format;
+	struct v4l2_rect crop;
+	unsigned int min_capture;
+};
+
+struct aml_vdec_stateful_ops {
+	int (*prepare)(struct aml_vdec_ctx *ctx);
+	int (*submit)(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
+		      struct vb2_v4l2_buffer *dst, struct aml_vdec_decode_result *result);
+	void (*queue_capture)(struct aml_vdec_ctx *ctx, unsigned int slot,
+			      struct vb2_v4l2_buffer *dst);
+	int (*get_frame)(struct aml_vdec_ctx *ctx, bool flush, struct aml_vdec_frame *frame);
+	void (*get_format)(struct aml_vdec_ctx *ctx, struct aml_vdec_stream_info *info);
+};
+
+extern const struct aml_vdec_stateful_ops aml_hevc_stateful_ops;
+extern const struct aml_vdec_stateful_ops aml_mjpeg_stateful_ops;
+
 struct aml_vdec_stateful_ctx {
 	struct aml_vdec_ctx ctx;
 	/* Serializes stateful metadata and retained CAPTURE buffers. */
 	struct mutex lock;
+	struct aml_vdec_frame frame;
 	bool wait_capture;
 	u32 min_capture;
 	bool format_known;
@@ -63,15 +96,6 @@ void vb2_ops_vdec_buf_finish(struct vb2_buffer *vb);
 int aml_vdec_queue_init(void *priv, struct vb2_queue *src_vq,
 			struct vb2_queue *dst_vq);
 void aml_vdec_reset_fmts(struct aml_vdec_ctx *ctx);
-void aml_hevc_device_run(struct aml_vdec_ctx *ctx);
-int aml_hevc_job_ready(struct aml_vdec_ctx *ctx);
-void aml_hevc_cancel_output(struct aml_vdec_ctx *ctx);
-void aml_hevc_start_capture(struct aml_vdec_ctx *ctx);
-void aml_hevc_eos(struct aml_vdec_ctx *ctx);
-void aml_hevc_last_buffer_done(struct aml_vdec_ctx *ctx,
-			       struct vb2_v4l2_buffer *vb);
 int aml_hevc_try_fmt(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 		     struct v4l2_pix_format_mplane *fmt);
-int aml_hevc_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selection *selection);
-int aml_hevc_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd *cmd);
 #endif

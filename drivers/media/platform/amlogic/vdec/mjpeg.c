@@ -26,6 +26,7 @@
 #define MJPEG_TIMEOUT_MS	500
 
 struct aml_mjpeg_ctx {
+	bool picture_ready;
 	struct aml_vdec_ctx *v4l2_ctx;
 
 	void *stage_vaddr;
@@ -490,6 +491,34 @@ int aml_mjpeg_dec_run(void *priv)
 	return ctx->decode_result;
 }
 
+static int mjpeg_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
+			struct vb2_v4l2_buffer *dst, struct aml_vdec_decode_result *result)
+{
+	struct aml_mjpeg_ctx *m = ctx->codec_priv;
+	int ret = aml_mjpeg_dec_run(ctx);
+
+	m->picture_ready = !ret;
+	result->picture = !ret;
+	return ret;
+}
+
+static int mjpeg_get_frame(struct aml_vdec_ctx *ctx, bool flush, struct aml_vdec_frame *frame)
+{
+	struct aml_mjpeg_ctx *m = ctx->codec_priv;
+
+	if (!m->picture_ready)
+		return 0;
+	frame->buffer = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
+	frame->final = true;
+	m->picture_ready = false;
+	return 1;
+}
+
+const struct aml_vdec_stateful_ops aml_mjpeg_stateful_ops = {
+	.submit = mjpeg_submit,
+	.get_frame = mjpeg_get_frame,
+};
+
 static void jpeg_set_colors(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 			    struct v4l2_pix_format_mplane *fmt)
 {
@@ -505,10 +534,10 @@ static const u32 jpeg_formats[] = { V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_YUV420 };
 
 const struct aml_vdec_node_desc aml_vdec_jpeg_node = {
 	.interface = &aml_vdec_stateful_interface,
+	.stateful_ops = &aml_mjpeg_stateful_ops,
 	.formats = jpeg_formats,
 	.num_formats = ARRAY_SIZE(jpeg_formats),
 	.default_output = V4L2_PIX_FMT_MJPEG,
 	.default_capture = V4L2_PIX_FMT_YUV420,
 	.set_colors = jpeg_set_colors,
-	.run = aml_vdec_run_pair,
 };
