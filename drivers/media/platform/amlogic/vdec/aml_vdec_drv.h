@@ -183,6 +183,7 @@ struct aml_vdec_dev {
 	const struct aml_dev_platform_data *pvdec_data;
 
 	struct mutex dev_mutex;
+	struct aml_vdec_debugfs *debugfs;
 };
 
 /**
@@ -257,6 +258,11 @@ struct aml_vdec_buffer {
 
 void aml_vdec_buf_cleanup(struct vb2_buffer *vb);
 int aml_vdec_job_stop(struct aml_vdec_ctx *ctx);
+bool aml_vdec_power_allowed(void);
+void aml_vdec_debugfs_root_init(void);
+void aml_vdec_debugfs_root_remove(void);
+void aml_vdec_debugfs_init(struct aml_vdec_dev *dev);
+void aml_vdec_debugfs_remove(struct aml_vdec_dev *dev);
 void aml_vdec_fault(struct aml_vdec_ctx *ctx);
 int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx);
 void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx);
