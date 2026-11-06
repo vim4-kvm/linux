@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#ifndef __AMLOGIC_HEVC_KUNIT_TRACES_H__
+#define __AMLOGIC_HEVC_KUNIT_TRACES_H__
+
 /* Decoded prefix metadata; flags are output, prior-discard and NoRasl. */
 struct h265_output_trace {
 	s16 poc;
@@ -532,3 +535,5 @@ static const u16 output_expected_5[] = {
 	49, 42, 53, 52, 54, 51, 56, 55, 57, 50, 61, 60, 62, 59, 64, 63,
 	65, 58, 68, 70, 74, 73, 75, 72, 77, 76, 78, 71, 81, 80, 82, 79,
 };
+
+#endif /* __AMLOGIC_HEVC_KUNIT_TRACES_H__ */

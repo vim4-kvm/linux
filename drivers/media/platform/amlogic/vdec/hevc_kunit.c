@@ -684,7 +684,7 @@ static void restarted_cra_skips_unavailable_rasl(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, h265_update_random_access(h));
 }
 
-#include "hevc_output_traces.c"
+#include "hevc_kunit_traces.h"
 
 static void check_trace_outputs(struct kunit *test, struct h265_dpb *h,
 				const u16 *expected, unsigned int count, unsigned int *seen)
