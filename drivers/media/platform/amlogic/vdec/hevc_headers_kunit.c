@@ -23,7 +23,7 @@ static void output_flags_and_parameter_replacement(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, headers);
 	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, opflag_params,
-						 sizeof(opflag_params), &au), 0);
+						   sizeof(opflag_params), &au), 0);
 	KUNIT_EXPECT_FALSE(test, au.has_picture);
 	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hidden, sizeof(hidden), &au), 0);
 	KUNIT_EXPECT_TRUE(test, au.has_picture);
@@ -79,7 +79,7 @@ static void malformed_headers_do_not_install_partial_parameters(struct kunit *te
 	KUNIT_EXPECT_EQ(test, h265_headers_parse_au(headers, unknown, sizeof(unknown), &au),
 			-EINVAL);
 	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, continuation,
-						 sizeof(continuation), &au), 0);
+						   sizeof(continuation), &au), 0);
 	KUNIT_EXPECT_FALSE(test, au.has_picture);
 }
 
