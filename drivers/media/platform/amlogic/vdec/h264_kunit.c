@@ -429,6 +429,34 @@ static void timestamp_picture_slots(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, h->colocated_buf_map, 0);
 }
 
+static void retired_picture_timestamp(struct kunit *test)
+{
+	struct aml_h264_ctx *h = test->priv;
+	struct v4l2_ctrl_h264_decode_params *decode;
+	int old_canvas;
+
+	decode = kunit_kzalloc(test, sizeof(*decode), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, decode);
+	h->ctrl_ref.decode = decode;
+	h->colocated_buf_num = 2;
+	decode->nal_ref_idc = 1;
+	KUNIT_ASSERT_EQ(test, h264_get_picture_slots(h, 0), 0);
+	old_canvas = h->curr_spec.canvas_pos;
+	KUNIT_EXPECT_FALSE(test, h264_reference_missing(h, 0, true));
+
+	/* MR3 drops the IDR from its DPB before the timestamp-zero buffer is reused. */
+	h264_prune_picture_slots(h, 10000, false);
+	KUNIT_EXPECT_EQ(test, h->canvas_pos_map, 0);
+	KUNIT_EXPECT_EQ(test, h->colocated_buf_map, 0);
+	/* Supply a successful lookup outcome without constructing a mock vb2 queue. */
+	KUNIT_EXPECT_TRUE(test, h264_reference_missing(h, 0, true));
+	KUNIT_ASSERT_EQ(test, h264_get_picture_slots(h, 10000), 0);
+	KUNIT_EXPECT_EQ(test, h->curr_spec.canvas_pos, old_canvas);
+	KUNIT_EXPECT_TRUE(test, h264_reference_missing(h, 0, true));
+	KUNIT_EXPECT_FALSE(test, h264_reference_missing(h, 10000, true));
+	KUNIT_EXPECT_TRUE(test, h264_reference_missing(h, 10000, false));
+}
+
 static void gap_reference_storage(struct kunit *test)
 {
 	static const struct v4l2_ctrl_h264_sps sps = {};
@@ -559,6 +587,7 @@ static struct kunit_case h264_test_cases[] = {
 	KUNIT_CASE(field_picture_numbers),
 	KUNIT_CASE(timestamp_picture_slots),
 	KUNIT_CASE(gap_reference_storage),
+	KUNIT_CASE(retired_picture_timestamp),
 	KUNIT_CASE(paired_field_reference_view),
 	KUNIT_CASE(original_picture_structure),
 	KUNIT_CASE(colocated_mv_layout),
