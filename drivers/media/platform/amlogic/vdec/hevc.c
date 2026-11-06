@@ -1595,10 +1595,15 @@ int aml_hevc_init(void *priv)
 		return -ENOMEM;
 	h->v4l2_ctx = ctx;
 	h->hw = hw;
+	h->stateful = aml_vdec_stateful(ctx);
+	h->stateful->format_known = false;
+	h->stateful->sequence = 0;
+	memset(&h->stateful->format, 0, sizeof(h->stateful->format));
+	memset(&h->stateful->crop, 0, sizeof(h->stateful->crop));
 	h->cur = -1;
 	h->curr_poc = H265_INVALID_POC;
 	h->poc_random_access = H265_MAX_INT;
-	WRITE_ONCE(ctx->hevc_wait_capture, false);
+	WRITE_ONCE(aml_vdec_stateful(ctx)->wait_capture, false);
 
 	ctx->codec_priv = h;
 	return 0;
@@ -1738,7 +1743,7 @@ int aml_hevc_try_fmt(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 {
 	struct aml_hevc_ctx *h;
 
-	mutex_lock(&ctx->hevc_lock);
+	mutex_lock(&aml_vdec_stateful(ctx)->lock);
 	h = ctx->codec_priv;
 	if (V4L2_TYPE_IS_OUTPUT(type)) {
 		fmt->width = clamp_t(u32, fmt->width, 64, H265_MAX_DIM);
@@ -1749,12 +1754,12 @@ int aml_hevc_try_fmt(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 		fmt->plane_fmt[0].bytesperline = 0;
 		fmt->plane_fmt[0].sizeimage = clamp_t(u32, fmt->plane_fmt[0].sizeimage,
 						      SZ_1M, SZ_16M);
-	} else if (h && h->format_known) {
-		*fmt = h->format;
+	} else if (h && h->stateful->format_known) {
+		*fmt = h->stateful->format;
 	} else {
 		h265_capture_format(fmt, fmt->width, fmt->height);
 	}
-	mutex_unlock(&ctx->hevc_lock);
+	mutex_unlock(&aml_vdec_stateful(ctx)->lock);
 	return 0;
 }
 
@@ -1765,12 +1770,12 @@ int aml_hevc_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selection *s)
 
 	if (s->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
-	mutex_lock(&ctx->hevc_lock);
+	mutex_lock(&aml_vdec_stateful(ctx)->lock);
 	h = ctx->codec_priv;
 	switch (s->target) {
 	case V4L2_SEL_TGT_COMPOSE:
 	case V4L2_SEL_TGT_COMPOSE_DEFAULT:
-		s->r = h && h->format_known ? h->crop : ctx->compose;
+		s->r = h && h->stateful->format_known ? h->stateful->crop : ctx->compose;
 		break;
 	case V4L2_SEL_TGT_COMPOSE_BOUNDS:
 		s->r = (struct v4l2_rect) {
@@ -1781,7 +1786,7 @@ int aml_hevc_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selection *s)
 	default:
 		ret = -EINVAL;
 	}
-	mutex_unlock(&ctx->hevc_lock);
+	mutex_unlock(&aml_vdec_stateful(ctx)->lock);
 	return ret;
 }
 
@@ -1810,7 +1815,7 @@ static void h265_output(struct aml_hevc_ctx *h, int slot,
 
 	h->pic[slot].output = NULL;
 	h->pending--;
-	vb->sequence = h->sequence++;
+	vb->sequence = h->stateful->sequence++;
 	if (last)
 		vb->flags |= V4L2_BUF_FLAG_LAST;
 	v4l2_m2m_buf_done(vb, state);
@@ -1837,13 +1842,13 @@ void aml_hevc_last_buffer_done(struct aml_vdec_ctx *ctx,
 {
 	struct aml_hevc_ctx *h;
 
-	mutex_lock(&ctx->hevc_lock);
+	mutex_lock(&aml_vdec_stateful(ctx)->lock);
 	h = ctx->codec_priv;
 	if (h)
-		vb->sequence = h->sequence++;
+		vb->sequence = h->stateful->sequence++;
 	aml_hevc_eos(ctx);
 	v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb);
-	mutex_unlock(&ctx->hevc_lock);
+	mutex_unlock(&aml_vdec_stateful(ctx)->lock);
 }
 
 static void h265_end_capture(struct aml_vdec_ctx *ctx, bool eos)
@@ -1859,7 +1864,7 @@ static void h265_end_capture(struct aml_vdec_ctx *ctx, bool eos)
 	}
 	for (i = 0; i < vb->vb2_buf.num_planes; i++)
 		vb2_set_plane_payload(&vb->vb2_buf, i, 0);
-	vb->sequence = h->sequence++;
+	vb->sequence = h->stateful->sequence++;
 	if (eos) {
 		aml_hevc_eos(ctx);
 		v4l2_m2m_last_buffer_done(ctx->m2m_ctx, vb);
@@ -1874,23 +1879,23 @@ void aml_hevc_cancel_output(struct aml_vdec_ctx *ctx)
 {
 	struct aml_hevc_ctx *h;
 
-	mutex_lock(&ctx->hevc_lock);
+	mutex_lock(&aml_vdec_stateful(ctx)->lock);
 	h = ctx->codec_priv;
 	if (h)
 		h265_flush_pending(h, VB2_BUF_STATE_ERROR, false);
-	mutex_unlock(&ctx->hevc_lock);
+	mutex_unlock(&aml_vdec_stateful(ctx)->lock);
 }
 
 void aml_hevc_start_capture(struct aml_vdec_ctx *ctx)
 {
 	struct aml_hevc_ctx *h;
 
-	mutex_lock(&ctx->hevc_lock);
+	mutex_lock(&aml_vdec_stateful(ctx)->lock);
 	h = ctx->codec_priv;
 	if (h)
-		h->sequence = 0;
-	WRITE_ONCE(ctx->hevc_wait_capture, false);
-	mutex_unlock(&ctx->hevc_lock);
+		h->stateful->sequence = 0;
+	WRITE_ONCE(aml_vdec_stateful(ctx)->wait_capture, false);
+	mutex_unlock(&aml_vdec_stateful(ctx)->lock);
 }
 
 static void h265_source_change(struct aml_hevc_ctx *h)
@@ -1901,32 +1906,34 @@ static void h265_source_change(struct aml_hevc_ctx *h)
 	struct v4l2_pix_format_mplane *old = &ctx->pix_fmt[AML_FMT_DST];
 	u16 *p = h->p;
 	bool capture_matches;
-	bool end_capture = h->format_known && ctx->is_cap_streamon;
-	h->format = ctx->pix_fmt[AML_FMT_DST];
-	h265_capture_format(&h->format, h->pic_w, h->pic_h);
-	capture_matches = !h->format_known && ctx->is_cap_streamon &&
-		old->width == h->format.width && old->height == h->format.height &&
+	bool end_capture = h->stateful->format_known && ctx->is_cap_streamon;
+
+	h->stateful->format = ctx->pix_fmt[AML_FMT_DST];
+	h265_capture_format(&h->stateful->format, h->pic_w, h->pic_h);
+	capture_matches = !h->stateful->format_known && ctx->is_cap_streamon &&
+		old->width == h->stateful->format.width &&
+		old->height == h->stateful->format.height &&
 		old->num_planes == 2 &&
-		old->plane_fmt[0].sizeimage >= h->format.plane_fmt[0].sizeimage &&
-		old->plane_fmt[1].sizeimage >= h->format.plane_fmt[1].sizeimage;
-	h->format.quantization = p[P_VIDEO_SIGNAL_TYPE] & BIT(9) ?
+		old->plane_fmt[0].sizeimage >= h->stateful->format.plane_fmt[0].sizeimage &&
+		old->plane_fmt[1].sizeimage >= h->stateful->format.plane_fmt[1].sizeimage;
+	h->stateful->format.quantization = p[P_VIDEO_SIGNAL_TYPE] & BIT(9) ?
 		V4L2_QUANTIZATION_FULL_RANGE : V4L2_QUANTIZATION_LIM_RANGE;
-	h->crop = (struct v4l2_rect) { .width = h->pic_w, .height = h->pic_h };
+	h->stateful->crop = (struct v4l2_rect) { .width = h->pic_w, .height = h->pic_h };
 	if (p[P_CONFORMANCE_WINDOW_FLAG]) {
-		h->crop.left = 2 * p[P_CONF_WIN_LEFT_OFFSET];
-		h->crop.top = 2 * p[P_CONF_WIN_TOP_OFFSET];
-		h->crop.width -= h->crop.left + 2 * p[P_CONF_WIN_RIGHT_OFFSET];
-		h->crop.height -= h->crop.top + 2 * p[P_CONF_WIN_BOTTOM_OFFSET];
+		h->stateful->crop.left = 2 * p[P_CONF_WIN_LEFT_OFFSET];
+		h->stateful->crop.top = 2 * p[P_CONF_WIN_TOP_OFFSET];
+		h->stateful->crop.width -= h->stateful->crop.left + 2 * p[P_CONF_WIN_RIGHT_OFFSET];
+		h->stateful->crop.height -= h->stateful->crop.top + 2 * p[P_CONF_WIN_BOTTOM_OFFSET];
 	}
 	h->reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
-	WRITE_ONCE(ctx->hevc_min_capture, h->reorder_limit + 2);
-	h->format_known = true;
+	WRITE_ONCE(aml_vdec_stateful(ctx)->min_capture, h->reorder_limit + 2);
+	h->stateful->format_known = true;
 	h->configured = false;
-	ctx->pix_fmt[AML_FMT_DST] = h->format;
-	ctx->compose = h->crop;
-	ctx->pic_info.coded_width = h->format.width;
-	ctx->pic_info.coded_height = h->format.height;
-	WRITE_ONCE(ctx->hevc_wait_capture, !capture_matches);
+	ctx->pix_fmt[AML_FMT_DST] = h->stateful->format;
+	ctx->compose = h->stateful->crop;
+	ctx->pic_info.coded_width = h->stateful->format.width;
+	ctx->pic_info.coded_height = h->stateful->format.height;
+	WRITE_ONCE(aml_vdec_stateful(ctx)->wait_capture, !capture_matches);
 	/* Publish the reason before LAST can wake a CAPTURE waiter. */
 	v4l2_event_queue_fh(&ctx->fh, &event);
 	if (end_capture) {
@@ -1941,10 +1948,10 @@ int aml_hevc_job_ready(struct aml_vdec_ctx *ctx)
 {
 	struct aml_hevc_ctx *h = ctx->codec_priv;
 
-	if (!h || READ_ONCE(ctx->hevc_wait_capture))
+	if (!h || READ_ONCE(aml_vdec_stateful(ctx)->wait_capture))
 		return 0;
-	if (h->format_known && (!ctx->is_cap_streamon ||
-				!v4l2_m2m_num_dst_bufs_ready(ctx->m2m_ctx)))
+	if (h->stateful->format_known && (!ctx->is_cap_streamon ||
+					  !v4l2_m2m_num_dst_bufs_ready(ctx->m2m_ctx)))
 		return 0;
 	return 1;
 }
@@ -1956,14 +1963,14 @@ void aml_hevc_device_run(struct aml_vdec_ctx *ctx)
 	bool drain;
 	int ret, slot;
 
-	/* Queue allocation locks precede hevc_lock, as in vb2 queue setup. */
+	/* Queue allocation locks precede the stateful lock, as in vb2 queue setup. */
 	ret = aml_vdec_get_buffer_pins(ctx);
-	mutex_lock(&ctx->hevc_lock);
+	mutex_lock(&aml_vdec_stateful(ctx)->lock);
 	if (ret || ctx->decode_failed || ctx->dev->dec_hw->faulted) {
 		ret = ret ?: -EIO;
 		goto error;
 	}
-	if (h->format_known && !h->configured) {
+	if (h->stateful->format_known && !h->configured) {
 		ret = aml_hevc_configure(ctx);
 		if (ret)
 			goto error;
@@ -2017,7 +2024,7 @@ error:
 	vb2_queue_error(v4l2_m2m_get_src_vq(ctx->m2m_ctx));
 	vb2_queue_error(v4l2_m2m_get_dst_vq(ctx->m2m_ctx));
 finish:
-	mutex_unlock(&ctx->hevc_lock);
+	mutex_unlock(&aml_vdec_stateful(ctx)->lock);
 	aml_vdec_put_buffer_pins(ctx);
 	v4l2_m2m_job_finish(ctx->dev->m2m_dev_dec, ctx->m2m_ctx);
 }
@@ -2031,7 +2038,7 @@ int aml_hevc_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd 
 	ret = v4l2_m2m_ioctl_try_decoder_cmd(file, priv, cmd);
 	if (ret)
 		return ret;
-	mutex_lock(&ctx->hevc_lock);
+	mutex_lock(&aml_vdec_stateful(ctx)->lock);
 	h = ctx->codec_priv;
 	if (cmd->cmd == V4L2_DEC_CMD_STOP && !ctx->m2m_ctx->is_draining &&
 	    !ctx->m2m_ctx->has_stopped && !v4l2_m2m_next_src_buf(ctx->m2m_ctx)) {
@@ -2048,7 +2055,7 @@ int aml_hevc_decoder_cmd(struct file *file, void *priv, struct v4l2_decoder_cmd 
 		}
 	}
 	ret = v4l2_m2m_ioctl_decoder_cmd(file, priv, cmd);
-	mutex_unlock(&ctx->hevc_lock);
+	mutex_unlock(&aml_vdec_stateful(ctx)->lock);
 	return ret;
 }
 
