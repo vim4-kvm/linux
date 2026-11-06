@@ -1086,7 +1086,7 @@ int vdec_disable(struct aml_vdec_hw *hw)
 	return vdec_poweroff(hw, VDEC_1);
 }
 
-static int t7_hevc_power_off(struct aml_vdec_hw *hw)
+int aml_hevc_power_off(struct aml_vdec_hw *hw)
 {
 	s32 state;
 	int ret;
@@ -1110,7 +1110,7 @@ static int t7_hevc_power_off(struct aml_vdec_hw *hw)
 	return 0;
 }
 
-static int t7_hevc_power_on(struct aml_vdec_hw *hw)
+int aml_hevc_power_on(struct aml_vdec_hw *hw)
 {
 	struct clk *clock = hw->hevc.front->clk;
 	u32 p0, p1, gates;
@@ -1187,53 +1187,7 @@ static int t7_hevc_power_on(struct aml_vdec_hw *hw)
 	return 0;
 
 power_off:
-	t7_hevc_power_off(hw);
-	return ret;
-}
-
-int aml_vdec_t7_hevc_test(struct aml_vdec_hw *hw)
-{
-	u32 value;
-	int ret, off_ret;
-
-	if (!hw->hevc.present)
-		return -EOPNOTSUPP;
-	if (hw->faulted || hw->diag.probe_failed)
-		return -EIO;
-	if (!hw->diag.mdec_test_passed || hw->vdec1.powered || hw->diag.probe_step)
-		return -EBUSY;
-	hw->diag.hevc_test_passed = false;
-	ret = vdec_enable(hw);
-	if (ret)
-		return ret;
-	ret = t7_hevc_power_on(hw);
-	if (ret)
-		goto power_off;
-	/* No microcode, CPU start or DMA: only the audited reset/status registers. */
-	dev_info(hw->dev, "HEVC test: MPSR read begin\n");
-	ret = regmap_read(hw->map[DOS_BUS], HEVC_MPSR, &value);
-	if (ret)
-		goto power_off;
-	if (value) {
-		ret = -EBUSY;
-		goto power_off;
-	}
-	dev_info(hw->dev, "HEVC test: parser version read begin\n");
-	ret = regmap_read(hw->map[DOS_BUS], HEVC_PARSER_VERSION, &value);
-	if (!ret) {
-		hw->diag.hevc_parser_version = value;
-		dev_info(hw->dev, "HEVC test: parser version=%#x\n", value);
-	}
-
-power_off:
-	off_ret = t7_hevc_power_off(hw);
-	if (!hw->faulted)
-		off_ret = vdec_disable(hw) ?: off_ret;
-	ret = ret ?: off_ret;
-	if (ret)
-		hw->diag.probe_failed = true;
-	else
-		hw->diag.hevc_test_passed = true;
+	aml_hevc_power_off(hw);
 	return ret;
 }
 
@@ -1335,7 +1289,7 @@ int aml_hevc_prepare_hw(struct aml_vdec_hw *hw)
 	struct arm_smccc_res result;
 	int ret;
 
-	ret = t7_hevc_power_on(hw);
+	ret = aml_hevc_power_on(hw);
 	if (ret)
 		return ret;
 	ret = t7_hevc_stop(hw);
@@ -1428,34 +1382,7 @@ int aml_hevc_release_hw(struct aml_vdec_hw *hw)
 {
 	int ret = aml_hevc_stop_hw(hw);
 
-	return ret ?: t7_hevc_power_off(hw);
-}
-
-int aml_vdec_t7_hevc_core_test(struct aml_vdec_hw *hw)
-{
-	int ret, off_ret;
-
-	if (!hw->hevc.present)
-		return -EOPNOTSUPP;
-	if (hw->faulted || hw->diag.probe_failed)
-		return -EIO;
-	if (!hw->diag.hevc_test_passed || hw->vdec1.powered || hw->diag.probe_step)
-		return -EBUSY;
-	hw->diag.hevc_core_test_passed = false;
-	ret = vdec_enable(hw);
-	if (ret)
-		return ret;
-	ret = aml_hevc_prepare_hw(hw);
-	/* Even a rejected load can have touched IMEM DMA; always drain it. */
-	off_ret = aml_hevc_release_hw(hw);
-	if (!hw->faulted)
-		off_ret = vdec_disable(hw) ?: off_ret;
-	ret = ret ?: off_ret;
-	if (ret)
-		hw->diag.probe_failed = true;
-	else
-		hw->diag.hevc_core_test_passed = true;
-	return ret;
+	return ret ?: aml_hevc_power_off(hw);
 }
 
 static irqreturn_t hevc_threaded_isr_handler(int irq, void *priv)
