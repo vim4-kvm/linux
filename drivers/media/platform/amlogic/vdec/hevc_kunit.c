@@ -204,12 +204,36 @@ static void capture_sao_capacity(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, f.plane_fmt[1].sizeimage, 65536);
 }
 
+static void mv_storage_covers_edge_ctus(struct kunit *test)
+{
+	static const u32 sizes[][2] = {
+		{ 256, 256 }, { 720, 720 }, { 832, 608 }, { 1920, 1080 }, { 4096, 2304 },
+	};
+	unsigned int i, log2_ctu;
+
+	/* Both edge geometries overrun the old 64 KiB allocation with 64x64 CTUs. */
+	KUNIT_EXPECT_EQ(test, h265_mv_buf_size(720, 720), (size_t)SZ_128K);
+	KUNIT_EXPECT_EQ(test, h265_mv_buf_size(832, 608), (size_t)SZ_128K);
+	for (i = 0; i < ARRAY_SIZE(sizes); i++) {
+		size_t capacity = h265_mv_buf_size(sizes[i][0], sizes[i][1]);
+
+		for (log2_ctu = 4; log2_ctu <= 6; log2_ctu++) {
+			u32 columns = DIV_ROUND_UP(sizes[i][0], BIT(log2_ctu));
+			u32 rows = DIV_ROUND_UP(sizes[i][1], BIT(log2_ctu));
+			u32 unit = 1U << (2 * log2_ctu - 3);
+
+			KUNIT_EXPECT_GE(test, capacity, (size_t)columns * rows * unit);
+		}
+	}
+}
+
 static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(poc_wrap_and_random_access),
 	KUNIT_CASE(invalid_firmware_parameters),
 	KUNIT_CASE(tile_boundaries),
 	KUNIT_CASE(missing_and_reordered_references),
 	KUNIT_CASE(capture_sao_capacity),
+	KUNIT_CASE(mv_storage_covers_edge_ctus),
 	{}
 };
 
