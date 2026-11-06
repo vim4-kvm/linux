@@ -514,12 +514,15 @@ static void h265_bump_limits(struct h265_dpb *h, const struct h265_output_limits
 			if (!pic->needed_for_output)
 				continue;
 			needed++;
-			if (limits->max_latency_increase_plus1 && pic->latency_count >= latency_limit)
+			if (limits->max_latency_increase_plus1 &&
+			    pic->latency_count >= latency_limit)
 				latency = true;
 		}
 		first = h265_first_needed(h);
-		if (first < 0 || (needed <= limits->max_num_reorder_pics && !latency &&
-				 (!before_decode || fullness < limits->max_dec_pic_buffering)))
+		if (first < 0)
+			break;
+		if (needed <= limits->max_num_reorder_pics && !latency &&
+		    (!before_decode || fullness < limits->max_dec_pic_buffering))
 			break;
 		h265_bump(h, first);
 	}
