@@ -487,6 +487,27 @@ static int h265_pic_by_poc(struct aml_hevc_ctx *h, int poc, bool ref_only)
 	return best;
 }
 
+static int h265_long_term_poc(struct aml_hevc_ctx *h, int poc)
+{
+	u32 mask = BIT(h->p[P_LOG2_MAX_POC_LSB_MINUS4] + 4) - 1;
+	int i, found = H265_INVALID_POC;
+
+	/* Long-term RPM deltas can wrap at the stream's POC LSB width. */
+	for (i = 0; i < H265_SLOTS; i++) {
+		struct h265_pic *pic = &h->pic[i];
+
+		/* cur can still name the preceding picture before slot allocation. */
+		if (pic->poc == h->curr_poc || !pic->valid || !pic->referenced ||
+		    pic->width != h->pic_w || pic->height != h->pic_h ||
+		    ((u32)pic->poc & mask) != ((u32)poc & mask))
+			continue;
+		if (found != (int)H265_INVALID_POC && found != pic->poc)
+			return H265_INVALID_POC;
+		found = pic->poc;
+	}
+	return found;
+}
+
 /* Decode a CUR_RPS entry to a POC; returns false at the end marker. */
 static bool h265_rps_poc(struct aml_hevc_ctx *h, int i, int *poc, bool *used, bool *lt)
 {
@@ -502,6 +523,8 @@ static bool h265_rps_poc(struct aml_hevc_ctx *h, int i, int *poc, bool *used, bo
 		*poc = h->curr_poc + delt;
 	*used = (e >> RPS_USED_BIT) & 1;
 	*lt = (e >> RPS_LT_BIT) & 1;
+	if (*lt)
+		*poc = h265_long_term_poc(h, *poc);
 	return true;
 }
 
@@ -510,28 +533,37 @@ static bool h265_rps_poc(struct aml_hevc_ctx *h, int i, int *poc, bool *used, bo
  */
 VISIBLE_IF_KUNIT void h265_apply_rps(struct aml_hevc_ctx *h)
 {
+	bool reset = h->nal_type == H265_NAL_IDR_W_RADL ||
+		     h->nal_type == H265_NAL_IDR_N_LP ||
+		     (h->nal_type >= H265_NAL_BLA_W_LP && h->nal_type <= H265_NAL_BLA_N_LP);
+	int pocs[H265_MAX_REF], count = 0;
+	bool long_terms[H265_MAX_REF];
 	int i, j;
+
+	/* Resolve against the complete old DPB before changing reference ownership. */
+	if (!reset) {
+		for (count = 0; count < H265_MAX_REF; count++) {
+			bool used;
+
+			if (!h265_rps_poc(h, count, &pocs[count], &used, &long_terms[count]))
+				break;
+		}
+	}
 
 	for (i = 0; i < H265_SLOTS; i++) {
 		struct h265_pic *pic = &h->pic[i];
 		bool found = false;
 
 		pic->long_term = false;
-		if (h->nal_type == H265_NAL_IDR_W_RADL || h->nal_type == H265_NAL_IDR_N_LP ||
-		    (h->nal_type >= H265_NAL_BLA_W_LP && h->nal_type <= H265_NAL_BLA_N_LP)) {
+		if (reset) {
 			pic->referenced = false;
 			continue;
 		}
 		if (!pic->valid || !pic->referenced || pic->poc == h->curr_poc)
 			continue;
-		for (j = 0; j < 16; j++) {
-			int poc;
-			bool used, lt;
-
-			if (!h265_rps_poc(h, j, &poc, &used, &lt))
-				break;
-			if (poc == pic->poc) {
-				pic->long_term = lt;
+		for (j = 0; j < count; j++) {
+			if (pocs[j] == pic->poc) {
+				pic->long_term = long_terms[j];
 				found = true;
 				break;
 			}

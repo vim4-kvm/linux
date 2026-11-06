@@ -223,6 +223,85 @@ static void capture_sao_capacity(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, f.plane_fmt[1].sizeimage, 65536);
 }
 
+static void long_term_references_survive_poc_lsb_wrap(struct kunit *test)
+{
+	static const int pocs[] = { 250, 210, 70, 230 };
+	static const u16 rps[] = { 0x3ff6, 0x3fce, 0x6042, 0x60e2, RPS_END };
+	struct aml_hevc_ctx *h = test->priv;
+	unsigned int i;
+
+	h->curr_poc = 260;
+	h->cur = 17;
+	h->pic_w = 416;
+	h->pic_h = 240;
+	h->slice_type = H265_P_SLICE;
+	h->nal_type = 1;
+	h->p[P_SLICE_TYPE] = H265_P_SLICE;
+	h->p[P_NUM_REF_IDX_L0_ACTIVE] = ARRAY_SIZE(pocs);
+	memcpy(&h->p[P_CUR_RPS], rps, sizeof(rps));
+	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
+		h->pic[i].valid = true;
+		h->pic[i].referenced = true;
+		h->pic[i].width = 416;
+		h->pic[i].height = 240;
+		h->pic[i].poc = pocs[i];
+	}
+	h265_apply_rps(h);
+	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h), 0);
+	KUNIT_EXPECT_MEMEQ(test, h->ref_poc_l0, pocs, sizeof(pocs));
+	KUNIT_EXPECT_TRUE(test, h->pic[2].referenced);
+	KUNIT_EXPECT_TRUE(test, h->pic[2].long_term);
+	KUNIT_EXPECT_TRUE(test, h->pic[3].referenced);
+	KUNIT_EXPECT_TRUE(test, h->pic[3].long_term);
+	/* Two retained POC cycles with the same LSB cannot be guessed apart. */
+	h->pic[4] = h->pic[2];
+	h->pic[4].poc = 326;
+	KUNIT_EXPECT_EQ(test, h265_set_ref_lists(h), -EINVAL);
+	/* A short-term delta must still identify a complete POC exactly. */
+	h->p[P_CUR_RPS] = 0x2004;
+	h->p[P_CUR_RPS + 1] = RPS_END;
+	h->p[P_NUM_REF_IDX_L0_ACTIVE] = 1;
+	h->pic[4].poc = 8;
+	KUNIT_EXPECT_EQ(test, h265_set_ref_lists(h), -EINVAL);
+}
+
+static void previous_decoded_picture_can_be_long_term(struct kunit *test)
+{
+	struct aml_hevc_ctx *h = test->priv;
+	int slot;
+
+	h->curr_poc = 326;
+	h->cur = 0;
+	h->nslots = 4;
+	h->pic_w = 416;
+	h->pic_h = 240;
+	h->slice_type = H265_P_SLICE;
+	h->nal_type = 1;
+	h->p[P_SLICE_TYPE] = H265_P_SLICE;
+	h->p[P_NUM_REF_IDX_L0_ACTIVE] = 1;
+	/* LT delta zero names POC 70 in the previous eight-bit POC cycle. */
+	h->p[P_CUR_RPS] = 0x6000;
+	h->p[P_CUR_RPS + 1] = RPS_END;
+	h->pic[0].valid = true;
+	h->pic[0].referenced = true;
+	h->pic[0].width = 416;
+	h->pic[0].height = 240;
+	h->pic[0].poc = 70;
+
+	/* RPS is applied while cur still identifies the preceding decoded picture. */
+	h265_apply_rps(h);
+	KUNIT_ASSERT_TRUE(test, h->pic[0].referenced);
+	KUNIT_EXPECT_TRUE(test, h->pic[0].long_term);
+	slot = h265_free_slot(h);
+	KUNIT_ASSERT_EQ(test, slot, 1);
+	h->cur = slot;
+	h->pic[slot] = h->pic[0];
+	h->pic[slot].poc = h->curr_poc;
+	/* The new picture shares the LT LSB, but must not become its own reference. */
+	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h), 0);
+	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[0], 70);
+}
+
 static void mv_storage_covers_edge_ctus(struct kunit *test)
 {
 	static const u32 sizes[][2] = {
@@ -367,6 +446,8 @@ static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(first_slice_ignores_absent_segment_address),
 	KUNIT_CASE(tile_boundaries),
 	KUNIT_CASE(missing_and_reordered_references),
+	KUNIT_CASE(long_term_references_survive_poc_lsb_wrap),
+	KUNIT_CASE(previous_decoded_picture_can_be_long_term),
 	KUNIT_CASE(capture_sao_capacity),
 	KUNIT_CASE(mv_storage_covers_edge_ctus),
 	KUNIT_CASE(rps_and_output_own_picture_slots),
