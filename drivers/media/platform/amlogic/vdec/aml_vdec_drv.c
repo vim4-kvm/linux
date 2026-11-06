@@ -225,7 +225,8 @@ ATTRIBUTE_GROUPS(aml_vdec);
 
 static int fops_vcodec_open(struct file *file)
 {
-	struct aml_vdec_dev *dec_dev = video_drvdata(file);
+	struct aml_vdec_node *node = video_drvdata(file);
+	struct aml_vdec_dev *dec_dev = node->dev;
 	struct aml_vdec_ctx *ctx = NULL;
 	int ret = 0;
 
@@ -251,8 +252,7 @@ static int fops_vcodec_open(struct file *file)
 			goto err_open;
 	}
 	ctx->dev = dec_dev;
-	ctx->is_jpeg = video_devdata(file) == dec_dev->jpeg_vfd;
-	ctx->is_hevc = video_devdata(file) == dec_dev->hevc_vfd;
+	ctx->node = node->desc;
 	mutex_init(&ctx->hevc_lock);
 	ctx->hevc_min_capture = 1;
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
@@ -271,11 +271,11 @@ static int fops_vcodec_open(struct file *file)
 	}
 
 	ctx->fh.m2m_ctx = ctx->m2m_ctx;
-	if (ctx->is_hevc) {
+	if (ctx->node->buffered_capture) {
 		v4l2_m2m_set_dst_buffered(ctx->m2m_ctx, true);
 		ctx->m2m_ctx->ignore_cap_streaming = true;
 	}
-	ret = aml_vdec_ctrls_setup(ctx);
+	ret = ctx->node->interface->controls_init(ctx);
 	if (ret) {
 		v4l2_err(&dec_dev->v4l2_dev, "Failed to init all ctrls (%d)", ret);
 		goto err_ctrls_setup;
@@ -303,7 +303,7 @@ err_open:
 
 static int fops_vcodec_release(struct file *file)
 {
-	struct aml_vdec_dev *dec_dev = video_drvdata(file);
+	struct aml_vdec_dev *dec_dev = fh_to_dec_ctx(file)->dev;
 	struct aml_vdec_ctx *ctx = fh_to_dec_ctx(file);
 
 	mutex_lock(&dec_dev->dev_mutex);
@@ -337,7 +337,7 @@ static const struct v4l2_file_operations aml_vdec_fops = {
 static const struct video_device dec_dev = {
 	.name = "aml_dev_drv",
 	.fops = &aml_vdec_fops,
-	.ioctl_ops = &aml_vdec_ioctl_ops,
+	.ioctl_ops = &aml_vdec_stateless_ioctl_ops,
 	.release = video_device_release,
 	.vfl_dir = VFL_DIR_M2M,
 	.device_caps = V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING,
@@ -378,7 +378,9 @@ static int aml_vdec_register_interface(struct aml_vdec_dev *dev,
 
 static int aml_vdec_register_stateful(struct aml_vdec_dev *dev, const char *name,
 				      struct video_device **result,
-				      struct media_intf_devnode **intf)
+				      struct media_intf_devnode **intf,
+				      unsigned int index,
+				      const struct aml_vdec_node_desc *desc)
 {
 	struct video_device *vfd;
 	int ret;
@@ -391,7 +393,9 @@ static int aml_vdec_register_stateful(struct aml_vdec_dev *dev, const char *name
 	strscpy(vfd->name, name, sizeof(vfd->name));
 	vfd->v4l2_dev = &dev->v4l2_dev;
 	vfd->lock = &dev->dev_mutex;
-	video_set_drvdata(vfd, dev);
+	dev->nodes[index] = (struct aml_vdec_node) { .dev = dev, .desc = desc };
+	vfd->ioctl_ops = desc->interface->ioctl_ops;
+	video_set_drvdata(vfd, &dev->nodes[index]);
 	*result = vfd;
 	ret = video_register_device(vfd, VFL_TYPE_VIDEO, -1);
 	if (!ret) {
@@ -450,7 +454,10 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 	*vfd_dec = dec_dev;
 	vfd_dec->v4l2_dev = &dev->v4l2_dev;
 	vfd_dec->lock = &dev->dev_mutex;
-	video_set_drvdata(vfd_dec, dev);
+	dev->nodes[0] = (struct aml_vdec_node) {
+		.dev = dev, .desc = &aml_vdec_stateless_node,
+	};
+	video_set_drvdata(vfd_dec, &dev->nodes[0]);
 	dev->vfd = vfd_dec;
 	platform_set_drvdata(pdev, dev);
 
@@ -504,10 +511,12 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 	}
 	if (pdata->has_dbus_ctrl) {
 		ret = aml_vdec_register_stateful(dev, "aml_jpeg_decoder",
-						 &dev->jpeg_vfd, &dev->jpeg_intf);
+						 &dev->jpeg_vfd, &dev->jpeg_intf,
+						 1, &aml_vdec_jpeg_node);
 		if (!ret && hw->has_hevc)
 			ret = aml_vdec_register_stateful(dev, "aml_hevc_decoder",
-							 &dev->hevc_vfd, &dev->hevc_intf);
+							 &dev->hevc_vfd, &dev->hevc_intf,
+							 2, &aml_vdec_hevc_node);
 		if (!ret)
 			return 0;
 		if (dev->jpeg_vfd) {
