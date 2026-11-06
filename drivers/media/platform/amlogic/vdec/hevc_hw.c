@@ -979,7 +979,7 @@ static void h265_dump_start(struct aml_vdec_hw *hw, const char *phase)
 		"hevc: %s reset=%08x mpsr=%08x cpsr=%08x pc=%08x status=%08x irq=%08x mask=%08x\n",
 		phase, read_dos_reg(hw, DOS_SW_RESET3), read_dos_reg(hw, HEVC_MPSR),
 		read_dos_reg(hw, HEVC_CPSR), read_dos_reg(hw, HEVC_MPC_E),
-		read_dos_reg(hw, HEVC_DEC_STATUS_REG), hw->hevc_irq_status,
+		read_dos_reg(hw, HEVC_DEC_STATUS_REG), hw->hevc.irq_status,
 		read_dos_reg(hw, HEVC_ASSIST_MBOX0_MASK));
 	dev_dbg(hw->dev,
 		"hevc: %s stream=%08x..%08x rd=%08x wr=%08x control=%08x fifo=%08x\n",
@@ -1032,7 +1032,7 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 {
 	struct aml_hevc_ctx *h = priv;
 	struct aml_vdec_hw *hw = h->hw;
-	u32 status = hw->hevc_irq_status;
+	u32 status = hw->hevc.irq_status;
 	u32 st = status & 0xff;
 
 	dev_dbg(hw->dev, "hevc: irq status=%08x pc=%08x shift=%08x\n",
@@ -1200,7 +1200,7 @@ int h265_hw_run(struct aml_hevc_ctx *h, const void *data, size_t size)
 	if (!elapsed) {
 		h265_dump_start(hw, "timeout");
 		dev_err(hw->dev, "hevc: timeout, irq %02x status %02x pc %08x shift %08x\n",
-			hw->hevc_irq_status, read_dos_reg(hw, HEVC_DEC_STATUS_REG),
+			hw->hevc.irq_status, read_dos_reg(hw, HEVC_DEC_STATUS_REG),
 			read_dos_reg(hw, HEVC_MPC_E),
 			read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT));
 	}
