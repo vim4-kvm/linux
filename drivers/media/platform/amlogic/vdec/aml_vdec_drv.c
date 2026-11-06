@@ -237,7 +237,7 @@ static int fops_vcodec_open(struct file *file)
 	     !READ_ONCE(dec_dev->dec_hw->mdec_test_passed)))
 		return -EPERM;
 
-	ctx = kzalloc_obj(*ctx, GFP_KERNEL);
+	ctx = kzalloc(node->desc->interface->context_size, GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -253,8 +253,8 @@ static int fops_vcodec_open(struct file *file)
 	}
 	ctx->dev = dec_dev;
 	ctx->node = node->desc;
-	mutex_init(&ctx->hevc_lock);
-	ctx->hevc_min_capture = 1;
+	if (ctx->node->interface->context_init)
+		ctx->node->interface->context_init(ctx);
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
 	file->private_data = &ctx->fh;
 	v4l2_fh_add(&ctx->fh, file);

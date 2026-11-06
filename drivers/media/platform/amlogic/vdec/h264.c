@@ -2260,9 +2260,9 @@ int aml_h264_dec_run(void *priv)
 	regmap_update_bits(dec_hw->map[DOS_BUS], VDEC_ASSIST_MMC_CTRL1,
 			   (1 << 3), 0);
 
-	if (dec_hw->has_dbus_ctrl && !ctx->diag_started) {
+	if (dec_hw->has_dbus_ctrl && !h264_ctx->diag_started) {
 		h264_snapshot(ctx, "prepared");
-		ctx->diag_started = true;
+		h264_ctx->diag_started = true;
 	}
 	aml_start_vdec_hw(dec_hw);
 	h264_ctx->init_flag = 1;

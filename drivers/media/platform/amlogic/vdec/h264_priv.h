@@ -175,6 +175,7 @@ struct slice {
 };
 
 struct aml_h264_ctx {
+	bool diag_started;
 	struct aml_vdec_ctx *v4l2_ctx;
 	u8 init_flag;
 	u8 new_pic_flag;

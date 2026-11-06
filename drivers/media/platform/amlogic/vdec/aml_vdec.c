@@ -635,7 +635,7 @@ int vb2ops_vdec_queue_setup(struct vb2_queue *vq,
 	unsigned int i;
 
 	if (ctx->node->buffered_capture && V4L2_TYPE_IS_CAPTURE(vq->type))
-		*nbuffers = max(*nbuffers, READ_ONCE(ctx->hevc_min_capture));
+		*nbuffers = max(*nbuffers, READ_ONCE(aml_vdec_stateful(ctx)->min_capture));
 	if (V4L2_TYPE_IS_OUTPUT(vq->type))
 		pix_fmt = &ctx->pix_fmt[AML_FMT_SRC];
 	else
