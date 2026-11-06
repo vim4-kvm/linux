@@ -106,9 +106,7 @@ static ssize_t run_hevc_test(struct file *file, const char __user *input, size_t
 	if (ret || !run)
 		return ret ?: -EINVAL;
 	mutex_lock(&dev->dev_mutex);
-	if (!aml_vdec_power_allowed())
-		ret = -EPERM;
-	else if (dev->open_count || !pm_runtime_suspended(&dev->plat_dev->dev))
+	if (dev->open_count || !pm_runtime_suspended(&dev->plat_dev->dev))
 		ret = -EBUSY;
 	else
 		ret = run_test(diagnostic);

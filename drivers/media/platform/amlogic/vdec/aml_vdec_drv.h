@@ -258,7 +258,6 @@ struct aml_vdec_buffer {
 
 void aml_vdec_buf_cleanup(struct vb2_buffer *vb);
 int aml_vdec_job_stop(struct aml_vdec_ctx *ctx);
-bool aml_vdec_power_allowed(void);
 void aml_vdec_debugfs_root_init(void);
 void aml_vdec_debugfs_root_remove(void);
 void aml_vdec_debugfs_init(struct aml_vdec_dev *dev);
