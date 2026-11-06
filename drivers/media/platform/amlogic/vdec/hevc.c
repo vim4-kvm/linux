@@ -284,6 +284,8 @@ static int h265_alloc_pics(struct aml_hevc_ctx *h)
 	return 0;
 }
 
+static void h265_config_comp(struct aml_hevc_ctx *h);
+
 static void h265_config_pic_list(struct aml_hevc_ctx *h)
 {
 	int i;
@@ -297,6 +299,7 @@ static void h265_config_pic_list(struct aml_hevc_ctx *h)
 	wr(h->hw, HEVCD_MPP_ANC_CANVAS_ACCCONFIG_ADDR, BIT(0));
 	for (i = 0; i < 32; i++)
 		wr(h->hw, HEVCD_MPP_ANC_CANVAS_DATA_ADDR, 0);
+	h265_config_comp(h);
 }
 
 /* ---------------------------------------------------------------- */
@@ -1194,10 +1197,7 @@ static int h265_slice_header(struct aml_hevc_ctx *h)
 		h->pic[slot].slice_type = h->slice_type;
 		h->pic[slot].epoch = h->epoch;
 
-		h265_config_comp(h);
 		h265_fill_mmu_map(h);
-		wr(hw, HEVC_ASSIST_MMU_MAP_ADDR, h->mmu_map);
-		wr(hw, HEVC_SAO_MMU_DMA_CTRL, h->mmu_map);
 
 		h265_update_tiles(h, w_cu, h_cu, sao_mem_unit);
 		wr(hw, H265_SAO_MEM_UNIT, sao_mem_unit);
