@@ -202,6 +202,12 @@ struct aml_vdec_ctx {
 	bool diag_started;
 };
 
+struct aml_vdec_buffer {
+	struct v4l2_m2m_buffer m2m;
+	struct dma_buf *pins[VB2_MAX_PLANES];
+};
+
+void aml_vdec_buf_cleanup(struct vb2_buffer *vb);
 void aml_vdec_fault(struct aml_vdec_ctx *ctx);
 int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx);
 void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx);
