@@ -498,7 +498,8 @@ static int h265_long_term_poc(struct aml_hevc_ctx *h, int poc)
 	for (i = 0; i < H265_SLOTS; i++) {
 		struct h265_pic *pic = &h->pic[i];
 
-		if (i == h->cur || !pic->valid || !pic->referenced ||
+		/* cur can still name the preceding picture before slot allocation. */
+		if (pic->poc == h->curr_poc || !pic->valid || !pic->referenced ||
 		    pic->width != h->pic_w || pic->height != h->pic_h ||
 		    ((u32)pic->poc & mask) != ((u32)poc & mask))
 			continue;
