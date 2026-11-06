@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef __AMLOGIC_HEVC_KUNIT_TRACES_H__
 #define __AMLOGIC_HEVC_KUNIT_TRACES_H__
 
