@@ -424,7 +424,8 @@ static void h265_prot_init(struct aml_hevc_ctx *h)
 static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 {
 	struct aml_vdec_hw *hw = h->hw;
-	size_t want = ALIGN(size + H265_PADDING_SIZE, SZ_64K);
+	/* Keep the padded write pointer distinct from the empty-ring pointer. */
+	size_t want = ALIGN(size + H265_PADDING_SIZE + 8, SZ_64K);
 
 	if (!data || !size)
 		return -EINVAL;
@@ -445,15 +446,16 @@ static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 	h->payload = size;
 
 	wr(hw, HEVC_STREAM_START_ADDR, h->stream_p);
-	wr(hw, HEVC_STREAM_END_ADDR, h->stream_p + h->stream_size - 1);
+	wr(hw, HEVC_STREAM_END_ADDR, h->stream_p + h->stream_size);
 	wr(hw, HEVC_STREAM_RD_PTR, h->stream_p);
-	wr(hw, HEVC_STREAM_WR_PTR, h->stream_p + size + H265_PADDING_SIZE);
+	wr(hw, HEVC_STREAM_WR_PTR, h->stream_p + round_down(size + H265_PADDING_SIZE, 8));
 	wr(hw, HEVC_SHIFT_BYTE_COUNT, 0);
 	wr(hw, H265_DECODE_SIZE, size);
 	wr(hw, HEVC_STREAM_CONTROL,
-	   (read_dos_reg(hw, HEVC_STREAM_CONTROL) & ~0xfff0) | (7 << 4) | BIT(0));
+	   read_dos_reg(hw, HEVC_STREAM_CONTROL) | (7 << 4));
 	wr(hw, HEVC_STREAM_FIFO_CTL,
 	   read_dos_reg(hw, HEVC_STREAM_FIFO_CTL) | BIT(29));
+	wr(hw, HEVC_STREAM_CONTROL, read_dos_reg(hw, HEVC_STREAM_CONTROL) | BIT(0));
 	return 0;
 }
 
