@@ -866,15 +866,18 @@ static int t7_enable_dos(struct aml_vdec_hw *hw)
 	ret = regmap_read(map, DOS_GCLK_EN0, &en0);
 	if (ret)
 		return ret;
+	/* Complete the DOS-top read before enabling its VDEC gates. */
 	mb();
 	/* Keep the HCODEC gates owned by other DOS users unchanged. */
 	ret = regmap_write(map, DOS_GCLK_EN0, (en0 & ~0x3ff) | 0x3ff);
 	if (ret)
 		return ret;
+	/* Publish the DOS-top gates before their readback. */
 	mb();
 	ret = regmap_read(map, DOS_GCLK_EN0, &value);
 	if (ret)
 		return ret;
+	/* Finish the gate check before secure power-on. */
 	mb();
 	if ((value & 0x3ff) != 0x3ff)
 		return -EIO;
@@ -885,32 +888,38 @@ static int t7_enable_dos(struct aml_vdec_hw *hw)
 	ret = regmap_read(map, DOS_GCLK_EN0, &value);
 	if (ret)
 		return ret;
+	/* Keep the powered gate check ahead of internal state reads. */
 	mb();
 	if ((value & 0x3ff) != 0x3ff)
 		return -EIO;
 	ret = regmap_read(map, DOS_SW_RESET0, &value);
 	if (ret)
 		return ret;
+	/* Finish reset-state verification before checking memory power. */
 	mb();
 	if (value)
 		return -EHOSTDOWN;
 	ret = regmap_read(map, DOS_MEM_PD_VDEC, &value);
 	if (ret)
 		return ret;
+	/* Verify memory power before accessing internal gates. */
 	mb();
 	if (value)
 		return -EHOSTDOWN;
 	ret = regmap_read(map, GCLK_EN, &value);
 	if (ret)
 		return ret;
+	/* Complete the internal-gate read before updating those gates. */
 	mb();
 	ret = regmap_write(map, GCLK_EN, 0x3ff);
 	if (ret)
 		return ret;
+	/* Publish the internal gates before their readback. */
 	mb();
 	ret = regmap_read(map, GCLK_EN, &value);
 	if (ret)
 		return ret;
+	/* Finish the gate check before enabling MDEC and mailbox accesses. */
 	mb();
 	return (value & 0x3ff) == 0x3ff ? 0 : -EIO;
 }
