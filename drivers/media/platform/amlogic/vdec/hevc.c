@@ -333,12 +333,8 @@ static void h265_init_decoder(struct aml_hevc_ctx *h)
 
 	/* reset iqit to start its memory init again */
 	wr(hw, DOS_SW_RESET3, BIT(14));
-	wr(hw, DOS_SW_RESET3, 0);
 	regmap_update_bits(hw->map[DOS_BUS], HEVC_CABAC_CONTROL, 1, 0);
 	regmap_update_bits(hw->map[DOS_BUS], HEVC_PARSER_CORE_CONTROL, 1, 0);
-
-	wr(hw, HEVC_SHIFT_STARTCODE, 0x00000100);
-	wr(hw, HEVC_SHIFT_EMULATECODE, 0x00000300);
 
 	v = read_dos_reg(hw, HEVC_PARSER_INT_CONTROL);
 	v &= 0x03ffffff;
@@ -406,12 +402,10 @@ static void h265_prot_init(struct aml_hevc_ctx *h)
 	h265_config_workspace(h);
 	h265_init_decoder(h);
 
-	wr(hw, HEVC_WAIT_FLAG, 1);
 	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
 	wr(hw, HEVC_ASSIST_MBOX0_MASK, 1);
 	wr(hw, HEVC_PSCALE_CTRL, 0);
 	wr(hw, H265_DEBUG_REG1, 0);
-	/* check vps/sps/pps/i-slice in ucode */
 	wr(hw, H265_NAL_SEARCH_CTL, 0x8);
 	wr(hw, H265_DECODE_STOP_POS, 0);
 	h265_config_decode_mode(h);
@@ -449,14 +443,20 @@ static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 	wr(hw, HEVC_STREAM_END_ADDR, h->stream_p + h->stream_size);
 	wr(hw, HEVC_STREAM_RD_PTR, h->stream_p);
 	wr(hw, HEVC_STREAM_WR_PTR, h->stream_p + round_down(size + H265_PADDING_SIZE, 8));
-	wr(hw, HEVC_SHIFT_BYTE_COUNT, 0);
-	wr(hw, H265_DECODE_SIZE, size);
+	wr(hw, HEVC_STREAM_CONTROL,
+	   read_dos_reg(hw, HEVC_STREAM_CONTROL) | (7 << 4));
+	return 0;
+}
+
+static void h265_enable_input(struct aml_hevc_ctx *h)
+{
+	struct aml_vdec_hw *hw = h->hw;
+
 	wr(hw, HEVC_STREAM_CONTROL,
 	   read_dos_reg(hw, HEVC_STREAM_CONTROL) | (7 << 4));
 	wr(hw, HEVC_STREAM_FIFO_CTL,
 	   read_dos_reg(hw, HEVC_STREAM_FIFO_CTL) | BIT(29));
 	wr(hw, HEVC_STREAM_CONTROL, read_dos_reg(hw, HEVC_STREAM_CONTROL) | BIT(0));
-	return 0;
 }
 
 /* ---------------------------------------------------------------- */
@@ -1537,18 +1537,31 @@ int aml_hevc_dec_run(void *priv)
 	h->cur = -1;
 	ctx->int_cond = 0;
 	ctx->decode_result = -EIO;
-	h265_prot_init(h);
-	if (h->configured)
-		h265_config_pic_list(h);
 	ret = h265_feed(h, vb2_plane_vaddr(vb, 0), vb2_get_plane_payload(vb, 0));
 	if (ret)
 		goto stop;
-
+	/* Fresh frame-based input has no invalid prefix bytes. */
+	wr(hw, HEVC_WAIT_FLAG, 0);
+	h265_prot_init(h);
+	h265_enable_input(h);
+	/* Publish the initial command before resetting and releasing the CPUs. */
+	wr(hw, HEVC_DEC_STATUS_REG, H265_ACTION_DONE);
+	wr(hw, HEVC_SHIFT_BYTE_COUNT, 0);
+	wr(hw, H265_DECODE_SIZE, h->payload);
+	if (h->configured)
+		h265_config_pic_list(h);
+	/*
+	 * amhevc_start() uses three readbacks before and after CPU reset
+	 * to flush writes and provide a settling delay.
+	 */
+	read_dos_reg(hw, DOS_SW_RESET3);
+	read_dos_reg(hw, DOS_SW_RESET3);
+	read_dos_reg(hw, DOS_SW_RESET3);
 	wr(hw, DOS_SW_RESET3, BIT(12) | BIT(11));
 	wr(hw, DOS_SW_RESET3, 0);
-	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
-	wr(hw, HEVC_DEC_STATUS_REG, 0);
-	wr(hw, HEVC_CPSR, 0);
+	read_dos_reg(hw, DOS_SW_RESET3);
+	read_dos_reg(hw, DOS_SW_RESET3);
+	read_dos_reg(hw, DOS_SW_RESET3);
 	wr(hw, HEVC_MPSR, 1);
 
 	/* m2m cancellation waits for this bounded job and the subsequent DMA stop. */
