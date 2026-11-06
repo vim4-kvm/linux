@@ -11,6 +11,7 @@ struct stateful_fixture {
 	struct v4l2_m2m_buffer capture;
 	struct aml_vdec_stream_info info;
 	unsigned int frames;
+	bool discard;
 	bool event_before_completion;
 };
 
@@ -27,6 +28,7 @@ static int fixture_get_frame(struct aml_vdec_ctx *ctx, bool flush, struct aml_vd
 		return 0;
 	f->frames--;
 	frame->buffer = &f->capture.vb;
+	frame->disposition = f->discard ? AML_VDEC_FRAME_DISCARD : AML_VDEC_FRAME_OUTPUT;
 	frame->final = !f->frames;
 	return 1;
 }
@@ -171,10 +173,46 @@ static void stop_before_initial_format_completes_the_later_last_buffer(struct ku
 	KUNIT_EXPECT_EQ(test, event.type, (u32)V4L2_EVENT_EOS);
 }
 
+static void discarded_picture_returns_to_ready_without_completion(struct kunit *test)
+{
+	struct stateful_fixture *f = test->priv;
+	struct aml_vdec_ctx *ctx = &f->stateful.ctx;
+
+	f->frames = 1;
+	f->discard = true;
+	f->capture.vb.flags = V4L2_BUF_FLAG_LAST | V4L2_BUF_FLAG_KEYFRAME;
+	KUNIT_EXPECT_FALSE(test, stateful_flush(ctx, VB2_BUF_STATE_DONE, true));
+	KUNIT_EXPECT_PTR_EQ(test, v4l2_m2m_next_dst_buf(ctx->m2m_ctx), &f->capture.vb);
+	KUNIT_EXPECT_EQ(test, f->capture.vb.vb2_buf.state, VB2_BUF_STATE_ACTIVE);
+	KUNIT_EXPECT_EQ(test, f->stateful.sequence, 0U);
+	KUNIT_EXPECT_EQ(test, f->capture.vb.flags, 0U);
+	KUNIT_EXPECT_EQ(test, v4l2_event_pending(&ctx->fh), 0);
+	KUNIT_EXPECT_TRUE(test, list_empty(&f->m2m.cap_q_ctx.q.done_list));
+}
+
+static void all_discarded_resolution_change_still_completes_empty_last(struct kunit *test)
+{
+	struct stateful_fixture *f = test->priv;
+	struct aml_vdec_ctx *ctx = &f->stateful.ctx;
+
+	f->stateful.format_known = true;
+	ctx->is_cap_streamon = true;
+	f->frames = 1;
+	f->discard = true;
+	stateful_source_change(ctx);
+	KUNIT_EXPECT_EQ(test, f->capture.vb.vb2_buf.state, VB2_BUF_STATE_DONE);
+	KUNIT_EXPECT_EQ(test, vb2_get_plane_payload(&f->capture.vb.vb2_buf, 0), 0UL);
+	KUNIT_EXPECT_TRUE(test, f->capture.vb.flags & V4L2_BUF_FLAG_LAST);
+	KUNIT_EXPECT_TRUE(test, f->event_before_completion);
+	KUNIT_EXPECT_FALSE(test, f->m2m.has_stopped);
+}
+
 static struct kunit_case stateful_test_cases[] = {
 	KUNIT_CASE(initial_source_change_keeps_the_input_for_replay),
 	KUNIT_CASE(resolution_change_event_precedes_last_without_stopping_output),
 	KUNIT_CASE(stop_before_initial_format_completes_the_later_last_buffer),
+	KUNIT_CASE(discarded_picture_returns_to_ready_without_completion),
+	KUNIT_CASE(all_discarded_resolution_change_still_completes_empty_last),
 	{}
 };
 

@@ -8,8 +8,14 @@
 
 #include "aml_vdec_drv.h"
 
+enum aml_vdec_frame_disposition {
+	AML_VDEC_FRAME_OUTPUT,
+	AML_VDEC_FRAME_DISCARD,
+};
+
 struct aml_vdec_frame {
 	struct vb2_v4l2_buffer *buffer;
+	enum aml_vdec_frame_disposition disposition;
 	/* No codec-owned output buffer remains after this frame is taken. */
 	bool final;
 };
