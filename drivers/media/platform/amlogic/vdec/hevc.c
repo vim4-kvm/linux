@@ -406,7 +406,8 @@ static void h265_prot_init(struct aml_hevc_ctx *h)
 	h265_config_workspace(h);
 	h265_init_decoder(h);
 
-	wr(hw, HEVC_WAIT_FLAG, 1);
+	/* The aligned input starts at byte zero, with no invalid prefix to skip. */
+	wr(hw, HEVC_WAIT_FLAG, 0);
 	wr(hw, HEVC_ASSIST_MBOX0_CLR_REG, 1);
 	wr(hw, HEVC_ASSIST_MBOX0_MASK, 1);
 	wr(hw, HEVC_PSCALE_CTRL, 0);
@@ -443,6 +444,8 @@ static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 	memcpy(h->stream_v, data, size);
 	memset(h->stream_v + size, 0, h->stream_size - size);
 	h->payload = size;
+	dev_dbg(hw->dev, "hevc: input bytes=%zu prefix=%*ph start=%pad skip=0\n",
+		size, (int)min_t(size_t, size, 16), h->stream_v, &h->stream_p);
 
 	wr(hw, HEVC_STREAM_START_ADDR, h->stream_p);
 	wr(hw, HEVC_STREAM_END_ADDR, h->stream_p + h->stream_size - 1);
@@ -1339,7 +1342,7 @@ static void h265_dump_start(struct aml_vdec_hw *hw, const char *phase)
 		read_dos_reg(hw, HEVC_STREAM_WR_PTR), read_dos_reg(hw, HEVC_STREAM_CONTROL),
 		read_dos_reg(hw, HEVC_STREAM_FIFO_CTL));
 	dev_dbg(hw->dev,
-		"hevc: %s wait=%08x size=%08x shift=%08x shift_status=%08x parser_irq=%08x mode=%08x search=%08x\n",
+		"hevc: %s wait=%08x size=%08x shift=%08x shift_status=%08x parser_irq=%08x mode_or_nal=%08x search=%08x\n",
 		phase, read_dos_reg(hw, HEVC_WAIT_FLAG), read_dos_reg(hw, H265_DECODE_SIZE),
 		read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT), read_dos_reg(hw, HEVC_SHIFT_STATUS),
 		read_dos_reg(hw, HEVC_PARSER_INT_CONTROL), read_dos_reg(hw, H265_DECODE_MODE),
