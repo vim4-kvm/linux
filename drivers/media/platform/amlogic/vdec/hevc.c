@@ -80,16 +80,27 @@ int aml_hevc_configure(void *priv)
 {
 	struct aml_vdec_ctx *ctx = priv;
 	struct aml_hevc_ctx *h = ctx->codec_priv;
-	int ret;
+	bool replace;
+	int ret, i;
 
 	if (h->hw->faulted || h->hw->hevc.irq_enabled)
 		return -EIO;
 	if (!h->dpb.pic_w || !h->dpb.pic_h)
 		return -EINVAL;
+	if (h->dpb.pending)
+		return -EBUSY;
+	replace = h->alloc_w != h->dpb.pic_w || h->alloc_h != h->dpb.pic_h ||
+		h->alloc_nslots != h->dpb.nslots;
 	/* The header pass has stopped and synchronized all firmware accesses. */
 	ret = h265_hw_alloc_pictures(h);
-	if (!ret)
+	if (!ret) {
+		if (replace)
+			for (i = 0; i < H265_SLOTS; i++) {
+				memset(&h->dpb.pic[i], 0, sizeof(h->dpb.pic[i]));
+				h->dpb.pic[i].poc = H265_INVALID_POC;
+			}
 		h->configured = true;
+	}
 	return ret;
 }
 
@@ -154,10 +165,20 @@ static int hevc_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
 		       struct vb2_v4l2_buffer *dst, struct aml_vdec_decode_result *result)
 {
 	struct aml_hevc_ctx *h = ctx->codec_priv;
+	const void *data = vb2_plane_vaddr(&src->vb2_buf, 0);
+	size_t size = vb2_get_plane_payload(&src->vb2_buf, 0);
 	int ret, stop_ret;
 
-	ret = h265_hw_run(h, vb2_plane_vaddr(&src->vb2_buf, 0),
-			  vb2_get_plane_payload(&src->vb2_buf, 0));
+	if (!h->have_au) {
+		ret = h265_headers_parse_au(&h->headers, data, size, &h->au);
+		if (ret)
+			return ret;
+		h->have_au = true;
+		h->picture_started = false;
+		if (h->au.cvs_boundary_before)
+			h265_dpb_end_sequence(&h->dpb);
+	}
+	ret = h265_hw_run(h, data, size);
 	stop_ret = aml_vdec_job_stop(ctx);
 	if (stop_ret)
 		return stop_ret;
@@ -168,6 +189,14 @@ static int hevc_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
 
 	if (ret < 0)
 		return ret;
+	if (ret != 1) {
+		if (h->have_picture)
+			h265_dpb_end_picture(&h->dpb, h->dpb.cur, h->au.picture.pic_output,
+					     &h->au.picture.limits);
+		if (h->au.cvs_boundary_after)
+			h265_dpb_end_sequence(&h->dpb);
+		h->have_au = false;
+	}
 	result->format_changed = ret == 1;
 	result->picture = h->have_picture;
 	result->slot = h->dpb.cur;
@@ -183,19 +212,26 @@ static void hevc_queue_capture(struct aml_vdec_ctx *ctx, unsigned int slot,
 	struct aml_hevc_ctx *h = ctx->codec_priv;
 
 	h->capture[slot] = dst;
-	h265_queue_output(&h->dpb, slot);
 }
 
 static int hevc_get_frame(struct aml_vdec_ctx *ctx, bool flush, struct aml_vdec_frame *frame)
 {
 	struct aml_hevc_ctx *h = ctx->codec_priv;
-	int slot = h265_next_output(&h->dpb, flush);
+	int slot;
+
+	if (flush)
+		h265_dpb_flush(&h->dpb);
+	slot = h265_dpb_pop_discard(&h->dpb);
+	frame->disposition = AML_VDEC_FRAME_DISCARD;
+	if (slot < 0) {
+		slot = h265_dpb_pop_output(&h->dpb);
+		frame->disposition = AML_VDEC_FRAME_OUTPUT;
+	}
 
 	if (slot < 0)
 		return 0;
 	frame->buffer = h->capture[slot];
 	h->capture[slot] = NULL;
-	h265_remove_output(&h->dpb, slot);
 	frame->final = !h->dpb.pending;
 	return 1;
 }
@@ -213,8 +249,7 @@ static void hevc_get_format(struct aml_vdec_ctx *ctx, struct aml_vdec_stream_inf
 	info->crop = (struct v4l2_rect) {
 		.left = crop.left, .top = crop.top, .width = crop.width, .height = crop.height,
 	};
-	h->dpb.reorder_limit = p[P_SPS_NUM_REORDER_PICS_0];
-	info->min_capture = h->dpb.reorder_limit + 2;
+	info->min_capture = h->au.picture.limits.max_num_reorder_pics + 2;
 	h->configured = false;
 }
 
