@@ -389,8 +389,7 @@ static void h265_config_decode_mode(struct aml_hevc_ctx *h)
 	struct aml_vdec_hw *hw = h->hw;
 	u32 mode = H265_DECODE_MODE_MULTI_FRAMEBASE;
 
-	/* performance_profile: multi slice in ucode (HEVC_8K_LFTOFFSET_FIX) */
-	wr(hw, H265_NAL_SEARCH_CTL, read_dos_reg(hw, H265_NAL_SEARCH_CTL) | BIT(21));
+	/* The supported 4K range uses host setup for each slice. */
 	mode |= (h->start_decoding_flag & 0xff) << 16;
 	mode |= 0x80 << 24;	/* MBX0 interrupt */
 	wr(hw, H265_DECODE_MODE, mode);
