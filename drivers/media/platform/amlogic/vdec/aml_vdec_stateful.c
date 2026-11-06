@@ -171,14 +171,7 @@ static void stateful_buffered_device_run(struct aml_vdec_ctx *ctx)
 	bool drain;
 	int ret;
 
-	/* Queue allocation locks precede the stateful lock, as in vb2 queue setup. */
-	ret = aml_vdec_get_buffer_pins(ctx);
-	mutex_lock(&aml_vdec_stateful(ctx)->lock);
-	if (ret || ctx->decode_failed || ctx->dev->dec_hw->faulted) {
-		ret = ret ?: -EIO;
-		goto error;
-	}
-	ret = ctx->node->stateful_ops->prepare(ctx);
+	ret = aml_vdec_job_acquire(ctx);
 	if (ret)
 		goto error;
 	src = v4l2_m2m_next_src_buf(ctx->m2m_ctx);
@@ -220,6 +213,7 @@ static void stateful_buffered_device_run(struct aml_vdec_ctx *ctx)
 	v4l2_m2m_buf_done(src, VB2_BUF_STATE_DONE);
 	goto finish;
 error:
+	aml_vdec_job_stop(ctx);
 	ctx->decode_failed = true;
 	if (ctx->codec_priv)
 		stateful_flush(ctx, VB2_BUF_STATE_ERROR, false);
@@ -231,8 +225,7 @@ error:
 	vb2_queue_error(v4l2_m2m_get_src_vq(ctx->m2m_ctx));
 	vb2_queue_error(v4l2_m2m_get_dst_vq(ctx->m2m_ctx));
 finish:
-	mutex_unlock(&aml_vdec_stateful(ctx)->lock);
-	aml_vdec_put_buffer_pins(ctx);
+	aml_vdec_job_release(ctx);
 	v4l2_m2m_job_finish(ctx->dev->m2m_dev_dec, ctx->m2m_ctx);
 }
 
@@ -455,6 +448,8 @@ static void stateful_finish_job(struct aml_vdec_ctx *ctx,
 {
 	struct vb2_v4l2_buffer *src, *dst;
 
+	if (state == VB2_BUF_STATE_DONE)
+		ctx->node->stateful_ops->get_frame(ctx, false, &aml_vdec_stateful(ctx)->frame);
 	src = v4l2_m2m_next_src_buf(ctx->m2m_ctx);
 	dst = aml_vdec_stateful(ctx)->frame.buffer;
 	if (!dst)
@@ -534,6 +529,7 @@ static void stateful_context_init(struct aml_vdec_ctx *ctx)
 {
 	struct aml_vdec_stateful_ctx *stateful = aml_vdec_stateful(ctx);
 
+	ctx->job = &stateful->job;
 	mutex_init(&stateful->lock);
 	stateful->min_capture = 1;
 }
@@ -546,10 +542,25 @@ static int stateful_run_pair_job(struct aml_vdec_ctx *ctx)
 	int ret;
 
 	ret = ctx->node->stateful_ops->submit(ctx, src, dst, &result);
-	if (ret < 0)
-		return ret;
-	if (result.picture)
-		ctx->node->stateful_ops->get_frame(ctx, false, &aml_vdec_stateful(ctx)->frame);
+	return ret;
+}
+
+static void stateful_lock_job(struct aml_vdec_ctx *ctx)
+{
+	if (ctx->node->buffered_capture)
+		mutex_lock(&aml_vdec_stateful(ctx)->lock);
+}
+
+static void stateful_unlock_job(struct aml_vdec_ctx *ctx)
+{
+	if (ctx->node->buffered_capture)
+		mutex_unlock(&aml_vdec_stateful(ctx)->lock);
+}
+
+static int stateful_prepare_job(struct aml_vdec_ctx *ctx)
+{
+	if (ctx->node->stateful_ops->prepare)
+		return ctx->node->stateful_ops->prepare(ctx);
 	return 0;
 }
 
@@ -562,6 +573,9 @@ const struct aml_vdec_interface aml_vdec_stateful_interface = {
 	.controls_init = stateful_ctrls_setup,
 	.finish_job = stateful_finish_job,
 	.run_job = stateful_run_pair_job,
+	.lock_job = stateful_lock_job,
+	.unlock_job = stateful_unlock_job,
+	.prepare_job = stateful_prepare_job,
 };
 
 #if IS_ENABLED(CONFIG_VIDEO_AMLOGIC_VDEC_KUNIT_TEST)

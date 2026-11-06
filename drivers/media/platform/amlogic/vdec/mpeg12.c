@@ -417,9 +417,9 @@ static u32 mpeg12_ref_spec(struct aml_vdec_ctx *ctx, struct mpeg12_canvas *c,
 
 static void mpeg12_job_done(struct aml_vdec_ctx *ctx, int result)
 {
-	ctx->decode_result = result;
-	ctx->int_cond = 1;
-	wake_up_interruptible(&ctx->queue);
+	ctx->job->decode_result = result;
+	ctx->job->int_cond = 1;
+	wake_up_interruptible(&ctx->job->queue);
 }
 
 VISIBLE_IF_KUNIT unsigned int
@@ -519,7 +519,7 @@ static irqreturn_t mpeg12_threaded_isr(int irq, void *priv)
 	if (!m)
 		return IRQ_HANDLED;
 	ctx = m->v4l2_ctx;
-	if (ctx->int_cond)
+	if (ctx->job->int_cond)
 		return IRQ_HANDLED;
 
 	if (read_dos_reg(hw, MREG_DEBUG)) {
@@ -689,12 +689,8 @@ void aml_mpeg12_exit(void *priv)
 	if (hw->faulted)
 		return;
 
-	if (ctx->dos_clk_en && aml_stop_vdec_hw(hw)) {
-		aml_vdec_fault(ctx);
+	if (aml_vdec_job_stop(ctx))
 		return;
-	}
-	ctx->dos_clk_en = false;
-	aml_mpeg12_finish(ctx);
 
 	if (m->stage_vaddr)
 		dma_free_coherent(hw->dev, m->stage_size,
@@ -793,14 +789,14 @@ int aml_mpeg12_dec_run(void *priv)
 		read_dos_reg(hw, IQIDCT_CONTROL), read_dos_reg(hw, VCOP_CTRL_REG),
 		read_dos_reg(hw, MDEC_PIC_DC_CTRL));
 
-	ctx->int_cond = 0;
-	ctx->decode_result = -EIO;
+	ctx->job->int_cond = 0;
+	ctx->job->decode_result = -EIO;
 	regmap_update_bits(hw->map[DOS_BUS], VLD_MEM_VIFIFO_CONTROL, 0x6, 0x6);
 	aml_start_vdec_hw(hw);
 
-	ret = wait_event_interruptible_timeout(ctx->queue, ctx->int_cond,
+	ret = wait_event_interruptible_timeout(ctx->job->queue, ctx->job->int_cond,
 					       msecs_to_jiffies(MPEG12_TIMEOUT_MS));
-	ctx->int_cond = 0;
+	ctx->job->int_cond = 0;
 	if (!ret) {
 		dev_err(hw->dev,
 			"mpeg12 timeout: out %x info %x pc %x lvl %x rp %x wp %x bitcnt %x err %x\n",
@@ -817,7 +813,7 @@ int aml_mpeg12_dec_run(void *priv)
 	}
 	if (ret < 0)
 		return ret;
-	ret = ctx->decode_result;
+	ret = ctx->job->decode_result;
 	if (ret < 0)
 		dev_dbg(hw->dev,
 			"mpeg12 completion error: ts=%llu type=%u structure=%u forward=%llu backward=%llu out=%u info=%08x errors=%u\n",

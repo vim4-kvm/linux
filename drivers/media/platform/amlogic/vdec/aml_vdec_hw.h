@@ -114,6 +114,7 @@ struct pm_pd_s {
 /* Shared DOS resources and the two independently stopped hardware cores. */
 
 struct aml_vdec1_core {
+	struct aml_vdec_job *job;
 	/* DOS bus and VDEC functional clocks, enabled as the original pair. */
 	struct clk_bulk_data *gates;
 	struct clk *parent;
@@ -128,6 +129,7 @@ struct aml_vdec1_core {
 };
 
 struct aml_hevc_core {
+	struct aml_vdec_job *job;
 	struct clk_bulk_data *front;
 	struct clk *front_parent;
 	struct clk *back;
@@ -208,6 +210,9 @@ struct aml_vdec_reset_profile {
 	u32 mask;
 	bool preserve_power_ctl;
 };
+
+extern const struct aml_vdec_job_ops aml_vdec1_job_ops;
+extern const struct aml_vdec_job_ops aml_hevc_job_ops;
 
 bool aml_vdec_core_present(struct aml_vdec_hw *hw, enum vdec_type_e core);
 int dev_request_hw_resources(void *priv);

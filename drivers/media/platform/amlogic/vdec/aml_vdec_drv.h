@@ -33,6 +33,22 @@ enum vdec_type_e {
 	VDEC_MAX,
 };
 
+struct aml_vdec_job {
+	wait_queue_head_t queue;
+	int int_cond;
+	int decode_result;
+	bool dos_clk_en;
+	bool buffers_held;
+	bool diag_started;
+	bool acquired;
+};
+
+struct aml_vdec_job_ops {
+	int (*acquire)(struct aml_vdec_ctx *ctx);
+	int (*stop)(struct aml_vdec_ctx *ctx);
+	void (*release)(struct aml_vdec_ctx *ctx);
+};
+
 struct aml_vdec_interface {
 	size_t context_size;
 	void (*context_init)(struct aml_vdec_ctx *ctx);
@@ -40,6 +56,9 @@ struct aml_vdec_interface {
 	const struct vb2_ops *queue_ops;
 	const struct v4l2_m2m_ops *m2m_ops;
 	int (*controls_init)(struct aml_vdec_ctx *ctx);
+	void (*lock_job)(struct aml_vdec_ctx *ctx);
+	void (*unlock_job)(struct aml_vdec_ctx *ctx);
+	int (*prepare_job)(struct aml_vdec_ctx *ctx);
 	int (*run_job)(struct aml_vdec_ctx *ctx);
 	void (*finish_job)(struct aml_vdec_ctx *ctx, enum vb2_buffer_state state);
 	bool supports_requests;
@@ -54,6 +73,7 @@ struct aml_vdec_ctrl_set {
 struct aml_vdec_node_desc {
 	const struct aml_vdec_interface *interface;
 	const struct aml_vdec_stateful_ops *stateful_ops;
+	const struct aml_vdec_job_ops *job_ops;
 	const struct aml_vdec_ctrl_set *control_sets;
 	unsigned int num_control_sets;
 	const u32 *formats;
@@ -191,21 +211,16 @@ struct dec_pic_info {
  * @ctrl_handler: V4L2 ctrl handler.
  * @v4l2_intf_lock: Mutex lock for v4l2 interface.
  * @codec_ops: Codec operation functions. See struct aml_codec_ops.
- * @int_cond: Variable used by the waitqueue.
- * @queue: Waitqueue to wait for the current decode context finish.
  * @pix_fmt: To store the V4L2 pixel format.
  * @dec_fmt: To describe the decoding format supported by hardware platform.
  * @is_cap_streamon: indicates if the current capture stream is on.
  * @is_output_streamon: indicates if the current output stream is on.
  * @sequence_out: Next OUTPUT buffer sequence number.
  * @sequence_cap: Next CAPTURE buffer sequence number for stateless/JPEG jobs.
- * @dos_clk_en: indicates if dos clk is enabled.
  * @pic_info: Pic information for curr decoder context. See struct dec_pic_info.
  * @curr_dec_type: Current decoder type. (CODEC_TYPE_H264, etc.)
+ * @job: Hardware job state retained for the file lifetime.
  * @codec_priv: Pointer to current decoder instance.
- * @decode_result: Result signaled by the firmware IRQ; completed after stop.
- * @buffers_held: Queue mmap locks and per-job DMA pins are held.
- * @diag_started: The initial T7 decode snapshot has been recorded.
  * @decode_failed: A timed-out context rejects further jobs until close.
  * @compose: Visible image rectangle within CAPTURE storage.
  */
@@ -218,8 +233,6 @@ struct aml_vdec_ctx {
 	struct mutex v4l2_intf_lock;
 
 	const struct aml_codec_ops *codec_ops;
-	int int_cond;
-	wait_queue_head_t queue;
 	struct v4l2_pix_format_mplane pix_fmt[2];
 	struct v4l2_rect compose;
 	struct aml_video_fmt dec_fmt[2];
@@ -228,13 +241,11 @@ struct aml_vdec_ctx {
 	bool is_output_streamon;
 	u32 sequence_out;
 	u32 sequence_cap;
-	bool dos_clk_en;
 
 	struct dec_pic_info pic_info;
 	u32 curr_dec_type;
 	void *codec_priv;
-	int decode_result;
-	bool buffers_held;
+	struct aml_vdec_job *job;
 	bool decode_failed;
 	bool diag_started;
 };
@@ -245,6 +256,7 @@ struct aml_vdec_buffer {
 };
 
 void aml_vdec_buf_cleanup(struct vb2_buffer *vb);
+int aml_vdec_job_stop(struct aml_vdec_ctx *ctx);
 void aml_vdec_fault(struct aml_vdec_ctx *ctx);
 int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx);
 void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx);

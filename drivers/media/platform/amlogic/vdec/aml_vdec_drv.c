@@ -255,14 +255,13 @@ static int fops_vcodec_open(struct file *file)
 	}
 	ctx->dev = dec_dev;
 	ctx->node = node->desc;
-	if (ctx->node->interface->context_init)
-		ctx->node->interface->context_init(ctx);
+	ctx->node->interface->context_init(ctx);
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
 	file->private_data = &ctx->fh;
 	v4l2_fh_add(&ctx->fh, file);
 	mutex_init(&ctx->v4l2_intf_lock);
-	init_waitqueue_head(&ctx->queue);
-	ctx->int_cond = 0;
+	init_waitqueue_head(&ctx->job->queue);
+	ctx->job->int_cond = 0;
 
 	ctx->m2m_ctx = v4l2_m2m_ctx_init(dec_dev->m2m_dev_dec, ctx,
 					 &aml_vdec_queue_init);

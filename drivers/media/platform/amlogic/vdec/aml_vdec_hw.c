@@ -1468,7 +1468,9 @@ static irqreturn_t hevc_threaded_isr_handler(int irq, void *priv)
 		ret = regmap_write(hw->map[DOS_BUS], HEVC_ASSIST_MBOX0_CLR_REG, 1);
 	if (ret)
 		hw->hevc.irq_status = U32_MAX;
-	return hw->hevc.irq_thread(irq, hw->hevc.priv);
+	if (READ_ONCE(hw->hevc.job) && hw->hevc.irq_thread)
+		return hw->hevc.irq_thread(irq, hw->hevc.priv);
+	return IRQ_HANDLED;
 }
 
 static const struct power_manager_s pm[] = {
@@ -1489,7 +1491,8 @@ static irqreturn_t vdec_irq_handler(int irq, void *priv)
 	irqreturn_t ret = IRQ_HANDLED;
 
 	hw->vdec1.irq_count++;
-	if (READ_ONCE(hw->vdec1.priv) && hw->vdec1.ops.irq_handler)
+	if (READ_ONCE(hw->vdec1.job) && READ_ONCE(hw->vdec1.priv) &&
+	    hw->vdec1.ops.irq_handler)
 		ret = hw->vdec1.ops.irq_handler(irq, priv);
 
 	return ret;
@@ -1502,7 +1505,8 @@ static irqreturn_t vdec_threaded_isr_handler(int irq, void *priv)
 	irqreturn_t ret = IRQ_HANDLED;
 
 	hw->vdec1.threaded_irq_count++;
-	if (READ_ONCE(hw->vdec1.priv) && hw->vdec1.ops.irq_threaded_func)
+	if (READ_ONCE(hw->vdec1.job) && READ_ONCE(hw->vdec1.priv) &&
+	    hw->vdec1.ops.irq_threaded_func)
 		ret = hw->vdec1.ops.irq_threaded_func(irq, priv);
 
 	return ret;
@@ -1645,6 +1649,62 @@ void dev_destroy_hw_resources(void *priv)
 
 	dev_dbg(hw->dev, "##Amlogic hw resource release OK##\n");
 }
+
+static int vdec1_job_acquire(struct aml_vdec_ctx *ctx)
+{
+	struct aml_vdec_hw *hw = ctx->dev->dec_hw;
+	struct aml_vdec_dev *dev = ctx->dev;
+	const char *fw_path = dev->pvdec_data->fw_path[ctx->curr_dec_type];
+	int ret;
+
+	hw->vdec1.job = ctx->job;
+	/* m2m owns the hardware until stop has drained IRQ and DMA activity. */
+	WRITE_ONCE(dev->dec_hw->vdec1.priv, ctx->codec_priv);
+	if (ctx->codec_ops->prepare)
+		ctx->codec_ops->prepare(ctx);
+	dos_enable(dev->dec_hw);
+	/* incase of bus hang in stop_streaming */
+	ctx->job->dos_clk_en = 1;
+	ret = aml_vdec_reset_core(dev->dec_hw, ctx->codec_ops->reset);
+	if (ret) {
+		/* Isolation/reset failed: do not retry MMIO or return DMA ownership. */
+		aml_vdec_fault(ctx);
+		return ret;
+	}
+
+	ret = load_firmware(dev->dec_hw, fw_path, ctx->codec_ops);
+	return ret;
+}
+
+static int vdec1_job_stop(struct aml_vdec_ctx *ctx)
+{
+	struct aml_vdec_hw *hw = ctx->dev->dec_hw;
+	int ret;
+
+	if (!ctx->job->dos_clk_en || hw->faulted)
+		return hw->faulted ? -EIO : 0;
+	ret = aml_stop_vdec_hw(hw);
+	if (ret) {
+		aml_vdec_fault(ctx);
+		return ret;
+	}
+	ctx->job->dos_clk_en = false;
+	if (ctx->codec_ops->finish)
+		ctx->codec_ops->finish(ctx);
+	return 0;
+}
+
+static void vdec1_job_release(struct aml_vdec_ctx *ctx)
+{
+	WRITE_ONCE(ctx->dev->dec_hw->vdec1.priv, NULL);
+	ctx->dev->dec_hw->vdec1.job = NULL;
+}
+
+const struct aml_vdec_job_ops aml_vdec1_job_ops = {
+	.acquire = vdec1_job_acquire,
+	.stop = vdec1_job_stop,
+	.release = vdec1_job_release,
+};
 
 bool aml_vdec_core_present(struct aml_vdec_hw *hw, enum vdec_type_e core)
 {

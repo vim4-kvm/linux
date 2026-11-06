@@ -179,6 +179,7 @@ static const struct aml_vdec_ctrl_set stateless_controls[] = {
 
 const struct aml_vdec_node_desc aml_vdec_stateless_node = {
 	.interface = &aml_vdec_stateless_interface,
+	.job_ops = &aml_vdec1_job_ops,
 	.formats = stateless_formats,
 	.control_sets = stateless_controls,
 	.num_control_sets = ARRAY_SIZE(stateless_controls),
@@ -197,7 +198,6 @@ static const struct aml_codec_ops aml_S4_dec_ops[] = {
 		.init = aml_mjpeg_init,
 		.exit = aml_mjpeg_exit,
 		.prepare = aml_mjpeg_prepare,
-		.run = aml_mjpeg_dec_run,
 		.finish = aml_mjpeg_finish,
 	},
 	[CODEC_TYPE_H264] = {

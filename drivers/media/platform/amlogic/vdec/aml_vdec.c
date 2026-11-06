@@ -39,28 +39,12 @@ void aml_vdec_fault(struct aml_vdec_ctx *ctx)
 	dev_crit(hw->dev, "VDEC DMA ownership uncertain; quarantined until system reset\n");
 }
 
-static void aml_vdec_stop_job(struct aml_vdec_ctx *ctx)
-{
-	struct aml_vdec_hw *hw = ctx->dev->dec_hw;
-
-	if (!ctx->dos_clk_en || hw->faulted)
-		return;
-	if (aml_stop_vdec_hw(hw)) {
-		aml_vdec_fault(ctx);
-		return;
-	}
-	ctx->dos_clk_en = false;
-	if (ctx->codec_ops->finish)
-		ctx->codec_ops->finish(ctx);
-}
-
 void aml_vdec_run_pair(struct aml_vdec_ctx *ctx)
 {
 	struct aml_vdec_dev *dev = ctx->dev;
 	struct vb2_v4l2_buffer *src_buf, *dst_buf;
 	struct media_request *src_req;
 	int ret = 0;
-	const char *fw_path = dev->pvdec_data->fw_path[ctx->curr_dec_type];
 
 	src_buf = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	dst_buf = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
@@ -72,8 +56,6 @@ void aml_vdec_run_pair(struct aml_vdec_ctx *ctx)
 		goto err_cancel_job;
 	dev_dbg(&dev->plat_dev->dev, "device run : src buf : %d dst buf %d\n",
 		src_buf->vb2_buf.index, dst_buf->vb2_buf.index);
-	if (WARN_ON_ONCE(!ctx->codec_ops->run))
-		goto err_cancel_job;
 
 	src_req = src_buf->vb2_buf.req_obj.req;
 	if (src_req) {
@@ -81,24 +63,7 @@ void aml_vdec_run_pair(struct aml_vdec_ctx *ctx)
 		if (ret)
 			goto complete_request;
 	}
-	ret = aml_vdec_get_buffer_pins(ctx);
-	if (ret)
-		goto complete_request;
-	/* m2m owns the hardware until stop has drained IRQ and DMA activity. */
-	WRITE_ONCE(dev->dec_hw->vdec1.priv, ctx->codec_priv);
-	if (ctx->codec_ops->prepare)
-		ctx->codec_ops->prepare(ctx);
-	dos_enable(dev->dec_hw);
-	/* incase of bus hang in stop_streaming */
-	ctx->dos_clk_en = 1;
-	ret = aml_vdec_reset_core(dev->dec_hw, ctx->codec_ops->reset);
-	if (ret) {
-		/* Isolation/reset failed: do not retry MMIO or return DMA ownership. */
-		aml_vdec_fault(ctx);
-		goto complete_request;
-	}
-
-	ret = load_firmware(dev->dec_hw, fw_path, ctx->codec_ops);
+	ret = aml_vdec_job_acquire(ctx);
 	if (ret)
 		goto stop_job;
 
@@ -110,23 +75,20 @@ stop_job:
 	 * require CPU/DMA stop and T7 DBUS isolation to acknowledge. A failed
 	 * stop pins allocations before the queues report errors to userspace.
 	 */
-	aml_vdec_stop_job(ctx);
+	aml_vdec_job_stop(ctx);
 complete_request:
 	if (src_req)
 		v4l2_ctrl_request_complete(src_req, &ctx->ctrl_handler);
 	if (ret < 0 || dev->dec_hw->faulted)
 		goto err_cancel_job;
 
-	aml_vdec_put_buffer_pins(ctx);
-	WRITE_ONCE(dev->dec_hw->vdec1.priv, NULL);
+	aml_vdec_job_release(ctx);
 	ctx->node->interface->finish_job(ctx, VB2_BUF_STATE_DONE);
 	return;
 
 err_cancel_job:
-	aml_vdec_stop_job(ctx);
-	aml_vdec_put_buffer_pins(ctx);
-	if (!dev->dec_hw->faulted)
-		WRITE_ONCE(dev->dec_hw->vdec1.priv, NULL);
+	aml_vdec_job_stop(ctx);
+	aml_vdec_job_release(ctx);
 	ctx->node->interface->finish_job(ctx, VB2_BUF_STATE_ERROR);
 }
 
@@ -196,7 +158,7 @@ void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx)
 	struct vb2_buffer *vb;
 	unsigned int q, i;
 
-	if (!ctx->buffers_held)
+	if (!ctx->job->buffers_held)
 		return;
 	for (q = 0; q < ARRAY_SIZE(queues); q++) {
 		for (i = 0; i < queues[q]->max_num_buffers; i++) {
@@ -205,7 +167,7 @@ void aml_vdec_put_buffer_pins(struct aml_vdec_ctx *ctx)
 				aml_vdec_buf_cleanup(vb);
 		}
 	}
-	ctx->buffers_held = false;
+	ctx->job->buffers_held = false;
 	mutex_unlock(&queues[1]->mmap_lock);
 	mutex_unlock(&queues[0]->mmap_lock);
 }
@@ -228,7 +190,7 @@ int aml_vdec_get_buffer_pins(struct aml_vdec_ctx *ctx)
 	 */
 	mutex_lock(&queues[0]->mmap_lock);
 	mutex_lock_nested(&queues[1]->mmap_lock, SINGLE_DEPTH_NESTING);
-	ctx->buffers_held = true;
+	ctx->job->buffers_held = true;
 	for (q = 0; q < ARRAY_SIZE(queues); q++) {
 		for (i = 0; i < queues[q]->max_num_buffers; i++) {
 			vb = vb2_get_buffer(queues[q], i);
@@ -760,4 +722,46 @@ int aml_vdec_queue_init(void *priv, struct vb2_queue *src_vq,
 	}
 
 	return ret;
+}
+
+int aml_vdec_job_acquire(struct aml_vdec_ctx *ctx)
+{
+	const struct aml_vdec_interface *interface = ctx->node->interface;
+	int ret = aml_vdec_get_buffer_pins(ctx);
+
+	if (interface->lock_job)
+		interface->lock_job(ctx);
+	if (ret)
+		return ret;
+	if (ctx->dev->dec_hw->faulted || ctx->decode_failed)
+		return -EIO;
+	if (interface->prepare_job) {
+		ret = interface->prepare_job(ctx);
+		if (ret)
+			return ret;
+	}
+	ctx->job->acquired = true;
+	return ctx->node->job_ops->acquire(ctx);
+}
+
+int aml_vdec_job_stop(struct aml_vdec_ctx *ctx)
+{
+	int ret;
+
+	if (!ctx->job->acquired)
+		return 0;
+	ret = ctx->node->job_ops->stop(ctx);
+	if (!ret)
+		ctx->job->acquired = false;
+	return ret;
+}
+
+void aml_vdec_job_release(struct aml_vdec_ctx *ctx)
+{
+	aml_vdec_job_stop(ctx);
+	if (ctx->node->interface->unlock_job)
+		ctx->node->interface->unlock_job(ctx);
+	aml_vdec_put_buffer_pins(ctx);
+	if (!ctx->dev->dec_hw->faulted)
+		ctx->node->job_ops->release(ctx);
 }

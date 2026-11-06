@@ -92,6 +92,5 @@
 int aml_hevc_init(void *priv);
 void aml_hevc_exit(void *priv);
 int aml_hevc_configure(void *priv);
-int aml_hevc_dec_run(void *priv);
 
 #endif

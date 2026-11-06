@@ -968,9 +968,9 @@ static void h265_finish(struct aml_hevc_ctx *h, int result)
 		return;
 	h->finished = true;
 
-	ctx->decode_result = result;
-	ctx->int_cond = 1;
-	wake_up(&ctx->queue);
+	ctx->job->decode_result = result;
+	ctx->job->int_cond = 1;
+	wake_up(&ctx->job->queue);
 }
 
 static void h265_dump_start(struct aml_vdec_hw *hw, const char *phase)
@@ -1097,9 +1097,9 @@ static irqreturn_t h265_irq_thread(int irq, void *priv)
 		ret = h265_slice_header(h);
 		if (ret == 2) {
 			h->finished = true;
-			h->v4l2_ctx->decode_result = 1;
-			h->v4l2_ctx->int_cond = 1;
-			wake_up(&h->v4l2_ctx->queue);
+			h->v4l2_ctx->job->decode_result = 1;
+			h->v4l2_ctx->job->int_cond = 1;
+			wake_up(&h->v4l2_ctx->job->queue);
 			return IRQ_HANDLED;
 		}
 		if (ret < 0) {
@@ -1150,24 +1150,17 @@ int h265_hw_run(struct aml_hevc_ctx *h, const void *data, size_t size)
 	struct aml_vdec_ctx *ctx = h->v4l2_ctx;
 	struct aml_vdec_hw *hw = h->hw;
 	unsigned long elapsed;
-	int ret, stop_ret;
-
-	ret = aml_hevc_prepare_hw(hw);
-	if (ret)
-		goto stop;
-	ret = aml_hevc_enable_irq(hw, h265_irq_thread, h);
-	if (ret)
-		goto stop;
+	int ret;
 
 	h->rounds = 0;
 	h->have_picture = false;
 	h->finished = false;
 	h->dpb.cur = -1;
-	ctx->int_cond = 0;
-	ctx->decode_result = -EIO;
+	ctx->job->int_cond = 0;
+	ctx->job->decode_result = -EIO;
 	ret = h265_feed(h, data, size);
 	if (ret)
-		goto stop;
+		return ret;
 	/* Fresh frame-based input has no invalid prefix bytes. */
 	wr(hw, HEVC_WAIT_FLAG, 0);
 	h265_prot_init(h);
@@ -1194,9 +1187,9 @@ int h265_hw_run(struct aml_hevc_ctx *h, const void *data, size_t size)
 	h265_dump_start(hw, "after-start");
 
 	/* m2m cancellation waits for this bounded job and the subsequent DMA stop. */
-	elapsed = wait_event_timeout(ctx->queue, READ_ONCE(ctx->int_cond),
+	elapsed = wait_event_timeout(ctx->job->queue, READ_ONCE(ctx->job->int_cond),
 				     msecs_to_jiffies(H265_TIMEOUT_MS));
-	ret = elapsed ? ctx->decode_result : -ETIMEDOUT;
+	ret = elapsed ? ctx->job->decode_result : -ETIMEDOUT;
 	if (!elapsed) {
 		h265_dump_start(hw, "timeout");
 		dev_err(hw->dev, "hevc: timeout, irq %02x status %02x pc %08x shift %08x\n",
@@ -1204,13 +1197,42 @@ int h265_hw_run(struct aml_hevc_ctx *h, const void *data, size_t size)
 			read_dos_reg(hw, HEVC_MPC_E),
 			read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT));
 	}
-stop:
-	stop_ret = aml_hevc_stop_hw(hw);
+	return ret;
+}
+
+static int hevc_job_acquire(struct aml_vdec_ctx *ctx)
+{
+	struct aml_hevc_ctx *h = ctx->codec_priv;
+	int ret, stop_ret;
+
+	h->hw->hevc.job = ctx->job;
+	ret = aml_hevc_prepare_hw(h->hw);
+	if (!ret)
+		ret = aml_hevc_enable_irq(h->hw, h265_irq_thread, h);
+	if (!ret)
+		return 0;
+	stop_ret = aml_vdec_job_stop(ctx);
 	if (stop_ret)
 		return stop_ret;
-	if (ret < 0 && h->dpb.cur >= 0) {
+	if (h->dpb.cur >= 0) {
 		h->dpb.pic[h->dpb.cur].valid = false;
 		h->dpb.pic[h->dpb.cur].referenced = false;
 	}
 	return ret;
 }
+
+static int hevc_job_stop(struct aml_vdec_ctx *ctx)
+{
+	return aml_hevc_stop_hw(ctx->dev->dec_hw);
+}
+
+static void hevc_job_release(struct aml_vdec_ctx *ctx)
+{
+	ctx->dev->dec_hw->hevc.job = NULL;
+}
+
+const struct aml_vdec_job_ops aml_hevc_job_ops = {
+	.acquire = hevc_job_acquire,
+	.stop = hevc_job_stop,
+	.release = hevc_job_release,
+};
