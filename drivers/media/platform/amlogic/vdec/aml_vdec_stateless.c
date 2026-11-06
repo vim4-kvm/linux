@@ -172,6 +172,7 @@ static const struct v4l2_m2m_ops stateless_m2m_ops = {
 };
 
 const struct aml_vdec_interface aml_vdec_stateless_interface = {
+	.context_size = sizeof(struct aml_vdec_ctx),
 	.ioctl_ops = &aml_vdec_stateless_ioctl_ops,
 	.queue_ops = &aml_vdec_vb2_ops,
 	.m2m_ops = &stateless_m2m_ops,

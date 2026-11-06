@@ -23,7 +23,7 @@ static int stateful_get_volatile_ctrl(struct v4l2_ctrl *ctrl)
 
 	if (ctrl->id != V4L2_CID_MIN_BUFFERS_FOR_CAPTURE)
 		return -EINVAL;
-	ctrl->val = READ_ONCE(ctx->hevc_min_capture);
+	ctrl->val = READ_ONCE(aml_vdec_stateful(ctx)->min_capture);
 	return 0;
 }
 
@@ -264,7 +264,17 @@ static const struct v4l2_m2m_ops stateful_m2m_ops = {
 	.job_ready = stateful_job_ready,
 };
 
+static void stateful_context_init(struct aml_vdec_ctx *ctx)
+{
+	struct aml_vdec_stateful_ctx *stateful = aml_vdec_stateful(ctx);
+
+	mutex_init(&stateful->lock);
+	stateful->min_capture = 1;
+}
+
 const struct aml_vdec_interface aml_vdec_stateful_interface = {
+	.context_size = sizeof(struct aml_vdec_stateful_ctx),
+	.context_init = stateful_context_init,
 	.ioctl_ops = &aml_vdec_stateful_ioctl_ops,
 	.queue_ops = &aml_vdec_vb2_ops,
 	.m2m_ops = &stateful_m2m_ops,

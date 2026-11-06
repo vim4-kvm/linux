@@ -108,12 +108,10 @@ struct h265_tile {
 struct aml_hevc_ctx {
 	struct aml_vdec_ctx *v4l2_ctx;
 	struct aml_vdec_hw *hw;
+	struct aml_vdec_stateful_ctx *stateful;
 	bool configured;
-	bool format_known;
-	u32 epoch, sequence;
+	u32 epoch;
 	unsigned int pending, reorder_limit;
-	struct v4l2_pix_format_mplane format;
-	struct v4l2_rect crop;
 	int rounds;
 	bool have_picture;
 	bool finished;

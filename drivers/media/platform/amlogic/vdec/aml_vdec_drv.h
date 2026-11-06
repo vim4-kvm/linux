@@ -34,6 +34,8 @@ enum vdec_type_e {
 };
 
 struct aml_vdec_interface {
+	size_t context_size;
+	void (*context_init)(struct aml_vdec_ctx *ctx);
 	const struct v4l2_ioctl_ops *ioctl_ops;
 	const struct vb2_ops *queue_ops;
 	const struct v4l2_m2m_ops *m2m_ops;
@@ -208,12 +210,9 @@ struct dec_pic_info {
  * @codec_priv: Pointer to current decoder instance.
  * @decode_result: Result signaled by the firmware IRQ; completed after stop.
  * @buffers_held: Queue mmap locks and per-job DMA pins are held.
- * @decode_failed: A timed-out context rejects further jobs until close.
  * @diag_started: The initial T7 decode snapshot has been recorded.
+ * @decode_failed: A timed-out context rejects further jobs until close.
  * @compose: Visible image rectangle within CAPTURE storage.
- * @hevc_wait_capture: HEVC is waiting for CAPTURE after source change.
- * @hevc_min_capture: Minimum CAPTURE buffers reported for HEVC.
- * @hevc_lock: Serializes HEVC metadata and pending display buffers.
  */
 struct aml_vdec_ctx {
 	struct aml_vdec_dev *dev;
@@ -242,10 +241,6 @@ struct aml_vdec_ctx {
 	int decode_result;
 	bool buffers_held;
 	bool decode_failed;
-	bool hevc_wait_capture;
-	u32 hevc_min_capture;
-	/* Serializes HEVC metadata and pending display buffers with ioctls. */
-	struct mutex hevc_lock;
 	bool diag_started;
 };
 

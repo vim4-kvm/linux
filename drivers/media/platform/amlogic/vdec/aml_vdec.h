@@ -8,6 +8,23 @@
 
 #include "aml_vdec_drv.h"
 
+struct aml_vdec_stateful_ctx {
+	struct aml_vdec_ctx ctx;
+	/* Serializes stateful metadata and retained CAPTURE buffers. */
+	struct mutex lock;
+	bool wait_capture;
+	u32 min_capture;
+	bool format_known;
+	u32 sequence;
+	struct v4l2_pix_format_mplane format;
+	struct v4l2_rect crop;
+};
+
+static inline struct aml_vdec_stateful_ctx *aml_vdec_stateful(struct aml_vdec_ctx *ctx)
+{
+	return container_of(ctx, struct aml_vdec_stateful_ctx, ctx);
+}
+
 extern const struct v4l2_m2m_ops aml_vdec_m2m_ops;
 extern const struct v4l2_ioctl_ops aml_vdec_stateless_ioctl_ops;
 extern const struct v4l2_ioctl_ops aml_vdec_stateful_ioctl_ops;
