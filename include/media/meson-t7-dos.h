@@ -5,9 +5,9 @@
 #include <linux/device.h>
 
 /*
- * JPEG and Wave may coexist. An experimental VDEC owns all three engines
- * exclusively, including their probe/firmware/reset and removal phases.
- * A quarantined decoder must keep its lease until a system reset.
+ * JPEG and Wave hold shared leases from probe to removal. VDEC holds an
+ * exclusive lease while runtime active, covering power, firmware and DMA.
+ * A quarantined decoder prevents further leases until a system reset.
  */
 int meson_t7_dos_get(struct device *dev, bool exclusive);
 int devm_meson_t7_dos_get_shared(struct device *dev);

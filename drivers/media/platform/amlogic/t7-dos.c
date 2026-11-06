@@ -3,27 +3,22 @@
 #include <linux/mutex.h>
 #include <media/meson-t7-dos.h>
 
+#include "t7-dos-state.h"
+
 static DEFINE_MUTEX(dos_lock);
-static unsigned int encoders;
-static bool decoder;
-static bool poisoned;
+static struct meson_t7_dos_state dos_state;
 
 int meson_t7_dos_get(struct device *dev, bool exclusive)
 {
-	int ret = 0;
+	int ret;
 
 	mutex_lock(&dos_lock);
-	if (poisoned)
-		ret = -EIO;
-	else if (decoder || (exclusive && encoders))
-		ret = -EBUSY;
-	else if (exclusive)
-		decoder = true;
-	else
-		encoders++;
+	ret = meson_t7_dos_acquire(&dos_state, exclusive);
 	mutex_unlock(&dos_lock);
-	if (ret)
-		dev_err(dev, "T7 VDEC requires Wave and JPEG drivers unloaded\n");
+	if (ret == -EBUSY)
+		dev_dbg(dev, "DOS busy: decoder and encoders are mutually exclusive\n");
+	else if (ret)
+		dev_dbg(dev, "DOS poisoned until system reset\n");
 	return ret;
 }
 EXPORT_SYMBOL_GPL(meson_t7_dos_get);
@@ -31,10 +26,7 @@ EXPORT_SYMBOL_GPL(meson_t7_dos_get);
 void meson_t7_dos_put(bool exclusive)
 {
 	mutex_lock(&dos_lock);
-	if (exclusive)
-		decoder = false;
-	else if (encoders)
-		encoders--;
+	meson_t7_dos_release(&dos_state, exclusive);
 	mutex_unlock(&dos_lock);
 }
 EXPORT_SYMBOL_GPL(meson_t7_dos_put);
@@ -42,8 +34,8 @@ EXPORT_SYMBOL_GPL(meson_t7_dos_put);
 void meson_t7_dos_poison(void)
 {
 	mutex_lock(&dos_lock);
-	if (!poisoned) {
-		poisoned = true;
+	if (!dos_state.poisoned) {
+		dos_state.poisoned = true;
 		__module_get(THIS_MODULE);
 	}
 	mutex_unlock(&dos_lock);

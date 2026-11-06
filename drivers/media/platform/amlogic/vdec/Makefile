@@ -4,7 +4,7 @@ aml-vdec-drv-objs := aml_vdec.o aml_vdec_stateless.o aml_vdec_stateful.o \
 		     h264.o h264_headers.o mpeg12.o mjpeg.o hevc.o hevc_dpb.o hevc_hw.o
 
 ifneq ($(CONFIG_VIDEO_AMLOGIC_VDEC_KUNIT_TEST),)
-aml-vdec-drv-objs += hevc_kunit.o aml_vdec_job_kunit.o
+aml-vdec-drv-objs += hevc_kunit.o aml_vdec_job_kunit.o t7_dos_kunit.o
 endif
 
 obj-$(CONFIG_VIDEO_AMLOGIC_VDEC) += aml-vdec-drv.o

@@ -281,26 +281,19 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 	if (pdata->has_dbus_ctrl && !enable_t7)
 		return -ENODEV;
 
-	if (pdata->has_dbus_ctrl) {
-		ret = meson_t7_dos_get(&pdev->dev, true);
-		if (ret)
-			return ret;
-	}
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret)
-		goto err_lease;
+		return ret;
 	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
-	if (!dev) {
-		ret = -ENOMEM;
-		goto err_lease;
-	}
+	if (!dev)
+		return -ENOMEM;
 
 	dev->plat_dev = pdev;
 	mutex_init(&dev->dev_mutex);
 
 	ret = v4l2_device_register(&pdev->dev, &dev->v4l2_dev);
 	if (ret)
-		goto err_lease;
+		return ret;
 
 	dev->pvdec_data = pdata;
 	dev->nodes = devm_kcalloc(&pdev->dev, pdata->num_nodes,
@@ -397,9 +390,6 @@ err_dec_mem_init:
 	aml_vdec_unregister_nodes(dev, 0);
 err_device_alloc:
 	v4l2_device_unregister(&dev->v4l2_dev);
-err_lease:
-	if (pdata->has_dbus_ctrl)
-		meson_t7_dos_put(true);
 	return ret;
 }
 
@@ -429,18 +419,25 @@ static void aml_vdec_drv_remove(struct platform_device *pdev)
 		dev->dec_hw = NULL;
 	}
 	v4l2_device_unregister(&dev->v4l2_dev);
-	if (dev->pvdec_data->has_dbus_ctrl)
-		meson_t7_dos_put(true);
 }
 
 static int aml_vdec_runtime_resume(struct device *dev)
 {
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
+	int ret;
 
 	if (vdec->pvdec_data->has_dbus_ctrl &&
 	    (t7_snapshot_only || !READ_ONCE(allow_t7_power)))
 		return -EPERM;
-	return vdec_enable(vdec->dec_hw);
+	if (vdec->pvdec_data->has_dbus_ctrl) {
+		ret = meson_t7_dos_get(dev, true);
+		if (ret)
+			return ret;
+	}
+	ret = vdec_enable(vdec->dec_hw);
+	if (ret && vdec->pvdec_data->has_dbus_ctrl)
+		meson_t7_dos_put(true);
+	return ret;
 }
 
 static int aml_vdec_runtime_suspend(struct device *dev)
@@ -449,7 +446,12 @@ static int aml_vdec_runtime_suspend(struct device *dev)
 	int ret;
 
 	ret = aml_hevc_release_hw(vdec->dec_hw);
-	return ret ?: vdec_disable(vdec->dec_hw);
+	if (ret)
+		return ret;
+	ret = vdec_disable(vdec->dec_hw);
+	if (!ret && vdec->pvdec_data->has_dbus_ctrl)
+		meson_t7_dos_put(true);
+	return ret;
 }
 
 static const struct dev_pm_ops aml_vdec_pm_ops = {

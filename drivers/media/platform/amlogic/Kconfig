@@ -5,7 +5,8 @@ comment "Amlogic media platform drivers"
 config VIDEO_MESON_T7_DOS
 	tristate
 	help
-	  Probe lifetime arbitration between T7 DOS decode and encode engines.
+	  Exclusive decoder runtime leases and shared encoder probe leases
+	  for the T7 DOS engines.
 
 source "drivers/media/platform/amlogic/c3/Kconfig"
 source "drivers/media/platform/amlogic/meson-ge2d/Kconfig"
