@@ -5,6 +5,8 @@
 #ifndef _H264_H_
 #define _H264_H_
 
+#include <media/v4l2-ctrls.h>
+
 #define RPM_BEGIN           0x0
 #define FRAME_IN_DPB        24
 #define RPM_END             0x400
@@ -297,5 +299,8 @@ void aml_h264_prepare(void *priv);
 void aml_h264_exit(void *priv);
 int aml_h264_dec_run(void *priv);
 void aml_h264_finish(void *priv);
+
+#define AML_H264_NUM_CONTROLS 8
+extern const struct v4l2_ctrl_config aml_h264_controls[AML_H264_NUM_CONTROLS];
 
 #endif
