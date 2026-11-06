@@ -617,3 +617,7 @@ const struct aml_vdec_node_desc aml_vdec_hevc_node = {
 	.buffered_capture = true,
 	.try_format = aml_hevc_try_fmt,
 };
+
+#if IS_ENABLED(CONFIG_VIDEO_AMLOGIC_VDEC_KUNIT_TEST)
+#include "aml_vdec_stateful_kunit.h"
+#endif
