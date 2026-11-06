@@ -34,8 +34,8 @@
 #include "aml_vdec_hw.h"
 #include "hevc_priv.h"
 
-/* Workspace, the reference's amvh265_workbuff_spec[1] (4096x2048). */
-#define H265_IPP_SIZE		0x4000
+/* T7 workspace geometry, including its 8K deblock line offsets. */
+#define H265_IPP_SIZE		0x8000
 #define H265_SAO_ABV_BUF_SIZE	0x30000
 #define H265_SAO_VB_BUF_SIZE	0x30000
 #define H265_SHORT_TERM_RPS_SIZE 0x0800
@@ -46,11 +46,11 @@
 #define H265_SWAP_BUF_SIZE	0x0800
 #define H265_SWAP_BUF2_SIZE	0x0800
 #define H265_SCALELUT_SIZE	0x8000
-#define H265_DBLK_PARA_SIZE	0x19100
-#define H265_DBLK_DATA_SIZE	0x88800
-#define H265_DBLK_DATA2_SIZE	0x48800
-#define H265_MMU_VBH_SIZE	0x5000
-#define H265_MPRED_ABOVE_SIZE	0x4000
+#define H265_DBLK_PARA_SIZE	0x40100
+#define H265_DBLK_DATA_SIZE	0x140800
+#define H265_DBLK_DATA2_SIZE	0x100800
+#define H265_MMU_VBH_SIZE	0xa000
+#define H265_MPRED_ABOVE_SIZE	0x8000
 
 #define H265_RPM_SIZE		(0x80 * 2)
 #define H265_LMEM_SIZE		(0x500 * 2)
@@ -317,7 +317,7 @@ static void h265_config_workspace(struct aml_hevc_ctx *h)
 	wr(hw, H265_SAO_UP, h->sao_up);
 	wr(hw, HEVC_ASSIST_MMU_MAP_ADDR, h->mmu_map);
 	wr(hw, H265_SCALELUT, h->scalelut);
-	wr(hw, HEVC_DBLK_CFG3, 0x4010);	/* <= 4096x2304 */
+	wr(hw, HEVC_DBLK_CFG3, 0x8020);	/* T7 workspace line offsets */
 	wr(hw, HEVC_DBLK_CFG4, h->dblk_para);
 	wr(hw, HEVC_DBLK_CFG5, h->dblk_data);
 	wr(hw, HEVC_DBLK_CFGE, h->dblk_data2);
