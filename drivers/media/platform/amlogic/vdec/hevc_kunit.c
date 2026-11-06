@@ -96,6 +96,56 @@ static void invalid_firmware_parameters(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), -EINVAL);
 }
 
+static void valid_crop_selects_visible_rectangle(struct kunit *test)
+{
+	struct h265_dpb *h = test->priv;
+	struct h265_crop crop;
+
+	h->p[P_PIC_WIDTH] = 832;
+	h->p[P_PIC_HEIGHT] = 480;
+	h->p[P_CONFORMANCE_WINDOW_FLAG] = 1;
+	h->p[P_CONF_WIN_LEFT_OFFSET] = 1;
+	h->p[P_CONF_WIN_RIGHT_OFFSET] = 3;
+	h->p[P_CONF_WIN_TOP_OFFSET] = 2;
+	h->p[P_CONF_WIN_BOTTOM_OFFSET] = 4;
+	KUNIT_ASSERT_EQ(test, h265_validate_params(h->p), 0);
+	crop = h265_display_crop(h->p);
+	KUNIT_EXPECT_EQ(test, crop.left, 2U);
+	KUNIT_EXPECT_EQ(test, crop.top, 4U);
+	KUNIT_EXPECT_EQ(test, crop.width, 824U);
+	KUNIT_EXPECT_EQ(test, crop.height, 468U);
+}
+
+static void invalid_crop_keeps_decoding_full_picture(struct kunit *test)
+{
+	static const u16 offsets[][4] = {
+		{ 1, 24576, 0, 120 }, { 1, 57344, 0, 120 },
+		{ 0, 0, 1, 239 }, { 1, 415, 0, 0 },
+	};
+	struct h265_dpb *h = test->priv;
+	unsigned int i;
+
+	h->p[P_PIC_WIDTH] = 832;
+	h->p[P_PIC_HEIGHT] = 480;
+	h->p[P_CONFORMANCE_WINDOW_FLAG] = 1;
+	for (i = 0; i < ARRAY_SIZE(offsets); i++) {
+		struct h265_crop crop;
+
+		memcpy(&h->p[P_CONF_WIN_LEFT_OFFSET], offsets[i], sizeof(offsets[i]));
+		KUNIT_ASSERT_EQ(test, h265_validate_params(h->p), 0);
+		crop = h265_display_crop(h->p);
+		KUNIT_EXPECT_EQ(test, crop.left, 0U);
+		KUNIT_EXPECT_EQ(test, crop.top, 0U);
+		KUNIT_EXPECT_EQ(test, crop.width, 832U);
+		KUNIT_EXPECT_EQ(test, crop.height, 480U);
+	}
+	h->p[P_CHROMA_FORMAT_IDC] = 2;
+	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), -EOPNOTSUPP);
+	h->p[P_CHROMA_FORMAT_IDC] = 1;
+	h->p[P_PIC_WIDTH] = 0;
+	KUNIT_EXPECT_EQ(test, h265_validate_params(h->p), -EINVAL);
+}
+
 static void tile_boundaries(struct kunit *test)
 {
 	struct h265_dpb *h = test->priv;
@@ -589,6 +639,8 @@ static void restarted_cra_skips_unavailable_rasl(struct kunit *test)
 static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(poc_wrap_and_random_access),
 	KUNIT_CASE(invalid_firmware_parameters),
+	KUNIT_CASE(valid_crop_selects_visible_rectangle),
+	KUNIT_CASE(invalid_crop_keeps_decoding_full_picture),
 	KUNIT_CASE(first_slice_ignores_absent_segment_address),
 	KUNIT_CASE(tile_boundaries),
 	KUNIT_CASE(missing_and_reordered_references),
