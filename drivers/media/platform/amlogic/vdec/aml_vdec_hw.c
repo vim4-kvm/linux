@@ -1395,7 +1395,9 @@ static irqreturn_t hevc_threaded_isr_handler(int irq, void *priv)
 		ret = regmap_write(hw->map[DOS_BUS], HEVC_ASSIST_MBOX0_CLR_REG, 1);
 	if (ret)
 		hw->hevc.irq_status = U32_MAX;
-	return hw->hevc.irq_thread(irq, hw->hevc.priv);
+	if (READ_ONCE(hw->hevc.job) && hw->hevc.irq_thread)
+		return hw->hevc.irq_thread(irq, hw->hevc.priv);
+	return IRQ_HANDLED;
 }
 
 static const struct power_manager_s pm[] = {
@@ -1416,7 +1418,8 @@ static irqreturn_t vdec_irq_handler(int irq, void *priv)
 	irqreturn_t ret = IRQ_HANDLED;
 
 	hw->vdec1.irq_count++;
-	if (READ_ONCE(hw->vdec1.priv) && hw->vdec1.ops.irq_handler)
+	if (READ_ONCE(hw->vdec1.job) && READ_ONCE(hw->vdec1.priv) &&
+	    hw->vdec1.ops.irq_handler)
 		ret = hw->vdec1.ops.irq_handler(irq, priv);
 
 	return ret;
@@ -1429,7 +1432,8 @@ static irqreturn_t vdec_threaded_isr_handler(int irq, void *priv)
 	irqreturn_t ret = IRQ_HANDLED;
 
 	hw->vdec1.threaded_irq_count++;
-	if (READ_ONCE(hw->vdec1.priv) && hw->vdec1.ops.irq_threaded_func)
+	if (READ_ONCE(hw->vdec1.job) && READ_ONCE(hw->vdec1.priv) &&
+	    hw->vdec1.ops.irq_threaded_func)
 		ret = hw->vdec1.ops.irq_threaded_func(irq, priv);
 
 	return ret;
