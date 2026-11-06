@@ -33,6 +33,12 @@ struct aml_codec_ops {
 	void (*finish)(void *priv);
 };
 
+struct aml_vdec_node_info {
+	const struct aml_vdec_node_desc *desc;
+	const char *name;
+	enum vdec_type_e core;
+};
+
 /**
  * struct aml_dev_platform_data - compatible data for each chip.
  * @nodes: Video node descriptors in registration order.
@@ -47,12 +53,6 @@ struct aml_codec_ops {
  * @num_fmts: Number of formats in dec_fmt.
  * @has_internal_canvas: Use the internal DOS canvas lookup table.
  */
-struct aml_vdec_node_info {
-	const struct aml_vdec_node_desc *desc;
-	const char *name;
-	enum vdec_type_e core;
-};
-
 struct aml_dev_platform_data {
 	const struct aml_vdec_node_info *nodes;
 	unsigned int num_nodes;
