@@ -16,6 +16,8 @@ u32 mpeg12_write_headers(u8 *buf, const struct v4l2_ctrl_mpeg2_sequence *seq,
 unsigned int mpeg12_reference_timestamps(const struct v4l2_ctrl_mpeg2_picture *pic,
 					 const struct v4l2_ctrl_mpeg2_picture *first,
 					 bool pair, u64 refs[2]);
+int mpeg12_reference_registers(const u64 refs[2], const u32 specs[2],
+			       unsigned int count, u32 *ref0, u32 *ref1);
 #endif
 
 /* Scratch register meanings for the mpeg12_multi microcode (vmpeg12_multi.c). */
