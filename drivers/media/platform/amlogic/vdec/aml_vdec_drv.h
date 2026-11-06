@@ -34,12 +34,14 @@ struct aml_vdec_interface {
 	const struct vb2_ops *queue_ops;
 	const struct v4l2_m2m_ops *m2m_ops;
 	int (*controls_init)(struct aml_vdec_ctx *ctx);
+	int (*run_job)(struct aml_vdec_ctx *ctx);
 	void (*finish_job)(struct aml_vdec_ctx *ctx, enum vb2_buffer_state state);
 	bool supports_requests;
 };
 
 struct aml_vdec_node_desc {
 	const struct aml_vdec_interface *interface;
+	const struct aml_vdec_stateful_ops *stateful_ops;
 	const u32 *formats;
 	unsigned int num_formats;
 	u32 default_output, default_capture;
@@ -49,13 +51,6 @@ struct aml_vdec_node_desc {
 			  struct v4l2_pix_format_mplane *format);
 	void (*set_colors)(struct aml_vdec_ctx *ctx, enum v4l2_buf_type type,
 			   struct v4l2_pix_format_mplane *format);
-	int (*get_selection)(struct aml_vdec_ctx *ctx, struct v4l2_selection *selection);
-	int (*decoder_cmd)(struct file *file, void *priv, struct v4l2_decoder_cmd *cmd);
-	void (*start_capture)(struct aml_vdec_ctx *ctx);
-	void (*cancel_output)(struct aml_vdec_ctx *ctx);
-	void (*last_buffer)(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *buffer);
-	void (*run)(struct aml_vdec_ctx *ctx);
-	int (*job_ready)(struct aml_vdec_ctx *ctx);
 };
 
 struct aml_vdec_node {
