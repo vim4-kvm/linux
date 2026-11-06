@@ -399,12 +399,20 @@ configure:
 static u32 mpeg12_ref_spec(struct aml_vdec_ctx *ctx, struct mpeg12_canvas *c,
 			   u64 ts)
 {
+	struct aml_vdec_hw *hw = vdec_get_hw(ctx->dev);
 	struct vb2_queue *vq = v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx);
 	struct vb2_buffer *vb = vb2_find_buffer(vq, ts);
+	u32 spec;
 
-	if (!vb)
+	if (!vb) {
+		dev_dbg(hw->dev, "mpeg12 reference ts=%llu not found\n", ts);
 		return 0xffffffff;
-	return mpeg12_canvas_setup(ctx, c, vb);
+	}
+	spec = mpeg12_canvas_setup(ctx, c, vb);
+	if (spec == ~0u)
+		dev_dbg(hw->dev, "mpeg12 reference ts=%llu buffer=%u canvas failed\n",
+			ts, vb->index);
+	return spec;
 }
 
 static void mpeg12_job_done(struct aml_vdec_ctx *ctx, int result)
@@ -809,5 +817,12 @@ int aml_mpeg12_dec_run(void *priv)
 	}
 	if (ret < 0)
 		return ret;
-	return ctx->decode_result;
+	ret = ctx->decode_result;
+	if (ret < 0)
+		dev_dbg(hw->dev,
+			"mpeg12 completion error: ts=%llu type=%u structure=%u forward=%llu backward=%llu out=%u info=%08x errors=%u\n",
+			src->vb2_buf.timestamp, pic->picture_coding_type,
+			pic->picture_structure, pic->forward_ref_ts, pic->backward_ref_ts,
+			m->status, m->pic_info, read_dos_reg(hw, MREG_ERROR_COUNT));
+	return ret;
 }
