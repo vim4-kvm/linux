@@ -4,6 +4,8 @@
 
 #include <linux/types.h>
 
+#include "hevc_headers.h"
+
 /* NAL unit types, H.265 table 7-1. */
 #define H265_NAL_IDR_W_RADL		19
 #define H265_NAL_IDR_N_LP		20
@@ -111,8 +113,8 @@ struct h265_pic {
 	u32 width, height;
 	int slice_type;
 	bool output_pending;
-	u32 epoch;
-	unsigned int reorder_limit;
+	bool needed_for_output;
+	u32 latency_count;
 };
 
 struct h265_crop {
@@ -139,9 +141,20 @@ struct h265_resolved_rps {
 	struct h265_rps_set st_before, st_after, lt_curr, lt_foll;
 };
 
+struct h265_slot_queue {
+	u8 slots[H265_SLOTS];
+	u8 head, count;
+};
+
+struct h265_picture_info {
+	bool irap, is_cra, no_rasl_output, first_picture;
+	bool no_output_of_prior_pics;
+};
+
 struct h265_dpb {
-	u32 epoch;
-	unsigned int pending, reorder_limit;
+	unsigned int pending;
+	struct h265_slot_queue output, discard;
+	bool new_cvs;
 	struct h265_pic pic[H265_SLOTS];
 	int nslots;
 	bool ten_bit;
@@ -187,8 +200,13 @@ struct h265_crop h265_display_crop(const u16 *p);
 void h265_update_poc(struct h265_dpb *h);
 bool h265_update_random_access(struct h265_dpb *h);
 int h265_free_slot(struct h265_dpb *h);
-int h265_next_output(struct h265_dpb *h, bool flush);
-void h265_queue_output(struct h265_dpb *h, unsigned int slot);
-void h265_remove_output(struct h265_dpb *h, unsigned int slot);
+void h265_dpb_begin_picture(struct h265_dpb *h, const struct h265_picture_info *info,
+			    const struct h265_output_limits *limits);
+void h265_dpb_end_picture(struct h265_dpb *h, unsigned int slot, bool pic_output,
+			  const struct h265_output_limits *limits);
+void h265_dpb_flush(struct h265_dpb *h);
+int h265_dpb_pop_output(struct h265_dpb *h);
+int h265_dpb_pop_discard(struct h265_dpb *h);
+void h265_dpb_end_sequence(struct h265_dpb *h);
 
 #endif
