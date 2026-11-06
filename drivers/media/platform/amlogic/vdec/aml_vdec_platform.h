@@ -23,6 +23,9 @@
  * a negative value in error cases.
  */
 struct aml_codec_ops {
+	const struct aml_vdec_reset_profile *reset;
+	u32 secure_format;
+	int (*post_load)(struct aml_vdec_hw *hw);
 	int (*init)(void *priv);
 	void (*exit)(void *priv);
 	void (*prepare)(void *priv);
