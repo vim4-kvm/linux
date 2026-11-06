@@ -259,7 +259,7 @@ static int stateful_buffered_decoder_cmd(struct file *file, void *priv,
 	return ret;
 }
 
-static int hevc_get_volatile_ctrl(struct v4l2_ctrl *ctrl)
+static int stateful_get_volatile_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct aml_vdec_ctx *ctx = ctrl_to_dec_ctx(ctrl->handler);
 
@@ -467,7 +467,7 @@ static void stateful_finish_job(struct aml_vdec_ctx *ctx,
 }
 
 static const struct v4l2_ctrl_ops min_capture_ctrl_ops = {
-	.g_volatile_ctrl = hevc_get_volatile_ctrl,
+	.g_volatile_ctrl = stateful_get_volatile_ctrl,
 };
 
 static int stateful_ctrls_setup(struct aml_vdec_ctx *ctx)
