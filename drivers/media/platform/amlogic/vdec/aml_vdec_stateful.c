@@ -184,36 +184,23 @@ static void stateful_source_change(struct aml_vdec_ctx *ctx)
 		stateful_end_capture(ctx, false);
 }
 
-static void stateful_buffered_device_run(struct aml_vdec_ctx *ctx)
+static void stateful_consume_source(struct aml_vdec_ctx *ctx,
+				    const struct aml_vdec_decode_result *result)
 {
-	struct aml_vdec_decode_result result;
 	struct aml_vdec_frame frame;
 	struct vb2_v4l2_buffer *src, *dst;
 	bool drain;
-	int ret;
 
-	ret = aml_vdec_job_acquire(ctx);
-	if (ret)
-		goto error;
-	src = v4l2_m2m_next_src_buf(ctx->m2m_ctx);
-	dst = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
-	ret = ctx->node->stateful_ops->submit(ctx, src, dst, &result);
-	if (ret < 0)
-		goto error;
-	if (result.format_changed) {
-		stateful_source_change(ctx);
-		goto finish;
-	}
 	src = v4l2_m2m_next_src_buf(ctx->m2m_ctx);
 	drain = v4l2_m2m_is_last_draining_src_buf(ctx->m2m_ctx, src);
-	if (result.picture) {
+	if (result->picture) {
 		dst = v4l2_m2m_dst_buf_remove(ctx->m2m_ctx);
 		v4l2_m2m_buf_copy_metadata(src, dst);
 		dst->field = V4L2_FIELD_NONE;
 		dst->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
 				V4L2_BUF_FLAG_BFRAME);
-		dst->flags |= result.flags;
-		ctx->node->stateful_ops->queue_capture(ctx, result.slot, dst);
+		dst->flags |= result->flags;
+		ctx->node->stateful_ops->queue_capture(ctx, result->slot, dst);
 	}
 	v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
 	src->sequence = ctx->sequence_out++;
@@ -231,7 +218,29 @@ static void stateful_buffered_device_run(struct aml_vdec_ctx *ctx)
 			stateful_output(ctx, &frame, VB2_BUF_STATE_DONE, false);
 	}
 	/* Publish drain events before either queue can report its final buffer. */
-	v4l2_m2m_buf_done(src, VB2_BUF_STATE_DONE);
+	v4l2_m2m_buf_done(src, result->recoverable_error ? VB2_BUF_STATE_ERROR :
+			   VB2_BUF_STATE_DONE);
+}
+
+static void stateful_buffered_device_run(struct aml_vdec_ctx *ctx)
+{
+	struct aml_vdec_decode_result result = {};
+	struct vb2_v4l2_buffer *src, *dst;
+	int ret;
+
+	ret = aml_vdec_job_acquire(ctx);
+	if (ret)
+		goto error;
+	src = v4l2_m2m_next_src_buf(ctx->m2m_ctx);
+	dst = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
+	ret = ctx->node->stateful_ops->submit(ctx, src, dst, &result);
+	if (ret < 0)
+		goto error;
+	if (result.format_changed) {
+		stateful_source_change(ctx);
+		goto finish;
+	}
+	stateful_consume_source(ctx, &result);
 	goto finish;
 error:
 	aml_vdec_job_stop(ctx);

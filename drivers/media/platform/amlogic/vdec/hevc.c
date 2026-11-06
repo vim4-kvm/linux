@@ -171,8 +171,13 @@ static int hevc_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
 
 	if (!h->have_au) {
 		ret = h265_headers_parse_au(&h->headers, data, size, &h->au);
-		if (ret)
-			return ret;
+		if (ret) {
+			stop_ret = aml_vdec_job_stop(ctx);
+			if (stop_ret)
+				return stop_ret;
+			result->recoverable_error = true;
+			return 0;
+		}
 		h->have_au = true;
 		h->picture_started = false;
 		if (h->au.cvs_boundary_before)
@@ -187,6 +192,11 @@ static int hevc_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
 		h->dpb.pic[h->dpb.cur].referenced = false;
 	}
 
+	if (ret == -EBADMSG) {
+		h->have_au = false;
+		result->recoverable_error = true;
+		return 0;
+	}
 	if (ret < 0)
 		return ret;
 	if (ret != 1) {
