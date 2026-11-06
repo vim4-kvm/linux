@@ -468,7 +468,11 @@ VISIBLE_IF_KUNIT int mpeg12_reference_registers(const u64 refs[2],
 	    (refs[0] != U64_MAX && specs[0] == ~0u) ||
 	    (refs[1] != U64_MAX && specs[1] == ~0u))
 		return -EINVAL;
-	*ref0 = specs[0];
+	/*
+	 * Supply a valid older canvas to the microcode. Backward-only B
+	 * pictures never sample it, so it can alias the newer anchor.
+	 */
+	*ref0 = refs[0] == U64_MAX ? specs[1] : specs[0];
 	*ref1 = specs[1];
 	return 0;
 }
