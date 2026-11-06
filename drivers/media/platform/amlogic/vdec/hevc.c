@@ -509,7 +509,7 @@ static bool h265_rps_poc(struct aml_hevc_ctx *h, int i, int *poc, bool *used, bo
 /* apply_ref_pic_set(): everything the current RPS does not name stops being
  * a reference.
  */
-static void h265_apply_rps(struct aml_hevc_ctx *h)
+VISIBLE_IF_KUNIT void h265_apply_rps(struct aml_hevc_ctx *h)
 {
 	int i, j;
 
@@ -541,6 +541,7 @@ static void h265_apply_rps(struct aml_hevc_ctx *h)
 			pic->referenced = false;
 	}
 }
+EXPORT_SYMBOL_IF_KUNIT(h265_apply_rps);
 
 /*
  * Entry @c of a reference list built from the short-term pictures in @first
@@ -1092,7 +1093,7 @@ VISIBLE_IF_KUNIT void h265_update_poc(struct aml_hevc_ctx *h)
 }
 EXPORT_SYMBOL_IF_KUNIT(h265_update_poc);
 
-static int h265_free_slot(struct aml_hevc_ctx *h)
+VISIBLE_IF_KUNIT int h265_free_slot(struct aml_hevc_ctx *h)
 {
 	int i;
 
@@ -1101,6 +1102,7 @@ static int h265_free_slot(struct aml_hevc_ctx *h)
 			return i;
 	return -ENOBUFS;
 }
+EXPORT_SYMBOL_IF_KUNIT(h265_free_slot);
 
 /* Returns 0 to decode, 1 to skip, 2 to configure after stop, or a negative error. */
 static int h265_slice_header(struct aml_hevc_ctx *h)
@@ -1703,7 +1705,7 @@ int aml_hevc_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selection *s)
 	return ret;
 }
 
-static int h265_next_output(struct aml_hevc_ctx *h)
+VISIBLE_IF_KUNIT int h265_next_output(struct aml_hevc_ctx *h)
 {
 	int i, next = -1;
 
@@ -1716,6 +1718,7 @@ static int h265_next_output(struct aml_hevc_ctx *h)
 	}
 	return next;
 }
+EXPORT_SYMBOL_IF_KUNIT(h265_next_output);
 
 static void h265_output(struct aml_hevc_ctx *h, int slot,
 			enum vb2_buffer_state state, bool last)

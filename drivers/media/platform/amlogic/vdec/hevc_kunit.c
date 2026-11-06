@@ -2,6 +2,7 @@
 #include <kunit/test.h>
 #include <linux/module.h>
 #include <linux/sizes.h>
+#include <media/videobuf2-v4l2.h>
 
 #include "hevc_priv.h"
 
@@ -227,6 +228,89 @@ static void mv_storage_covers_edge_ctus(struct kunit *test)
 	}
 }
 
+static void rps_and_output_own_picture_slots(struct kunit *test)
+{
+	struct aml_hevc_ctx *h = test->priv;
+	struct vb2_v4l2_buffer *output;
+	unsigned int i;
+
+	output = kunit_kzalloc(test, sizeof(*output), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, output);
+	h->nslots = 4;
+	h->curr_poc = 4;
+	h->nal_type = 1;
+	/* POC 0 is retained for a later picture but unused by this slice. */
+	h->p[P_CUR_RPS] = 0x1ffc;
+	h->p[P_CUR_RPS + 1] = 0x3ffe;
+	h->p[P_CUR_RPS + 2] = RPS_END;
+	for (i = 0; i < 3; i++) {
+		h->pic[i].valid = true;
+		h->pic[i].referenced = true;
+	}
+	h->pic[0].poc = 0;
+	h->pic[1].poc = 2;
+	h->pic[2].poc = 3;
+	h->pic[2].output = output;
+	h265_apply_rps(h);
+	KUNIT_EXPECT_TRUE(test, h->pic[0].referenced);
+	KUNIT_EXPECT_TRUE(test, h->pic[1].referenced);
+	KUNIT_EXPECT_FALSE(test, h->pic[2].referenced);
+	/* An unreferenced reordered output must survive until it is delivered. */
+	KUNIT_EXPECT_EQ(test, h265_free_slot(h), 3);
+	h->pic[3].valid = true;
+	h->pic[3].referenced = true;
+	KUNIT_EXPECT_EQ(test, h265_free_slot(h), -ENOBUFS);
+	h->pic[2].output = NULL;
+	KUNIT_EXPECT_EQ(test, h265_free_slot(h), 2);
+}
+
+static void irap_releases_previous_references(struct kunit *test)
+{
+	static const unsigned int nals[] = {
+		H265_NAL_BLA_W_LP, H265_NAL_BLA_W_RADL, H265_NAL_BLA_N_LP,
+		H265_NAL_IDR_W_RADL, H265_NAL_IDR_N_LP,
+	};
+	struct aml_hevc_ctx *h = test->priv;
+	unsigned int i;
+
+	h->curr_poc = 0;
+	h->pic[0].valid = true;
+	h->pic[0].poc = -1;
+	h->p[P_CUR_RPS] = 0x3fff;
+	h->p[P_CUR_RPS + 1] = RPS_END;
+	for (i = 0; i < ARRAY_SIZE(nals); i++) {
+		h->nal_type = nals[i];
+		h->pic[0].referenced = true;
+		h265_apply_rps(h);
+		KUNIT_EXPECT_FALSE(test, h->pic[0].referenced);
+	}
+}
+
+static void output_orders_b_pictures_before_new_epoch(struct kunit *test)
+{
+	static const int pocs[] = { 0, 4, 2, 1, 0 };
+	static const int slots[] = { 0, 3, 2, 1, 4 };
+	struct aml_hevc_ctx *h = test->priv;
+	struct vb2_v4l2_buffer *outputs;
+	unsigned int i;
+
+	outputs = kunit_kcalloc(test, ARRAY_SIZE(pocs), sizeof(*outputs), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, outputs);
+	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
+		h->pic[i].poc = pocs[i];
+		h->pic[i].output = &outputs[i];
+	}
+	/* A new IDR's POC 0 must follow the previous GOP's reordered pictures. */
+	h->pic[4].epoch = 1;
+	for (i = 0; i < ARRAY_SIZE(slots); i++) {
+		int slot = h265_next_output(h);
+
+		KUNIT_ASSERT_EQ(test, slot, slots[i]);
+		h->pic[slot].output = NULL;
+	}
+	KUNIT_EXPECT_EQ(test, h265_next_output(h), -1);
+}
+
 static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(poc_wrap_and_random_access),
 	KUNIT_CASE(invalid_firmware_parameters),
@@ -234,6 +318,9 @@ static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(missing_and_reordered_references),
 	KUNIT_CASE(capture_sao_capacity),
 	KUNIT_CASE(mv_storage_covers_edge_ctus),
+	KUNIT_CASE(rps_and_output_own_picture_slots),
+	KUNIT_CASE(irap_releases_previous_references),
+	KUNIT_CASE(output_orders_b_pictures_before_new_epoch),
 	{}
 };
 

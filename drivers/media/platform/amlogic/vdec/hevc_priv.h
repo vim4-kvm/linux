@@ -177,6 +177,9 @@ struct aml_hevc_ctx {
 
 #if IS_ENABLED(CONFIG_KUNIT)
 size_t h265_mv_buf_size(u32 w, u32 h);
+void h265_apply_rps(struct aml_hevc_ctx *h);
+int h265_free_slot(struct aml_hevc_ctx *h);
+int h265_next_output(struct aml_hevc_ctx *h);
 int h265_validate_params(const u16 *p);
 void h265_update_tiles(struct aml_hevc_ctx *h, int w_cu, int h_cu,
 		       int sao_mem_unit);
