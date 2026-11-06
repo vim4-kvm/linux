@@ -888,6 +888,10 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 	wr(hw, HEVC_SAO_CTRL0, v);
 	wr(hw, HEVC_SAO_PIC_SIZE, h->pic_w | (h->pic_h << 16));
 	wr(hw, HEVC_SAO_PIC_SIZE_LCU, (h->lcu_x_num - 1) | ((h->lcu_y_num - 1) << 16));
+	if (h->new_pic)
+		wr(hw, HEVC_SAO_Y_START_ADDR, U32_MAX);
+	/* T7 has a separate double-write downscale control. */
+	wr(hw, HEVC_SAO_CTRL26, 0);
 
 	v = read_dos_reg(hw, HEVC_SAO_CTRL5);
 	v &= ~(0xff << 16);		/* double write 1:1 */
@@ -907,6 +911,10 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 	wr(hw, HEVC_SAO_C_WPTR, dw_c);
 
 	if (h->new_pic) {
+		v = (0xff << 8);
+		if (h->pic_w >= 1280)
+			v |= BIT(4);
+		wr(hw, HEVC_DBLK_CFGB, v);
 		wr(hw, HEVC_DBLK_CFG2, h->pic_w | (h->pic_h << 16));
 		v = 0;
 		if ((misc >> PCM_ENABLE_FLAG_BIT) & 1)
@@ -928,13 +936,6 @@ static void h265_config_sao(struct aml_hevc_ctx *h)
 	v &= ~(3 << 14);
 	v |= 2 << 14;			/* line align 64 */
 	wr(hw, HEVC_SAO_CTRL1, v);
-
-	/* 1st and 2nd write enabled, H.265 format */
-	v = 0x57 << 8;
-	if (h->pic_w >= 1280)
-		v |= BIT(4);		/* dblk pipeline mode */
-	v |= BIT(8) | BIT(9);
-	wr(hw, HEVC_DBLK_CFGB, v);
 
 	v = read_dos_reg(hw, HEVCD_IPP_AXIIF_CONFIG);
 	v &= ~0x30;			/* linear */
