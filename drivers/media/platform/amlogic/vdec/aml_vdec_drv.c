@@ -27,6 +27,11 @@ static bool t7_snapshot_only = true;
 module_param(t7_snapshot_only, bool, 0400);
 MODULE_PARM_DESC(t7_snapshot_only, "Restrict T7 to outer DOS steps 1-8 and abort; forbid internal DOS and decode");
 
+bool aml_vdec_power_allowed(void)
+{
+	return !t7_snapshot_only && READ_ONCE(allow_t7_power);
+}
+
 static ssize_t power_state_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
@@ -105,70 +110,6 @@ static ssize_t mdec_test_store(struct device *dev, struct device_attribute *attr
 }
 static DEVICE_ATTR_RW(mdec_test);
 
-static ssize_t hevc_test_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
-	struct aml_vdec_hw *hw = vdec->dec_hw;
-
-	return sysfs_emit(buf, "passed=%u parser_version=%#x\n",
-			 READ_ONCE(hw->diag.hevc_test_passed),
-			 READ_ONCE(hw->diag.hevc_parser_version));
-}
-
-static ssize_t hevc_test_store(struct device *dev, struct device_attribute *attr,
-			       const char *buf, size_t count)
-{
-	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
-	bool run;
-	int ret;
-
-	ret = kstrtobool(buf, &run);
-	if (ret || !run)
-		return -EINVAL;
-	mutex_lock(&vdec->dev_mutex);
-	if (t7_snapshot_only || !READ_ONCE(allow_t7_power))
-		ret = -EPERM;
-	else if (vdec->open_count || !pm_runtime_suspended(dev))
-		ret = -EBUSY;
-	else
-		ret = aml_vdec_t7_hevc_test(vdec->dec_hw);
-	mutex_unlock(&vdec->dev_mutex);
-	return ret ?: count;
-}
-static DEVICE_ATTR_RW(hevc_test);
-
-static ssize_t hevc_core_test_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
-	struct aml_vdec_hw *hw = vdec->dec_hw;
-
-	return sysfs_emit(buf, "passed=%u axi_front=%#x axi_back=%#x\n",
-			 READ_ONCE(hw->diag.hevc_core_test_passed), READ_ONCE(hw->hevc.axi_front),
-			 READ_ONCE(hw->hevc.axi_back));
-}
-
-static ssize_t hevc_core_test_store(struct device *dev, struct device_attribute *attr,
-				    const char *buf, size_t count)
-{
-	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
-	bool run;
-	int ret;
-
-	ret = kstrtobool(buf, &run);
-	if (ret || !run)
-		return -EINVAL;
-	mutex_lock(&vdec->dev_mutex);
-	if (t7_snapshot_only || !READ_ONCE(allow_t7_power))
-		ret = -EPERM;
-	else if (vdec->open_count || !pm_runtime_suspended(dev))
-		ret = -EBUSY;
-	else
-		ret = aml_vdec_t7_hevc_core_test(vdec->dec_hw);
-	mutex_unlock(&vdec->dev_mutex);
-	return ret ?: count;
-}
-static DEVICE_ATTR_RW(hevc_core_test);
-
 static ssize_t register_step_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct aml_vdec_dev *vdec = dev_get_drvdata(dev);
@@ -215,11 +156,9 @@ static DEVICE_ATTR_RO(faulted);
 
 static struct attribute *aml_vdec_attrs[] = {
 	&dev_attr_faulted.attr,
-	&dev_attr_hevc_core_test.attr,
 	&dev_attr_power_state.attr,
 	&dev_attr_power_test.attr,
 	&dev_attr_mdec_test.attr,
-	&dev_attr_hevc_test.attr,
 	&dev_attr_register_step.attr,
 	NULL,
 };
@@ -518,8 +457,10 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 			ret = aml_vdec_register_stateful(dev, "aml_hevc_decoder",
 							 &dev->hevc_vfd, &dev->hevc_intf,
 							 2, &aml_vdec_hevc_node);
-		if (!ret)
+		if (!ret) {
+			aml_vdec_debugfs_init(dev);
 			return 0;
+		}
 		if (dev->jpeg_vfd) {
 			media_devnode_remove(dev->jpeg_intf);
 			video_unregister_device(dev->jpeg_vfd);
@@ -532,6 +473,7 @@ static int aml_vdec_drv_probe(struct platform_device *pdev)
 		media_device_unregister(&dev->mdev);
 		goto err_media_dev_register;
 	}
+	aml_vdec_debugfs_init(dev);
 	return 0;
 
 err_media_dev_register:
@@ -561,6 +503,8 @@ err_lease:
 static void aml_vdec_drv_remove(struct platform_device *pdev)
 {
 	struct aml_vdec_dev *dev = platform_get_drvdata(pdev);
+
+	aml_vdec_debugfs_remove(dev);
 
 	if (dev->pvdec_data->has_dbus_ctrl) {
 		pm_runtime_disable(&pdev->dev);
