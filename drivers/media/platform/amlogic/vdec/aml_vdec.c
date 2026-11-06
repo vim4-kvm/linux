@@ -91,14 +91,14 @@ void aml_vdec_run_pair(struct aml_vdec_ctx *ctx)
 	dos_enable(dev->dec_hw);
 	/* incase of bus hang in stop_streaming */
 	ctx->dos_clk_en = 1;
-	ret = aml_vdec_reset_core(dev->dec_hw, ctx->curr_dec_type);
+	ret = aml_vdec_reset_core(dev->dec_hw, ctx->codec_ops->reset);
 	if (ret) {
 		/* Isolation/reset failed: do not retry MMIO or return DMA ownership. */
 		aml_vdec_fault(ctx);
 		goto complete_request;
 	}
 
-	ret = load_firmware(dev->dec_hw, fw_path, ctx->curr_dec_type);
+	ret = load_firmware(dev->dec_hw, fw_path, ctx->codec_ops);
 	if (ret)
 		goto stop_job;
 

@@ -826,3 +826,9 @@ int aml_mpeg12_dec_run(void *priv)
 			m->status, m->pic_info, read_dos_reg(hw, MREG_ERROR_COUNT));
 	return ret;
 }
+
+/* MPEG-2 starts without saved IQ/IDCT or microcontroller state. */
+const struct aml_vdec_reset_profile aml_mpeg12_reset_profile = {
+	.mask = BIT(3) | GENMASK(31, 4),
+	.preserve_power_ctl = true,
+};

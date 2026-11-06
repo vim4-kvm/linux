@@ -18,6 +18,7 @@ unsigned int mpeg12_reference_timestamps(const struct v4l2_ctrl_mpeg2_picture *p
 					 bool pair, u64 refs[2]);
 int mpeg12_reference_registers(const u64 refs[2], const u32 specs[2],
 			       unsigned int count, u32 *ref0, u32 *ref1);
+
 #endif
 
 /* Scratch register meanings for the mpeg12_multi microcode (vmpeg12_multi.c). */
@@ -65,5 +66,7 @@ void aml_mpeg12_prepare(void *priv);
 void aml_mpeg12_finish(void *priv);
 void aml_mpeg12_exit(void *priv);
 int aml_mpeg12_dec_run(void *priv);
+
+extern const struct aml_vdec_reset_profile aml_mpeg12_reset_profile;
 
 #endif
