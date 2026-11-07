@@ -1329,6 +1329,7 @@ static const struct regmap_config dos_regmap_conf = {
 	.val_bits = 32,
 	.reg_stride = 4,
 	.max_register = 0x10000,
+	.disable_debugfs = true,
 };
 
 static const struct regmap_config dmc_regmap_conf = {
@@ -1336,6 +1337,7 @@ static const struct regmap_config dmc_regmap_conf = {
 	.val_bits = 32,
 	.reg_stride = 4,
 	.max_register = 0x20,
+	.disable_debugfs = true,
 };
 
 int dev_request_hw_resources(void *priv)
@@ -1391,10 +1393,19 @@ int dev_request_hw_resources(void *priv)
 			dev_err(&pdev->dev, "of_address_to_resource %d failed\n", i);
 			return -EINVAL;
 		}
-		reg_base[i] = devm_ioremap_resource(&pdev->dev, &res);
-
-		if (IS_ERR(reg_base[i]))
-			return PTR_ERR(reg_base[i]);
+		if (hw->has_dbus_ctrl) {
+			/*
+			 * T7 shares this DOS window with the JPEG encoder. The
+			 * runtime DOS lease serializes access to the hardware.
+			 */
+			reg_base[i] = devm_ioremap(&pdev->dev, res.start, resource_size(&res));
+			if (!reg_base[i])
+				return -ENOMEM;
+		} else {
+			reg_base[i] = devm_ioremap_resource(&pdev->dev, &res);
+			if (IS_ERR(reg_base[i]))
+				return PTR_ERR(reg_base[i]);
+		}
 
 		if (i == DOS_BUS) {
 			hw->map[i] = devm_regmap_init_mmio(&pdev->dev, reg_base[i],
