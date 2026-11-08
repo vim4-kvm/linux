@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR MIT)
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 
 #include "hevc_headers.h"
@@ -59,13 +60,145 @@ static void h265_skip(struct h265_bits *b, unsigned int bits)
 	}
 }
 
-static int h265_sps(struct h265_headers *headers, struct h265_bits *b)
+static int h265_st_rps(struct h265_bits *b, const struct h265_sps_prefix *sps,
+		       unsigned int index, struct h265_st_rps *rps)
 {
-	struct h265_sps_prefix sps = { .valid = true };
-	bool profile[7], level[7];
-	u32 id, chroma, sublayers, i, first;
+	u32 i, count;
 
-	h265_u(b, 4);
+	memset(rps, 0, sizeof(*rps));
+	if (index && h265_u(b, 1)) {
+		const struct h265_st_rps *ref;
+		u32 back = 1;
+		s32 delta;
+		bool sign;
+
+		if (index == sps->num_short_term_ref_pic_sets)
+			back += h265_ue(b);
+		if (!back || back > index)
+			return -EINVAL;
+		ref = &sps->st_rps[index - back];
+		sign = h265_u(b, 1);
+		count = h265_ue(b);
+		if (count > 32767)
+			return -EINVAL;
+		delta = sign ? -(s32)(count + 1) : count + 1;
+		for (i = 0; i <= ref->num_delta_pocs; i++) {
+			bool used = h265_u(b, 1);
+			bool retain = used || h265_u(b, 1);
+			s32 poc = delta + (i < ref->num_delta_pocs ? ref->delta_poc[i] : 0);
+			u32 j, n = rps->num_delta_pocs;
+
+			if (!retain || !poc)
+				continue;
+			if (n == H265_HEADER_REFS)
+				return -EINVAL;
+			/* S0 is decreasing negative POC; S1 is increasing positive POC. */
+			for (j = 0; j < n; j++) {
+				s32 old = rps->delta_poc[j];
+
+				if ((poc < 0 && (old > 0 || poc > old)) ||
+				    (poc > 0 && old > 0 && poc < old))
+					break;
+			}
+			memmove(&rps->delta_poc[j + 1], &rps->delta_poc[j],
+				(n - j) * sizeof(poc));
+			rps->delta_poc[j] = poc;
+			rps->used = (rps->used & (BIT(j) - 1)) |
+				((rps->used & ~(BIT(j) - 1)) << 1) | (used ? BIT(j) : 0);
+			rps->num_delta_pocs++;
+			if (poc < 0)
+				rps->num_negative_pics++;
+			else
+				rps->num_positive_pics++;
+		}
+	} else {
+		u32 negative = h265_ue(b), positive = h265_ue(b);
+		s32 delta = 0;
+
+		if (negative > H265_HEADER_REFS || positive > H265_HEADER_REFS - negative)
+			return -EINVAL;
+		rps->num_negative_pics = negative;
+		rps->num_positive_pics = positive;
+		rps->num_delta_pocs = negative + positive;
+		for (i = 0; i < negative + positive; i++) {
+			u32 step = h265_ue(b);
+
+			if (step > 32767)
+				return -EINVAL;
+			if (i == negative)
+				delta = 0;
+			delta += i < negative ? -(s32)(step + 1) : step + 1;
+			rps->delta_poc[i] = delta;
+			if (h265_u(b, 1))
+				rps->used |= BIT(i);
+		}
+	}
+	return b->error ? -EINVAL : 0;
+}
+
+static void h265_scaling_list(struct h265_bits *b)
+{
+	u32 size, matrix, i;
+
+	for (size = 0; size < 4 && !b->error; size++)
+		for (matrix = 0; matrix < 6; matrix += size == 3 ? 3 : 1) {
+			if (!h265_u(b, 1)) {
+				h265_ue(b);
+				continue;
+			}
+			if (size > 1)
+				h265_ue(b); /* scaling_list_dc_coef_minus8, se(v) */
+			for (i = 0; i < min(64U, 1U << (4 + 2 * size)); i++)
+				h265_ue(b); /* scaling_list_delta_coef, se(v) */
+		}
+}
+
+static int h265_sps_rps(struct h265_sps_prefix *sps, struct h265_bits *b)
+{
+	u32 min_cb = h265_ue(b), diff_cb = h265_ue(b), count, i;
+
+	if (min_cb > 3 || diff_cb > 3 || min_cb + diff_cb > 3)
+		return -EINVAL;
+	sps->log2_ctb_size = min_cb + diff_cb + 3;
+	for (i = 0; i < 4; i++)
+		h265_ue(b); /* transform sizes and hierarchy depths */
+	if (h265_u(b, 1) && h265_u(b, 1))
+		h265_scaling_list(b);
+	h265_skip(b, 2); /* amp_enabled_flag, sample_adaptive_offset_enabled_flag */
+	if (h265_u(b, 1)) {
+		h265_skip(b, 8); /* pcm_sample_bit_depth_luma/chroma_minus1 */
+		h265_ue(b);
+		h265_ue(b);
+		h265_u(b, 1);
+	}
+	count = h265_ue(b);
+	if (count > H265_ST_RPS_SETS)
+		return -EINVAL;
+	sps->num_short_term_ref_pic_sets = count;
+	for (i = 0; i < count; i++)
+		if (h265_st_rps(b, sps, i, &sps->st_rps[i]))
+			return -EINVAL;
+	sps->long_term_ref_pics_present = h265_u(b, 1);
+	if (sps->long_term_ref_pics_present) {
+		count = h265_ue(b);
+		if (count > ARRAY_SIZE(sps->lt_poc_lsb))
+			return -EINVAL;
+		sps->num_long_term_ref_pics_sps = count;
+		for (i = 0; i < count; i++) {
+			sps->lt_poc_lsb[i] = h265_u(b, sps->log2_max_pic_order_cnt_lsb);
+			if (h265_u(b, 1))
+				sps->lt_used |= BIT(i);
+		}
+	}
+	return b->error ? -EINVAL : 0;
+}
+
+static int h265_sps_prefix(struct h265_sps_prefix *sps, struct h265_bits *b, u32 *id)
+{
+	bool profile[7], level[7];
+	u32 chroma, sublayers, i, first, poc_bits;
+
+	sps->vps_id = h265_u(b, 4);
 	sublayers = h265_u(b, 3);
 	h265_u(b, 1);
 	if (sublayers > 6)
@@ -83,34 +216,52 @@ static int h265_sps(struct h265_headers *headers, struct h265_bits *b)
 		if (level[i])
 			h265_skip(b, 8);
 	}
-	id = h265_ue(b);
+	*id = h265_ue(b);
 	chroma = h265_ue(b);
-	if (id >= ARRAY_SIZE(headers->sps) || chroma > 3)
+	if (*id >= 16 || chroma > 3)
 		return -EINVAL;
 	if (chroma == 3)
-		h265_u(b, 1);
-	h265_ue(b);
-	h265_ue(b);
+		sps->separate_colour_plane = h265_u(b, 1);
+	sps->width = h265_ue(b);
+	sps->height = h265_ue(b);
 	if (h265_u(b, 1))
 		for (i = 0; i < 4; i++)
 			h265_ue(b);
 	h265_ue(b);
 	h265_ue(b);
-	h265_ue(b);
+	poc_bits = h265_ue(b);
+	if (poc_bits > 12)
+		return -EINVAL;
+	sps->log2_max_pic_order_cnt_lsb = poc_bits + 4;
 	first = h265_u(b, 1) ? 0 : sublayers;
 	for (i = first; i <= sublayers; i++) {
 		u32 buffering = h265_ue(b);
 
-		sps.limits.max_dec_pic_buffering = buffering + 1;
-		sps.limits.max_num_reorder_pics = h265_ue(b);
-		sps.limits.max_latency_increase_plus1 = h265_ue(b);
-		if (buffering > 15 || sps.limits.max_num_reorder_pics > buffering)
+		sps->limits.max_dec_pic_buffering = buffering + 1;
+		sps->limits.max_num_reorder_pics = h265_ue(b);
+		sps->limits.max_latency_increase_plus1 = h265_ue(b);
+		if (buffering > 15 || sps->limits.max_num_reorder_pics > buffering)
 			return -EINVAL;
 	}
-	if (b->error)
-		return -EINVAL;
-	headers->sps[id] = sps;
-	return 0;
+	return h265_sps_rps(sps, b);
+}
+
+static int h265_sps(struct h265_headers *headers, struct h265_bits *b)
+{
+	struct h265_sps_prefix *sps;
+	u32 id;
+	int ret;
+
+	sps = kzalloc_obj(*sps);
+	if (!sps)
+		return -ENOMEM;
+	ret = h265_sps_prefix(sps, b, &id);
+	if (!ret) {
+		sps->valid = true;
+		headers->sps[id] = *sps;
+	}
+	kfree(sps);
+	return ret;
 }
 
 static int h265_pps(struct h265_headers *headers, struct h265_bits *b)
@@ -124,6 +275,17 @@ static int h265_pps(struct h265_headers *headers, struct h265_bits *b)
 	h265_u(b, 1); /* dependent_slice_segments_enabled_flag */
 	pps.output_flag_present = h265_u(b, 1);
 	pps.extra_slice_header_bits = h265_u(b, 3);
+	h265_skip(b, 2); /* sign_data_hiding_enabled_flag, cabac_init_present_flag */
+	h265_ue(b); /* num_ref_idx_l0_default_active_minus1 */
+	h265_ue(b); /* num_ref_idx_l1_default_active_minus1 */
+	h265_ue(b); /* init_qp_minus26, se(v) */
+	h265_skip(b, 2); /* constrained_intra_pred_flag, transform_skip_enabled_flag */
+	if (h265_u(b, 1))
+		h265_ue(b); /* diff_cu_qp_delta_depth */
+	h265_ue(b); /* pps_cb_qp_offset, se(v) */
+	h265_ue(b); /* pps_cr_qp_offset, se(v) */
+	h265_skip(b, 5); /* chroma offsets, weighted pred/bipred, transquant, tiles */
+	pps.entropy_coding_sync_enabled = h265_u(b, 1);
 	if (b->error)
 		return -EINVAL;
 	headers->pps[id] = pps;

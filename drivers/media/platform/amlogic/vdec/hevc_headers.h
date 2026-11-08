@@ -10,8 +10,28 @@ struct h265_output_limits {
 	u32 max_latency_increase_plus1;
 };
 
+#define H265_HEADER_REFS 16
+#define H265_ST_RPS_SETS 64
+
+struct h265_st_rps {
+	u8 num_negative_pics, num_positive_pics, num_delta_pocs;
+	u16 used;
+	s32 delta_poc[H265_HEADER_REFS];
+};
+
 struct h265_sps_prefix {
 	bool valid;
+	u8 vps_id;
+	u8 log2_max_pic_order_cnt_lsb;
+	u8 log2_ctb_size;
+	u32 width, height;
+	bool separate_colour_plane;
+	u8 num_short_term_ref_pic_sets;
+	struct h265_st_rps st_rps[H265_ST_RPS_SETS];
+	bool long_term_ref_pics_present;
+	u8 num_long_term_ref_pics_sps;
+	u16 lt_poc_lsb[32];
+	u32 lt_used;
 	struct h265_output_limits limits;
 };
 
@@ -20,6 +40,7 @@ struct h265_pps_prefix {
 	u8 sps_id;
 	u8 extra_slice_header_bits;
 	bool output_flag_present;
+	bool entropy_coding_sync_enabled;
 };
 
 struct h265_headers {

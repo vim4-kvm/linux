@@ -3,20 +3,14 @@
 
 #include "hevc_headers.h"
 
-/* SPS/PPS and slice prefixes from OPFLAG_B_Qualcomm_1. */
-static const u8 opflag_params[] = {
-	0, 0, 0, 1, 0x42, 1, 1, 1, 0x60, 0, 0, 3, 0, 0, 3, 0,
-	0, 3, 0, 0, 3, 0, 0x5d, 0xa0, 6, 0x82, 1, 0xe1, 0xfe, 0x5f,
-	0x92, 0x46, 0xd9, 0xed, 0x90,
-	0, 0, 1, 0x44, 1, 0xd1, 0x90, 0x95, 0x81, 0x12,
-};
+#include "hevc_headers_kunit_data.h"
 
 static void output_flags_and_parameter_replacement(struct kunit *test)
 {
 	static const u8 hidden[] = { 0, 0, 1, 2, 1, 0xd8, 0x9e };
 	static const u8 idr[] = { 0, 0, 1, 0x26, 1, 0xaf, 0x8c };
 	/* Replace PPS0 with output_flag_present_flag=0, then the same I prefix. */
-	static const u8 replace[] = { 0, 0, 1, 0x44, 1, 0xc0,
+	static const u8 replace[] = { 0, 0, 1, 0x44, 1, 0xc1, 0x90, 0x95, 0x81, 0x12,
 		0, 0, 1, 0x26, 1, 0xae };
 	struct h265_headers *headers = kunit_kzalloc(test, sizeof(*headers), GFP_KERNEL);
 	struct h265_au_info au;
@@ -38,11 +32,6 @@ static void output_flags_and_parameter_replacement(struct kunit *test)
 static void highest_sublayer_limits_and_cvs_markers(struct kunit *test)
 {
 	/* BUMPING_A SPS: four sublayers, reorder 0/1/2/4, buffering 6. */
-	static const u8 sps[] = {
-		0, 0, 1, 0x42, 1, 6, 1, 0x60, 0, 0, 3, 0, 0x80, 0, 0, 3, 0, 0,
-		3, 0, 0x5a, 0, 0, 0xa0, 0x0d, 8, 0x0f, 0x16, 0x59, 0xb3,
-		0x29, 0x9c, 0xc5, 0xc9, 0x69, 0x17, 0x20, 0x0f, 0xe1, 0, 0x82,
-	};
 	static const u8 boundary[] = {
 		0, 0, 1, 0x48, 1, 0x80, /* EOS before first VCL */
 		0, 0, 1, 0x28, 1, 0xae,
@@ -53,7 +42,8 @@ static void highest_sublayer_limits_and_cvs_markers(struct kunit *test)
 	struct h265_au_info au;
 
 	KUNIT_ASSERT_NOT_NULL(test, headers);
-	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, sps, sizeof(sps), &au), 0);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, bumping_params,
+						    sizeof(bumping_params), &au), 0);
 	KUNIT_EXPECT_EQ(test, headers->sps[0].limits.max_dec_pic_buffering, 6U);
 	KUNIT_EXPECT_EQ(test, headers->sps[0].limits.max_num_reorder_pics, 4U);
 	KUNIT_EXPECT_EQ(test, headers->sps[0].limits.max_latency_increase_plus1, 0U);
@@ -138,7 +128,42 @@ static void reserved_vcl_nals_leave_main_picture_intact(struct kunit *test)
 	}
 }
 
+static void sps_reference_tables_and_wavefront_geometry(struct kunit *test)
+{
+	struct h265_headers *headers = kunit_kzalloc(test, sizeof(*headers), GFP_KERNEL);
+	struct h265_au_info au;
+	const struct h265_sps_prefix *sps;
+
+	KUNIT_ASSERT_NOT_NULL(test, headers);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, ltrpsps_params,
+						    sizeof(ltrpsps_params), &au), 0);
+	sps = &headers->sps[0];
+	KUNIT_ASSERT_TRUE(test, sps->valid);
+	KUNIT_EXPECT_EQ(test, sps->width, 416U);
+	KUNIT_EXPECT_EQ(test, sps->log2_ctb_size, 6);
+	KUNIT_EXPECT_EQ(test, sps->num_short_term_ref_pic_sets, 12);
+	KUNIT_EXPECT_EQ(test, sps->st_rps[0].num_delta_pocs, 4);
+	KUNIT_EXPECT_EQ(test, sps->st_rps[0].delta_poc[0], -8);
+	KUNIT_EXPECT_EQ(test, sps->st_rps[0].delta_poc[3], -16);
+	KUNIT_EXPECT_EQ(test, sps->st_rps[11].num_delta_pocs, 0);
+	KUNIT_EXPECT_EQ(test, sps->num_long_term_ref_pics_sps, 8);
+	KUNIT_EXPECT_EQ(test, sps->lt_used, 0xc6U);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, wpp_params,
+						    sizeof(wpp_params), &au), 0);
+	KUNIT_EXPECT_EQ(test, headers->sps[0].width, 64U);
+	KUNIT_EXPECT_EQ(test, headers->sps[0].log2_ctb_size, 6);
+	KUNIT_EXPECT_TRUE(test, headers->pps[0].entropy_coding_sync_enabled);
+	/* A truncated replacement must retain the previous complete SPS. */
+	KUNIT_EXPECT_EQ(test, h265_headers_parse_au(headers, ltrpsps_params, 28, &au),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, headers->sps[0].width, 64U);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, rpsd_params,
+						    sizeof(rpsd_params), &au), 0);
+	KUNIT_EXPECT_EQ(test, headers->sps[0].log2_max_pic_order_cnt_lsb, 8);
+}
+
 static struct kunit_case hevc_headers_cases[] = {
+	KUNIT_CASE(sps_reference_tables_and_wavefront_geometry),
 	KUNIT_CASE(output_flags_and_parameter_replacement),
 	KUNIT_CASE(highest_sublayer_limits_and_cvs_markers),
 	KUNIT_CASE(malformed_headers_do_not_install_partial_parameters),
