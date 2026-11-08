@@ -75,6 +75,7 @@ struct h265_picture_header {
 
 struct h265_au_info {
 	bool has_picture;
+	bool reorder_parameter_sets;
 	bool cvs_boundary_before;
 	bool cvs_boundary_after;
 	struct h265_picture_header picture;
@@ -82,5 +83,8 @@ struct h265_au_info {
 
 int h265_headers_parse_au(struct h265_headers *headers, const u8 *data, size_t size,
 			  struct h265_au_info *au);
+
+/* Copy an AU into a size-byte destination, optionally sorting its prefix PS. */
+int h265_headers_copy_au(u8 *dst, const u8 *data, size_t size, bool reorder);
 
 #endif
