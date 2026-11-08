@@ -188,7 +188,8 @@ struct h265_dpb {
 };
 
 int h265_pic_by_poc(struct h265_dpb *h, int poc, bool ref_only);
-int h265_resolve_rps(const struct h265_dpb *h, struct h265_resolved_rps *resolved);
+int h265_resolve_rps(const struct h265_dpb *h, const struct h265_slice_rps *slice,
+		     struct h265_resolved_rps *resolved);
 bool h265_rps_matches(const struct h265_resolved_rps *resolved, const u16 *words);
 void h265_apply_rps(struct h265_dpb *h, const struct h265_resolved_rps *resolved);
 int h265_set_ref_lists(struct h265_dpb *h, const struct h265_resolved_rps *resolved);

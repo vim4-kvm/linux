@@ -292,12 +292,73 @@ static int h265_pps(struct h265_headers *headers, struct h265_bits *b)
 	return 0;
 }
 
+static int h265_slice_rps(struct h265_bits *b, const struct h265_sps_prefix *sps,
+			  struct h265_slice_rps *rps)
+{
+	u32 i, count, n_sps = 0, cycle = 0;
+
+	rps->poc_bits = sps->log2_max_pic_order_cnt_lsb;
+	rps->poc_lsb = h265_u(b, rps->poc_bits);
+	rps->st_from_sps = h265_u(b, 1);
+	count = sps->num_short_term_ref_pic_sets;
+	if (rps->st_from_sps) {
+		u32 index = count > 1 ? h265_u(b, fls(count - 1)) : 0;
+
+		if (!count || index >= count)
+			return -EINVAL;
+		rps->st_index = index;
+		rps->st = sps->st_rps[index];
+	} else if (h265_st_rps(b, sps, count, &rps->st)) {
+		return -EINVAL;
+	}
+	if (!sps->long_term_ref_pics_present)
+		return b->error ? -EINVAL : 0;
+	if (sps->num_long_term_ref_pics_sps)
+		n_sps = h265_ue(b);
+	count = h265_ue(b);
+	if (n_sps > sps->num_long_term_ref_pics_sps || n_sps > H265_HEADER_REFS ||
+	    count > H265_HEADER_REFS - n_sps)
+		return -EINVAL;
+	rps->num_long_term_sps = n_sps;
+	rps->num_long_term_pics = count;
+	for (i = 0; i < n_sps + count; i++) {
+		struct h265_lt_ref *lt = &rps->lt[i];
+
+		lt->from_sps = i < n_sps;
+		if (lt->from_sps) {
+			u32 n = sps->num_long_term_ref_pics_sps;
+			u32 index = n > 1 ? h265_u(b, fls(n - 1)) : 0;
+
+			if (index >= n)
+				return -EINVAL;
+			lt->sps_index = index;
+			lt->poc_lsb = sps->lt_poc_lsb[index];
+			lt->used = sps->lt_used & BIT(index);
+		} else {
+			lt->poc_lsb = h265_u(b, rps->poc_bits);
+			lt->used = h265_u(b, 1);
+		}
+		lt->msb_present = h265_u(b, 1);
+		if (lt->msb_present)
+			lt->delta_cycle = h265_ue(b);
+		/* H.265 7-52 starts a new accumulation at each source group. */
+		if (!i || i == n_sps)
+			cycle = 0;
+		if (lt->delta_cycle > U32_MAX - cycle)
+			return -EINVAL;
+		cycle += lt->delta_cycle;
+		lt->cycle = cycle;
+	}
+	return b->error ? -EINVAL : 0;
+}
+
 static int h265_slice(const struct h265_headers *headers, struct h265_bits *b,
 		      u8 type, u8 temporal_id, struct h265_au_info *au)
 {
 	struct h265_picture_header pic = { .nal_type = type, .temporal_id = temporal_id,
 		.pic_output = true };
 	const struct h265_pps_prefix *pps;
+	const struct h265_sps_prefix *sps;
 	u32 id;
 
 	if (!h265_u(b, 1))
@@ -312,6 +373,7 @@ static int h265_slice(const struct h265_headers *headers, struct h265_bits *b,
 	pps = &headers->pps[id];
 	if (!headers->sps[pps->sps_id].valid)
 		return -EINVAL;
+	sps = &headers->sps[pps->sps_id];
 	pic.pps_id = id;
 	pic.limits = headers->sps[pps->sps_id].limits;
 	h265_skip(b, pps->extra_slice_header_bits);
@@ -319,6 +381,10 @@ static int h265_slice(const struct h265_headers *headers, struct h265_bits *b,
 		return -EINVAL;
 	if (pps->output_flag_present)
 		pic.pic_output = h265_u(b, 1);
+	if (sps->separate_colour_plane)
+		h265_u(b, 2);
+	if (type != 19 && type != 20 && h265_slice_rps(b, sps, &pic.rps))
+		return -EINVAL;
 	if (b->error)
 		return -EINVAL;
 	au->picture = pic;
