@@ -153,7 +153,7 @@ static int stateful_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selectio
 	return ret;
 }
 
-static void stateful_source_change(struct aml_vdec_ctx *ctx)
+static void stateful_config_change(struct aml_vdec_ctx *ctx)
 {
 	struct aml_vdec_stateful_ctx *s = aml_vdec_stateful(ctx);
 	struct aml_vdec_stream_info info;
@@ -236,8 +236,8 @@ static void stateful_buffered_device_run(struct aml_vdec_ctx *ctx)
 	ret = ctx->node->stateful_ops->submit(ctx, src, dst, &result);
 	if (ret < 0)
 		goto error;
-	if (result.format_changed) {
-		stateful_source_change(ctx);
+	if (result.config_changed) {
+		stateful_config_change(ctx);
 		goto finish;
 	}
 	stateful_consume_source(ctx, &result);
