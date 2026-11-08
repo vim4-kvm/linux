@@ -246,7 +246,7 @@ const struct aml_dev_platform_data aml_vdec_s4_pdata = {
 
 /*
  * T7 uses the H264 frame protocol with secure firmware instead of S4's raw
- * firmware and DMC isolation. The restricted experiment is opt-in at probe.
+ * firmware and DMC isolation.
  */
 const struct aml_dev_platform_data aml_vdec_t7_pdata = {
 	.nodes = aml_t7_nodes,
