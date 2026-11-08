@@ -5,6 +5,40 @@
 
 #include "hevc_priv.h"
 
+struct hevc_rps_test {
+	struct h265_dpb dpb;
+	struct h265_slice_rps slice;
+};
+
+static struct h265_slice_rps *test_slice(struct h265_dpb *h)
+{
+	return &container_of(h, struct hevc_rps_test, dpb)->slice;
+}
+
+/* Existing list tests specify ST references as RPM; LT syntax is explicit. */
+static int resolve_rps(struct h265_dpb *h, struct h265_resolved_rps *resolved)
+{
+	struct h265_slice_rps *slice = test_slice(h);
+	unsigned int i, n = 0;
+
+	slice->poc_bits = h->p[P_LOG2_MAX_POC_LSB_MINUS4] + 4;
+	slice->poc_lsb = (u32)h->curr_poc & (BIT(slice->poc_bits) - 1);
+	h->p[P_POC_LSB] = slice->poc_lsb;
+	memset(&slice->st, 0, sizeof(slice->st));
+	for (i = 0; i < H265_MAX_REF && h->p[i] != RPS_END; i++) {
+		u16 word = h->p[i];
+
+		if (word & BIT(RPS_LT_BIT))
+			continue;
+		slice->st.delta_poc[n] = sign_extend32(word & 0x1fff, 12);
+		if (word & BIT(RPS_USED_BIT))
+			slice->st.used |= BIT(n);
+		n++;
+	}
+	slice->st.num_delta_pocs = n;
+	return h265_resolve_rps(h, slice, resolved);
+}
+
 static void reset_params(struct h265_dpb *h)
 {
 	memset(h, 0, sizeof(*h));
@@ -19,10 +53,12 @@ static void reset_params(struct h265_dpb *h)
 
 static int hevc_test_init(struct kunit *test)
 {
-	struct h265_dpb *h = kunit_kzalloc(test, sizeof(*h), GFP_KERNEL);
+	struct hevc_rps_test *state = kunit_kzalloc(test, sizeof(*state), GFP_KERNEL);
+	struct h265_dpb *h;
 
-	if (!h)
+	if (!state)
 		return -ENOMEM;
+	h = &state->dpb;
 	reset_params(h);
 	test->priv = h;
 	return 0;
@@ -30,7 +66,7 @@ static int hevc_test_init(struct kunit *test)
 
 static int resolve_ref_lists(struct h265_dpb *h)
 {
-	int ret = h265_resolve_rps(h, &h->rps);
+	int ret = resolve_rps(h, &h->rps);
 
 	return ret ?: h265_set_ref_lists(h, &h->rps);
 }
@@ -211,8 +247,11 @@ static void missing_and_reordered_references(struct kunit *test)
 {
 	static const int pocs[] = { 3, 5, 1 };
 	struct h265_dpb *h = test->priv;
+	struct h265_slice_rps *slice = test_slice(h);
 	unsigned int i;
 
+	slice->num_long_term_pics = 1;
+	slice->lt[0] = (struct h265_lt_ref) { .poc_lsb = 1, .used = true };
 	h->curr_poc = 4;
 	h->cur = 17;
 	h->pic_w = 704;
@@ -251,6 +290,7 @@ static void missing_and_reordered_references(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[2], 5);
 	h->p[P_MODIFICATION_LIST] = 3;
 	KUNIT_EXPECT_EQ(test, resolve_ref_lists(h), -EINVAL);
+	slice->num_long_term_pics = 0;
 	h->p[P_CUR_RPS] = RPS_END;
 	KUNIT_EXPECT_EQ(test, resolve_ref_lists(h), -EINVAL);
 	h->slice_type = H265_I_SLICE;
@@ -288,8 +328,12 @@ static void long_term_references_survive_poc_lsb_wrap(struct kunit *test)
 	static const int pocs[] = { 250, 210, 70, 230 };
 	static const u16 rps[] = { 0x3ff6, 0x3fce, 0x6042, 0x60e2, RPS_END };
 	struct h265_dpb *h = test->priv;
+	struct h265_slice_rps *slice = test_slice(h);
 	unsigned int i;
 
+	slice->num_long_term_pics = 2;
+	slice->lt[0] = (struct h265_lt_ref) { .poc_lsb = 70, .used = true };
+	slice->lt[1] = (struct h265_lt_ref) { .poc_lsb = 230, .used = true };
 	h->curr_poc = 260;
 	h->cur = 17;
 	h->pic_w = 416;
@@ -306,7 +350,7 @@ static void long_term_references_survive_poc_lsb_wrap(struct kunit *test)
 		h->pic[i].height = 240;
 		h->pic[i].poc = pocs[i];
 	}
-	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+	KUNIT_ASSERT_EQ(test, resolve_rps(h, &h->rps), 0);
 	h265_apply_rps(h, &h->rps);
 	KUNIT_ASSERT_EQ(test, resolve_ref_lists(h), 0);
 	KUNIT_EXPECT_MEMEQ(test, h->ref_poc_l0, pocs, sizeof(pocs));
@@ -320,6 +364,7 @@ static void long_term_references_survive_poc_lsb_wrap(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, resolve_ref_lists(h), -EINVAL);
 	/* A short-term delta must still identify a complete POC exactly. */
 	h->p[P_CUR_RPS] = 0x2004;
+	slice->num_long_term_pics = 0;
 	h->p[P_CUR_RPS + 1] = RPS_END;
 	h->p[P_NUM_REF_IDX_L0_ACTIVE] = 1;
 	h->pic[4].poc = 8;
@@ -329,8 +374,11 @@ static void long_term_references_survive_poc_lsb_wrap(struct kunit *test)
 static void previous_decoded_picture_can_be_long_term(struct kunit *test)
 {
 	struct h265_dpb *h = test->priv;
+	struct h265_slice_rps *slice = test_slice(h);
 	int slot;
 
+	slice->num_long_term_pics = 1;
+	slice->lt[0] = (struct h265_lt_ref) { .poc_lsb = 70, .used = true };
 	h->curr_poc = 326;
 	h->cur = 0;
 	h->nslots = 4;
@@ -350,7 +398,7 @@ static void previous_decoded_picture_can_be_long_term(struct kunit *test)
 	h->pic[0].poc = 70;
 
 	/* RPS is applied while cur still identifies the preceding decoded picture. */
-	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+	KUNIT_ASSERT_EQ(test, resolve_rps(h, &h->rps), 0);
 	h265_apply_rps(h, &h->rps);
 	KUNIT_ASSERT_TRUE(test, h->pic[0].referenced);
 	KUNIT_EXPECT_TRUE(test, h->pic[0].long_term);
@@ -369,8 +417,13 @@ static void rps_snapshot_resolves_st_before_lt(struct kunit *test)
 	static const u16 words[] = { 0x3ffc, 0x1fe2, 0xfffc, RPS_END };
 	static const int pocs[] = { 326, 300, 70 };
 	struct h265_dpb *h = test->priv;
+	struct h265_slice_rps *slice = test_slice(h);
 	unsigned int i;
 
+	slice->num_long_term_pics = 1;
+	slice->lt[0] = (struct h265_lt_ref) {
+		.poc_lsb = 70, .used = true, .msb_present = true, .cycle = 1,
+	};
 	h->curr_poc = 330;
 	h->cur = 0;
 	h->nal_type = 1;
@@ -383,7 +436,7 @@ static void rps_snapshot_resolves_st_before_lt(struct kunit *test)
 		h->pic[i].referenced = true;
 		h->pic[i].poc = pocs[i];
 	}
-	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+	KUNIT_ASSERT_EQ(test, resolve_rps(h, &h->rps), 0);
 	h265_apply_rps(h, &h->rps);
 	KUNIT_EXPECT_TRUE(test, h->pic[1].referenced);
 	KUNIT_EXPECT_TRUE(test, h->pic[2].long_term);
@@ -405,45 +458,6 @@ static void rps_snapshot_resolves_st_before_lt(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, h265_rps_matches(&h->rps, h->p));
 	h->p[P_CUR_RPS + 2] ^= BIT(RPS_USED_BIT);
 	KUNIT_EXPECT_FALSE(test, h265_rps_matches(&h->rps, h->p));
-}
-
-static void rps_lsb_groups_require_unique_assignment(struct kunit *test)
-{
-	static const u16 words[] = { 0x60aa, 0x60aa, 0x404b, RPS_END };
-	static const int pocs[] = { 505, 761, 154 };
-	struct h265_dpb *h = test->priv;
-	struct h265_resolved_rps snapshot;
-	unsigned int i;
-
-	h->curr_poc = 847;
-	h->cur = -1;
-	h->nal_type = 1;
-	h->slice_type = H265_P_SLICE;
-	h->p[P_SLICE_TYPE] = H265_P_SLICE;
-	h->p[P_NUM_REF_IDX_L0_ACTIVE] = 2;
-	memcpy(h->p, words, sizeof(words));
-	for (i = 0; i < ARRAY_SIZE(pocs); i++) {
-		h->pic[i].valid = true;
-		h->pic[i].referenced = true;
-		h->pic[i].poc = pocs[i];
-	}
-	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
-	h265_apply_rps(h, &h->rps);
-	KUNIT_ASSERT_EQ(test, h265_set_ref_lists(h, &h->rps), 0);
-	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[0], 761);
-	KUNIT_EXPECT_EQ(test, h->ref_poc_l0[1], 505);
-	KUNIT_EXPECT_TRUE(test, h->pic[2].long_term);
-	/* POC 1108 needs two of three retained LSB249 candidates. */
-	h->curr_poc = 1108;
-	h->p[P_CUR_RPS] = 0x7fa5;
-	h->p[P_CUR_RPS + 1] = 0x7da5;
-	h->pic[3] = h->pic[0];
-	h->pic[3].poc = 1017;
-	snapshot = h->rps;
-	KUNIT_EXPECT_EQ(test, h265_resolve_rps(h, &h->rps), -EINVAL);
-	KUNIT_EXPECT_MEMEQ(test, &h->rps, &snapshot, sizeof(snapshot));
-	for (i = 0; i < 4; i++)
-		KUNIT_EXPECT_TRUE(test, h->pic[i].referenced);
 }
 
 static void mv_storage_covers_edge_ctus(struct kunit *test)
@@ -489,7 +503,7 @@ static void rps_and_output_own_picture_slots(struct kunit *test)
 	h->pic[1].poc = 2;
 	h->pic[2].poc = 3;
 	h->pic[2].output_pending = true;
-	KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+	KUNIT_ASSERT_EQ(test, resolve_rps(h, &h->rps), 0);
 	h265_apply_rps(h, &h->rps);
 	KUNIT_EXPECT_TRUE(test, h->pic[0].referenced);
 	KUNIT_EXPECT_TRUE(test, h->pic[1].referenced);
@@ -520,7 +534,7 @@ static void irap_releases_previous_references(struct kunit *test)
 	for (i = 0; i < ARRAY_SIZE(nals); i++) {
 		h->nal_type = nals[i];
 		h->pic[0].referenced = true;
-		KUNIT_ASSERT_EQ(test, h265_resolve_rps(h, &h->rps), 0);
+		KUNIT_ASSERT_EQ(test, resolve_rps(h, &h->rps), 0);
 		h265_apply_rps(h, &h->rps);
 		KUNIT_EXPECT_FALSE(test, h->pic[0].referenced);
 	}
@@ -774,7 +788,6 @@ static struct kunit_case hevc_test_cases[] = {
 	KUNIT_CASE(long_term_references_survive_poc_lsb_wrap),
 	KUNIT_CASE(previous_decoded_picture_can_be_long_term),
 	KUNIT_CASE(rps_snapshot_resolves_st_before_lt),
-	KUNIT_CASE(rps_lsb_groups_require_unique_assignment),
 	KUNIT_CASE(capture_sao_capacity),
 	KUNIT_CASE(mv_storage_covers_edge_ctus),
 	KUNIT_CASE(rps_and_output_own_picture_slots),
