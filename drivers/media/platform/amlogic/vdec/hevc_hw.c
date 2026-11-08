@@ -1204,6 +1204,14 @@ int h265_hw_run(struct aml_hevc_ctx *h, const void *data, size_t size)
 	wr(hw, H265_DECODE_SIZE, h->payload);
 	if (h->configured)
 		h265_config_pic_list(h);
+	/* Firmware may reuse SCRATCH8; publish the saved overlay for every run. */
+	if (hw->hevc.fw_swap) {
+		ret = regmap_write(hw->map[DOS_BUS], HEVC_STREAM_SWAP_BUFFER2,
+				   hw->hevc.fw_swap_addr);
+		if (ret)
+			return ret;
+	}
+
 	/*
 	 * amhevc_start() uses three readbacks before and after CPU reset
 	 * to flush writes and provide a settling delay.
