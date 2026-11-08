@@ -1204,6 +1204,9 @@ int h265_hw_run(struct aml_hevc_ctx *h, const void *data, size_t size)
 	wr(hw, H265_DECODE_SIZE, h->payload);
 	if (h->configured)
 		h265_config_pic_list(h);
+	dev_dbg(hw->dev, "hevc: before-release swap=%08x saved_swap=%08x\n",
+		read_dos_reg(hw, HEVC_STREAM_SWAP_BUFFER2), hw->hevc.fw_swap_addr);
+
 	/*
 	 * amhevc_start() uses three readbacks before and after CPU reset
 	 * to flush writes and provide a settling delay.
@@ -1229,6 +1232,14 @@ int h265_hw_run(struct aml_hevc_ctx *h, const void *data, size_t size)
 			hw->hevc.irq_status, read_dos_reg(hw, HEVC_DEC_STATUS_REG),
 			read_dos_reg(hw, HEVC_MPC_E),
 			read_dos_reg(hw, HEVC_SHIFT_BYTE_COUNT));
+		dev_err(hw->dev,
+			"hevc: timeout swap=%08x imem_adr=%08x imem_count=%08x parser_lcu=%06x mpred_lcu=%08x slice_info=%08x\n",
+			read_dos_reg(hw, HEVC_STREAM_SWAP_BUFFER2),
+			read_dos_reg(hw, HEVC_IMEM_DMA_ADR),
+			read_dos_reg(hw, HEVC_IMEM_DMA_COUNT),
+			read_dos_reg(hw, HEVC_PARSER_LCU_START) & 0xffffff,
+			read_dos_reg(hw, HEVC_MPRED_CURR_LCU),
+			read_dos_reg(hw, HEVC_PARSER_SLICE_INFO));
 	}
 	return ret;
 }
