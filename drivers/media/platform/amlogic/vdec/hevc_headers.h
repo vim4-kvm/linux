@@ -73,7 +73,14 @@ struct h265_picture_header {
 	struct h265_slice_rps rps;
 };
 
+enum h265_unsupported_feature {
+	H265_UNSUPPORTED_NONE,
+	H265_UNSUPPORTED_SPS_LT,
+	H265_UNSUPPORTED_WPP_ONE_COLUMN,
+};
+
 struct h265_au_info {
+	enum h265_unsupported_feature unsupported;
 	bool has_picture;
 	bool cvs_boundary_before;
 	bool cvs_boundary_after;
