@@ -136,7 +136,7 @@ static void sps_reference_tables_and_wavefront_geometry(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, headers);
 	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, ltrpsps_params,
-						    sizeof(ltrpsps_params), &au), 0);
+						    sizeof(ltrpsps_params), &au), -EOPNOTSUPP);
 	sps = &headers->sps[0];
 	KUNIT_ASSERT_TRUE(test, sps->valid);
 	KUNIT_EXPECT_EQ(test, sps->width, 416U);
@@ -162,7 +162,93 @@ static void sps_reference_tables_and_wavefront_geometry(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, headers->sps[0].log2_max_pic_order_cnt_lsb, 8);
 }
 
+static void nonempty_sps_long_term_list_rejects_the_au(struct kunit *test)
+{
+	struct h265_headers *headers = kunit_kzalloc(test, sizeof(*headers), GFP_KERNEL);
+	u8 trailing_sps[sizeof(hang_lt0_idr) + sizeof(hang_lt1_sps)];
+	struct h265_au_info au;
+
+	KUNIT_ASSERT_NOT_NULL(test, headers);
+	/* Parameter-set-only AUs must be rejected before firmware parses the SPS. */
+	KUNIT_EXPECT_EQ(test, h265_headers_parse_au(headers, hang_lt1_sps,
+						    sizeof(hang_lt1_sps), &au), -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, au.unsupported, H265_UNSUPPORTED_SPS_LT);
+	KUNIT_EXPECT_FALSE(test, au.has_picture);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_lt0_sps,
+						    sizeof(hang_lt0_sps), &au), 0);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_lt0_pps,
+						    sizeof(hang_lt0_pps), &au), 0);
+	/* An unsupported SPS later in an AU still prevents feeding the whole AU. */
+	memcpy(trailing_sps, hang_lt0_idr, sizeof(hang_lt0_idr));
+	memcpy(trailing_sps + sizeof(hang_lt0_idr), hang_lt1_sps, sizeof(hang_lt1_sps));
+	KUNIT_EXPECT_EQ(test, h265_headers_parse_au(headers, trailing_sps,
+						    sizeof(trailing_sps), &au), -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, au.unsupported, H265_UNSUPPORTED_SPS_LT);
+}
+
+static void cached_long_term_sps_blocks_picture_until_replaced(struct kunit *test)
+{
+	struct h265_headers *headers = kunit_kzalloc(test, sizeof(*headers), GFP_KERNEL);
+	struct h265_au_info au;
+
+	KUNIT_ASSERT_NOT_NULL(test, headers);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_lt1_sps,
+						    sizeof(hang_lt1_sps), &au), -EOPNOTSUPP);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_lt0_pps,
+						    sizeof(hang_lt0_pps), &au), 0);
+	KUNIT_EXPECT_EQ(test, h265_headers_parse_au(headers, hang_lt0_idr,
+						    sizeof(hang_lt0_idr), &au), -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, au.unsupported, H265_UNSUPPORTED_SPS_LT);
+	KUNIT_EXPECT_FALSE(test, au.has_picture);
+	/* LT present with an empty table is supported and clears the old limit. */
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_lt0_sps,
+						    sizeof(hang_lt0_sps), &au), 0);
+	KUNIT_EXPECT_TRUE(test, headers->sps[0].long_term_ref_pics_present);
+	KUNIT_EXPECT_EQ(test, headers->sps[0].num_long_term_ref_pics_sps, 0);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_lt0_idr,
+						    sizeof(hang_lt0_idr), &au), 0);
+	KUNIT_EXPECT_TRUE(test, au.has_picture);
+	KUNIT_EXPECT_EQ(test, au.unsupported, H265_UNSUPPORTED_NONE);
+}
+
+static void wavefront_requires_more_than_one_column(struct kunit *test)
+{
+	struct h265_headers *headers = kunit_kzalloc(test, sizeof(*headers), GFP_KERNEL);
+	struct h265_au_info au;
+
+	KUNIT_ASSERT_NOT_NULL(test, headers);
+	/* WPP parameter sets are safe; the restriction applies on activation. */
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, wpp_params,
+						    sizeof(wpp_params), &au), 0);
+	KUNIT_EXPECT_EQ(test, h265_headers_parse_au(headers, hang_wpp1_idr,
+						    sizeof(hang_wpp1_idr), &au), -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, au.unsupported, H265_UNSUPPORTED_WPP_ONE_COLUMN);
+	KUNIT_EXPECT_FALSE(test, au.has_picture);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_wpp0_sps,
+						    sizeof(hang_wpp0_sps), &au), 0);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_wpp0_pps,
+						    sizeof(hang_wpp0_pps), &au), 0);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_wpp0_idr,
+						    sizeof(hang_wpp0_idr), &au), 0);
+	KUNIT_EXPECT_TRUE(test, au.has_picture);
+	KUNIT_EXPECT_EQ(test, headers->sps[0].width, 64U);
+	KUNIT_EXPECT_FALSE(test, headers->pps[0].entropy_coding_sync_enabled);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_wpp2_sps,
+						    sizeof(hang_wpp2_sps), &au), 0);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_wpp2_pps,
+						    sizeof(hang_wpp2_pps), &au), 0);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, hang_wpp2_idr,
+						    sizeof(hang_wpp2_idr), &au), 0);
+	KUNIT_EXPECT_TRUE(test, au.has_picture);
+	KUNIT_EXPECT_EQ(test, headers->sps[0].width, 128U);
+	KUNIT_EXPECT_TRUE(test, headers->pps[0].entropy_coding_sync_enabled);
+	KUNIT_EXPECT_EQ(test, au.unsupported, H265_UNSUPPORTED_NONE);
+}
+
 static struct kunit_case hevc_headers_cases[] = {
+	KUNIT_CASE(nonempty_sps_long_term_list_rejects_the_au),
+	KUNIT_CASE(cached_long_term_sps_blocks_picture_until_replaced),
+	KUNIT_CASE(wavefront_requires_more_than_one_column),
 	KUNIT_CASE(sps_reference_tables_and_wavefront_geometry),
 	KUNIT_CASE(output_flags_and_parameter_replacement),
 	KUNIT_CASE(highest_sublayer_limits_and_cvs_markers),
