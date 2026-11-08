@@ -128,7 +128,7 @@ static void initial_source_change_keeps_the_input_for_replay(struct kunit *test)
 	struct v4l2_event event;
 
 	v4l2_m2m_buf_queue(ctx->m2m_ctx, &f->input.vb);
-	stateful_source_change(ctx);
+	stateful_config_change(ctx);
 	KUNIT_EXPECT_PTR_EQ(test, v4l2_m2m_next_src_buf(ctx->m2m_ctx), &f->input.vb);
 	KUNIT_EXPECT_EQ(test, ctx->sequence_out, 0U);
 	KUNIT_EXPECT_TRUE(test, f->stateful.wait_capture);
@@ -148,7 +148,7 @@ static void resolution_change_event_precedes_last_without_stopping_output(struct
 	f->stateful.format_known = true;
 	ctx->is_cap_streamon = true;
 	f->frames = 1;
-	stateful_source_change(ctx);
+	stateful_config_change(ctx);
 	KUNIT_EXPECT_TRUE(test, f->event_before_completion);
 	KUNIT_EXPECT_TRUE(test, f->capture.vb.flags & V4L2_BUF_FLAG_LAST);
 	KUNIT_EXPECT_EQ(test, f->capture.vb.vb2_buf.state, VB2_BUF_STATE_DONE);
@@ -204,7 +204,7 @@ static void all_discarded_resolution_change_still_completes_empty_last(struct ku
 	ctx->is_cap_streamon = true;
 	f->frames = 1;
 	f->discard = true;
-	stateful_source_change(ctx);
+	stateful_config_change(ctx);
 	KUNIT_EXPECT_EQ(test, f->capture.vb.vb2_buf.state, VB2_BUF_STATE_DONE);
 	KUNIT_EXPECT_EQ(test, vb2_get_plane_payload(&f->capture.vb.vb2_buf, 0), 0UL);
 	KUNIT_EXPECT_TRUE(test, f->capture.vb.flags & V4L2_BUF_FLAG_LAST);
