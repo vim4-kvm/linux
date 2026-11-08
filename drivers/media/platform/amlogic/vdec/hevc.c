@@ -172,6 +172,10 @@ static int hevc_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
 	if (!h->have_au) {
 		ret = h265_headers_parse_au(&h->headers, data, size, &h->au);
 		if (ret) {
+			if (h->au.unsupported == H265_UNSUPPORTED_SPS_LT)
+				dev_dbg(h->hw->dev, "hevc: unsupported: SPS long-term list\n");
+			else if (h->au.unsupported == H265_UNSUPPORTED_WPP_ONE_COLUMN)
+				dev_dbg(h->hw->dev, "hevc: unsupported: WPP with one CTB column\n");
 			stop_ret = aml_vdec_job_stop(ctx);
 			if (stop_ret)
 				return stop_ret;
