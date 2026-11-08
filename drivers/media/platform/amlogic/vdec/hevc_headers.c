@@ -246,7 +246,15 @@ static int h265_sps_prefix(struct h265_sps_prefix *sps, struct h265_bits *b, u32
 	return h265_sps_rps(sps, b);
 }
 
-static int h265_sps(struct h265_headers *headers, struct h265_bits *b)
+static int h265_supported_sps(const struct h265_sps_prefix *sps, struct h265_au_info *au)
+{
+	if (!sps->num_long_term_ref_pics_sps)
+		return 0;
+	au->unsupported = H265_UNSUPPORTED_SPS_LT;
+	return -EOPNOTSUPP;
+}
+
+static int h265_sps(struct h265_headers *headers, struct h265_bits *b, struct h265_au_info *au)
 {
 	struct h265_sps_prefix *sps;
 	u32 id;
@@ -259,6 +267,8 @@ static int h265_sps(struct h265_headers *headers, struct h265_bits *b)
 	if (!ret) {
 		sps->valid = true;
 		headers->sps[id] = *sps;
+		/* Retain the syntax so later AUs cannot activate a rejected SPS. */
+		ret = h265_supported_sps(sps, au);
 	}
 	kfree(sps);
 	return ret;
@@ -360,6 +370,7 @@ static int h265_slice(const struct h265_headers *headers, struct h265_bits *b,
 	const struct h265_pps_prefix *pps;
 	const struct h265_sps_prefix *sps;
 	u32 id;
+	int ret;
 
 	if (!h265_u(b, 1))
 		return b->error ? -EINVAL : 0;
@@ -371,11 +382,19 @@ static int h265_slice(const struct h265_headers *headers, struct h265_bits *b,
 	if (id >= ARRAY_SIZE(headers->pps) || !headers->pps[id].valid)
 		return -EINVAL;
 	pps = &headers->pps[id];
-	if (!headers->sps[pps->sps_id].valid)
-		return -EINVAL;
 	sps = &headers->sps[pps->sps_id];
+	if (!sps->valid)
+		return -EINVAL;
+	ret = h265_supported_sps(sps, au);
+	if (ret)
+		return ret;
+	if (pps->entropy_coding_sync_enabled &&
+	    DIV_ROUND_UP(sps->width, BIT(sps->log2_ctb_size)) == 1) {
+		au->unsupported = H265_UNSUPPORTED_WPP_ONE_COLUMN;
+		return -EOPNOTSUPP;
+	}
 	pic.pps_id = id;
-	pic.limits = headers->sps[pps->sps_id].limits;
+	pic.limits = sps->limits;
 	h265_skip(b, pps->extra_slice_header_bits);
 	if (h265_ue(b) > 2)
 		return -EINVAL;
@@ -430,7 +449,7 @@ int h265_headers_parse_au(struct h265_headers *headers, const u8 *data, size_t s
 		type = (data[pos] >> 1) & 63;
 		bits = (struct h265_bits) { .data = data + pos + 2, .size = next - pos - 2 };
 		if (type == 33) {
-			ret = h265_sps(headers, &bits);
+			ret = h265_sps(headers, &bits, au);
 		} else if (type == 34) {
 			ret = h265_pps(headers, &bits);
 		} else if (type <= 9 || (type >= 16 && type <= 21)) {
