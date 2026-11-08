@@ -750,6 +750,31 @@ static void h265_read_rpm(struct aml_hevc_ctx *h)
 		dev_dbg(h->hw->dev, "hevc: rpm[%02x]=%*ph\n", i, 64, &h->dpb.p[i]);
 }
 
+static void h265_report_rps_failure(struct aml_hevc_ctx *h, int error)
+{
+	const struct h265_slice_rps *rps = &h->au.picture.rps;
+	unsigned int i;
+
+	dev_err(h->hw->dev, "hevc: RPS error %d poc=%d slice lsb=%u/%u RPM=%u/%u\n",
+		error, h->dpb.curr_poc, rps->poc_lsb, rps->poc_bits,
+		h->dpb.p[P_POC_LSB], h->dpb.p[P_LOG2_MAX_POC_LSB_MINUS4] + 4);
+	dev_err(h->hw->dev, "hevc: RPS words=%*ph\n", 32, h->dpb.p);
+	for (i = 0; i < rps->num_long_term_sps + rps->num_long_term_pics; i++) {
+		const struct h265_lt_ref *lt = &rps->lt[i];
+
+		dev_err(h->hw->dev, "hevc: LT[%u] lsb=%u used=%u msb=%u cycle=%u/%u\n",
+			i, lt->poc_lsb, lt->used, lt->msb_present, lt->delta_cycle, lt->cycle);
+	}
+	for (i = 0; i < H265_SLOTS; i++) {
+		const struct h265_pic *pic = &h->dpb.pic[i];
+
+		if (pic->valid)
+			dev_err(h->hw->dev, "hevc: DPB[%u] poc=%d ref=%u lt=%u size=%ux%u\n",
+				i, pic->poc, pic->referenced, pic->long_term,
+				pic->width, pic->height);
+	}
+}
+
 /* Returns 0 to decode, 1 to skip, 2 to configure after stop, or a negative error. */
 static int h265_begin_picture(struct aml_hevc_ctx *h)
 {
@@ -776,9 +801,11 @@ static int h265_begin_picture(struct aml_hevc_ctx *h)
 	h265_update_poc(&h->dpb);
 	h->skip_picture = h265_update_random_access(&h->dpb);
 	if (!h->skip_picture) {
-		ret = h265_resolve_rps(&h->dpb, &h->dpb.rps);
-		if (ret)
+		ret = h265_resolve_rps(&h->dpb, &h->au.picture.rps, &h->dpb.rps);
+		if (ret) {
+			h265_report_rps_failure(h, ret);
 			return ret;
+		}
 		h265_apply_rps(&h->dpb, &h->dpb.rps);
 		h265_dpb_begin_picture(&h->dpb, &info, &h->au.picture.limits);
 	}
