@@ -48,11 +48,29 @@ struct h265_headers {
 	struct h265_pps_prefix pps[64];
 };
 
+struct h265_lt_ref {
+	u16 poc_lsb;
+	u8 sps_index;
+	bool from_sps, used, msb_present;
+	u32 delta_cycle, cycle;
+};
+
+struct h265_slice_rps {
+	u16 poc_lsb;
+	u8 poc_bits;
+	bool st_from_sps;
+	u8 st_index;
+	struct h265_st_rps st;
+	u8 num_long_term_sps, num_long_term_pics;
+	struct h265_lt_ref lt[H265_HEADER_REFS];
+};
+
 struct h265_picture_header {
 	u8 nal_type, temporal_id, pps_id;
 	bool no_output_of_prior_pics;
 	bool pic_output;
 	struct h265_output_limits limits;
+	struct h265_slice_rps rps;
 };
 
 struct h265_au_info {

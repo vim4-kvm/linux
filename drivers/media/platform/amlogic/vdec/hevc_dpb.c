@@ -61,78 +61,74 @@ bool h265_rps_matches(const struct h265_resolved_rps *resolved, const u16 *words
 	return true;
 }
 
-int h265_resolve_rps(const struct h265_dpb *h, struct h265_resolved_rps *resolved)
+int h265_resolve_rps(const struct h265_dpb *h, const struct h265_slice_rps *slice,
+		     struct h265_resolved_rps *resolved)
 {
 	bool reset = h->nal_type == H265_NAL_IDR_W_RADL ||
 		     h->nal_type == H265_NAL_IDR_N_LP ||
 		     (h->nal_type >= H265_NAL_BLA_W_LP && h->nal_type <= H265_NAL_BLA_N_LP);
 	struct h265_resolved_rps result = {};
-	int lt_poc[H265_MAX_REF], lt_slot[H265_MAX_REF], n_lt = 0;
-	bool lt_used[H265_MAX_REF], assigned[H265_MAX_REF] = {};
-	u32 st_slots = 0, mask = BIT(h->p[P_LOG2_MAX_POC_LSB_MINUS4] + 4) - 1;
-	int i, j, k;
+	u32 mask = BIT(h->p[P_LOG2_MAX_POC_LSB_MINUS4] + 4) - 1;
+	u32 n_lt = slice->num_long_term_sps + slice->num_long_term_pics;
+	u32 st = 0, lt = 0;
+	int i, j;
 
 	memcpy(result.words, &h->p[P_CUR_RPS], sizeof(result.words));
 	if (reset)
 		goto done;
 
-	/* Establish all short-term ownership before considering any LT LSB. */
+	if (slice->poc_bits != h->p[P_LOG2_MAX_POC_LSB_MINUS4] + 4 ||
+	    slice->poc_lsb != h->p[P_POC_LSB] || n_lt > H265_MAX_REF)
+		return -EINVAL;
+
 	for (i = 0; i < H265_MAX_REF && result.words[i] != RPS_END; i++) {
 		u16 entry = result.words[i];
 		int poc = h265_rps_poc(h->curr_poc, entry), slot = -1;
 		bool used = entry & BIT(RPS_USED_BIT);
 
 		if (entry & BIT(RPS_LT_BIT)) {
-			lt_poc[n_lt] = poc;
-			lt_used[n_lt++] = used;
+			const struct h265_lt_ref *ref;
+			s64 full_poc;
+
+			if (lt == n_lt)
+				return -EINVAL;
+			ref = &slice->lt[lt++];
+			if (ref->used != used || ref->poc_lsb != ((u32)poc & mask))
+				return -EINVAL;
+			full_poc = (s64)h->curr_poc - slice->poc_lsb + ref->poc_lsb -
+				(s64)ref->cycle * (mask + 1);
+			for (j = 0; j < H265_SLOTS; j++) {
+				const struct h265_pic *pic = &h->pic[j];
+
+				if (!h265_reference_candidate(h, j) ||
+				    (ref->msb_present ? pic->poc != full_poc :
+				     ((u32)pic->poc & mask) != ref->poc_lsb))
+					continue;
+				if (slot >= 0 && pic->poc != h->pic[slot].poc)
+					return -EINVAL;
+				if (slot < 0 || pic->decode_idx > h->pic[slot].decode_idx)
+					slot = j;
+			}
+			if (used && slot < 0)
+				return -EINVAL;
+			h265_rps_add(used ? &result.lt_curr : &result.lt_foll, slot, used);
 			continue;
 		}
+		if (st == slice->st.num_delta_pocs ||
+		    slice->st.delta_poc[st] != poc - h->curr_poc ||
+		    !!(slice->st.used & BIT(st)) != used)
+			return -EINVAL;
+		st++;
 		for (j = 0; j < H265_SLOTS; j++)
 			if (h265_reference_candidate(h, j) && h->pic[j].poc == poc &&
 			    (slot < 0 || h->pic[j].decode_idx > h->pic[slot].decode_idx))
 				slot = j;
-		if (slot >= 0)
-			st_slots |= BIT(slot);
 		h265_rps_add(entry & BIT(RPS_USED_BIT - 1) ?
 			     &result.st_before : &result.st_after, slot, used);
 	}
 
-	for (i = 0; i < n_lt; i++) {
-		int entries[H265_MAX_REF], candidates[H265_SLOTS];
-		int count = 0, n_candidates = 0;
-
-		if (assigned[i])
-			continue;
-		for (j = i; j < n_lt; j++)
-			if (((u32)lt_poc[j] & mask) == ((u32)lt_poc[i] & mask))
-				entries[count++] = j;
-		for (j = 0; j < H265_SLOTS; j++) {
-			if ((st_slots & BIT(j)) || !h265_reference_candidate(h, j) ||
-			    ((u32)h->pic[j].poc & mask) != ((u32)lt_poc[i] & mask))
-				continue;
-			for (k = 0; k < n_candidates; k++)
-				if (h->pic[candidates[k]].poc == h->pic[j].poc)
-					break;
-			if (k == n_candidates)
-				candidates[n_candidates++] = j;
-			else if (h->pic[j].decode_idx > h->pic[candidates[k]].decode_idx)
-				candidates[k] = j;
-		}
-		/* Equal-size LSB groups follow descending POC in RPM order. */
-		if (n_candidates && n_candidates != count)
-			return -EINVAL;
-		for (j = 0; j < n_candidates; j++)
-			for (k = j + 1; k < n_candidates; k++)
-				if (h->pic[candidates[k]].poc > h->pic[candidates[j]].poc)
-					swap(candidates[j], candidates[k]);
-		for (j = 0; j < count; j++) {
-			lt_slot[entries[j]] = n_candidates ? candidates[j] : -1;
-			assigned[entries[j]] = true;
-		}
-	}
-	for (i = 0; i < n_lt; i++)
-		h265_rps_add(lt_used[i] ? &result.lt_curr : &result.lt_foll,
-			     lt_slot[i], lt_used[i]);
+	if (st != slice->st.num_delta_pocs || lt != n_lt)
+		return -EINVAL;
 done:
 	*resolved = result;
 	return 0;
