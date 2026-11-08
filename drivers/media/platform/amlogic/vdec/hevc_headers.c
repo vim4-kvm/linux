@@ -402,14 +402,138 @@ static size_t h265_start_code(const u8 *data, size_t size, size_t from)
 	return size;
 }
 
+struct h265_nal {
+	size_t start, end, header;
+	u8 type;
+	bool base_layer;
+};
+
+static int h265_next_nal(const u8 *data, size_t size, size_t *cursor,
+			 struct h265_nal *nal)
+{
+	size_t code = h265_start_code(data, size, *cursor), next;
+
+	if (code == size)
+		return 0;
+	nal->start = code && !data[code - 1] ? code - 1 : code;
+	nal->header = code + 3;
+	next = h265_start_code(data, size, nal->header);
+	nal->end = next < size && next && !data[next - 1] ? next - 1 : next;
+	if (nal->end - nal->header < 2 || data[nal->header] & 0x80 ||
+	    !(data[nal->header + 1] & 7))
+		return -EINVAL;
+	nal->type = (data[nal->header] >> 1) & 63;
+	nal->base_layer = !(data[nal->header] & 1 || data[nal->header + 1] & 0xf8);
+	*cursor = nal->end;
+	return 1;
+}
+
+static bool h265_prefix_parameter_set(const struct h265_nal *nal)
+{
+	return nal->base_layer && nal->type >= 32 && nal->type <= 34;
+}
+
+static int h265_parameter_set_order(const u8 *data, size_t size, bool *reorder)
+{
+	u16 seen_vps = 0, waiting_sps = 0;
+	size_t cursor = 0;
+	struct h265_nal nal;
+	bool needed = false;
+	int ret;
+
+	*reorder = false;
+	while ((ret = h265_next_nal(data, size, &cursor, &nal)) > 0) {
+		u16 id;
+
+		if (nal.type < 32) {
+			*reorder = needed;
+			return 0;
+		}
+		if (!nal.base_layer || (nal.type != 32 && nal.type != 33))
+			continue;
+		if (nal.end - nal.header < 3)
+			return -EINVAL;
+		id = BIT(data[nal.header + 2] >> 4);
+		if (nal.type == 32) {
+			needed |= !!(waiting_sps & id);
+			seen_vps |= id;
+		} else if (!(seen_vps & id)) {
+			waiting_sps |= id;
+		}
+	}
+	return ret;
+}
+
+static int h265_next_parameter_set(const u8 *data, size_t size, size_t *cursor,
+				   u8 type, struct h265_nal *nal)
+{
+	int ret;
+
+	while ((ret = h265_next_nal(data, size, cursor, nal)) > 0) {
+		if (nal->type < 32)
+			return 0;
+		if (h265_prefix_parameter_set(nal) && nal->type == type)
+			return 1;
+	}
+	return ret;
+}
+
+int h265_headers_copy_au(u8 *dst, const u8 *data, size_t size, bool reorder)
+{
+	size_t cursor = 0, by_type[3] = {}, written = 0;
+	struct h265_nal nal, sorted;
+	u8 type = 32;
+	int ret;
+
+	if (!dst || !data || !size)
+		return -EINVAL;
+	if (!reorder) {
+		memcpy(dst, data, size);
+		return 0;
+	}
+	while ((ret = h265_next_nal(data, size, &cursor, &nal)) > 0) {
+		const struct h265_nal *source = &nal;
+
+		if (!written && nal.start) {
+			memcpy(dst, data, nal.start);
+			written = nal.start;
+		}
+		if (nal.type < 32) {
+			memcpy(dst + written, data + nal.start, size - nal.start);
+			return 0;
+		}
+		if (h265_prefix_parameter_set(&nal)) {
+			while (type <= 34) {
+				ret = h265_next_parameter_set(data, size, &by_type[type - 32],
+							      type, &sorted);
+				if (ret < 0)
+					return ret;
+				if (ret)
+					break;
+				type++;
+			}
+			if (type > 34)
+				return -EINVAL;
+			source = &sorted;
+		}
+		memcpy(dst + written, data + source->start, source->end - source->start);
+		written += source->end - source->start;
+	}
+	return ret < 0 ? ret : -EINVAL;
+}
+
 int h265_headers_parse_au(struct h265_headers *headers, const u8 *data, size_t size,
 			  struct h265_au_info *au)
 {
 	size_t start, next;
+	int order_ret;
 
 	memset(au, 0, sizeof(*au));
 	if (!data || !size)
 		return -EINVAL;
+	order_ret = h265_parameter_set_order(data, size, &au->reorder_parameter_sets);
+	if (order_ret)
+		return order_ret;
 	start = h265_start_code(data, size, 0);
 	if (start == size)
 		return -EINVAL;

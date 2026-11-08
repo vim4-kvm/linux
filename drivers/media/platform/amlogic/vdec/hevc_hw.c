@@ -405,6 +405,7 @@ static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 	struct aml_vdec_hw *hw = h->hw;
 	/* Keep the padded write pointer distinct from the empty-ring pointer. */
 	size_t want = ALIGN(size + H265_PADDING_SIZE + 8, SZ_64K);
+	int ret;
 
 	if (!data || !size)
 		return -EINVAL;
@@ -420,7 +421,9 @@ static int h265_feed(struct aml_hevc_ctx *h, const void *data, size_t size)
 		h->stream_size = want;
 	}
 
-	memcpy(h->stream_v, data, size);
+	ret = h265_headers_copy_au(h->stream_v, data, size, h->au.reorder_parameter_sets);
+	if (ret)
+		return ret;
 	memset(h->stream_v + size, 0, h->stream_size - size);
 	h->payload = size;
 	dev_dbg(hw->dev, "hevc: input bytes=%zu prefix=%*ph start=%pad skip=0\n",

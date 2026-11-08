@@ -296,7 +296,87 @@ static void real_slice_rps_msb_cycles(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, h->rps.lt_foll.ref[0].slot, -1);
 }
 
+struct hevc_test_bytes {
+	const u8 *data;
+	size_t size;
+};
+
+static size_t join_test_nals(u8 *dst, const struct hevc_test_bytes *nals, size_t count)
+{
+	size_t i, size = 0;
+
+	for (i = 0; i < count; i++) {
+		memcpy(dst + size, nals[i].data, nals[i].size);
+		size += nals[i].size;
+	}
+	return size;
+}
+
+static void prefix_parameter_sets_are_stably_reordered(struct kunit *test)
+{
+	/* Different VPS0 bytes from RPS_D and OPFLAG_B, in that order. */
+	static const u8 vps_a[] = {
+		0, 0, 0, 1, 0x40, 1, 12, 2, 255, 255, 1, 96, 0, 0, 3, 0,
+		128, 0, 0, 3, 0, 0, 3, 0, 90, 0, 0, 10, 80, 36,
+	};
+	static const u8 vps_b[] = {
+		0, 0, 0, 1, 0x40, 1, 12, 1, 255, 255, 1, 96, 0, 0, 3, 0,
+		0, 3, 0, 0, 3, 0, 0, 3, 0, 93, 240, 36,
+	};
+	static const u8 sei[] = { 0, 0, 1, 0x4e, 1, 0x80 };
+	static const u8 idr[] = { 0, 0, 1, 0x26, 1, 0xae, 0, 0 };
+	const struct hevc_test_bytes original[] = {
+		{ rpsd_params + 53, 12 }, { rpsd_params, 53 }, { sei, sizeof(sei) },
+		{ vps_a, sizeof(vps_a) }, { vps_b, sizeof(vps_b) },
+		{ opflag_params + 35, 11 }, { idr, sizeof(idr) },
+	};
+	const struct hevc_test_bytes sorted[] = {
+		{ vps_a, sizeof(vps_a) }, { vps_b, sizeof(vps_b) }, { sei, sizeof(sei) },
+		{ rpsd_params, 53 }, { rpsd_params + 53, 12 },
+		{ opflag_params + 35, 11 }, { idr, sizeof(idr) },
+	};
+	const struct hevc_test_bytes pps_first[] = {
+		{ rpsd_params + 53, 12 }, { vps_a, sizeof(vps_a) },
+		{ rpsd_params, 53 }, { idr, sizeof(idr) },
+	};
+	const struct hevc_test_bytes late_vps[] = {
+		{ rpsd_params, 53 }, { rpsd_params + 53, 12 },
+		{ idr, sizeof(idr) }, { vps_a, sizeof(vps_a) },
+	};
+	struct h265_headers *headers = kunit_kzalloc(test, sizeof(*headers), GFP_KERNEL);
+	u8 input[192], expected[192], output[192];
+	struct h265_au_info au;
+	size_t size, expected_size;
+
+	KUNIT_ASSERT_NOT_NULL(test, headers);
+	size = join_test_nals(input, original, ARRAY_SIZE(original));
+	expected_size = join_test_nals(expected, sorted, ARRAY_SIZE(sorted));
+	KUNIT_ASSERT_EQ(test, size, expected_size);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, input, size, &au), 0);
+	KUNIT_ASSERT_TRUE(test, au.reorder_parameter_sets);
+	KUNIT_ASSERT_EQ(test, h265_headers_copy_au(output, input, size, true), 0);
+	KUNIT_EXPECT_MEMEQ(test, output, expected, size);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, output, size, &au), 0);
+	KUNIT_EXPECT_FALSE(test, au.reorder_parameter_sets);
+	KUNIT_ASSERT_EQ(test, h265_headers_copy_au(output, expected, size, false), 0);
+	KUNIT_EXPECT_MEMEQ(test, output, expected, size);
+	/* PPS preceding SPS alone must leave the feed byte-for-byte unchanged. */
+	size = join_test_nals(input, pps_first, ARRAY_SIZE(pps_first));
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, input, size, &au), 0);
+	KUNIT_EXPECT_FALSE(test, au.reorder_parameter_sets);
+	KUNIT_ASSERT_EQ(test, h265_headers_copy_au(output, input, size, false), 0);
+	KUNIT_EXPECT_MEMEQ(test, output, input, size);
+	size = join_test_nals(input, late_vps, ARRAY_SIZE(late_vps));
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, input, size, &au), 0);
+	KUNIT_EXPECT_FALSE(test, au.reorder_parameter_sets);
+	/* With no same-AU VPS at all, there is also nothing to move. */
+	size = join_test_nals(input, late_vps, ARRAY_SIZE(late_vps) - 1);
+	KUNIT_ASSERT_EQ(test, h265_headers_parse_au(headers, input, size, &au), 0);
+	KUNIT_EXPECT_FALSE(test, au.reorder_parameter_sets);
+}
+
 static struct kunit_case hevc_headers_cases[] = {
+	KUNIT_CASE(prefix_parameter_sets_are_stably_reordered),
 	KUNIT_CASE(real_slice_rps_msb_cycles),
 	KUNIT_CASE(inline_prediction_and_long_term_source_boundaries),
 	KUNIT_CASE(sps_reference_tables_and_wavefront_geometry),
