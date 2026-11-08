@@ -719,6 +719,7 @@ static int t7_power_off(struct aml_vdec_hw *hw)
 	s32 state;
 	int ret = 0, parent_ret = 0;
 
+	regcache_cache_only(hw->map[DOS_BUS], true);
 	/* Vendor order: clocks off, then secure domain off; no local PD reset. */
 	if (hw->vdec1.clocks_held) {
 		clk_bulk_disable_unprepare(2, hw->vdec1.gates);
@@ -820,6 +821,7 @@ static int t7_bus_on(struct aml_vdec_hw *hw)
 			vdec, nic3, clk_get_rate(hw->vdec1.gates[VDEC_MUX].clk));
 		return ret ?: -EHOSTDOWN;
 	}
+	regcache_cache_only(hw->map[DOS_BUS], false);
 	return 0;
 }
 
@@ -1324,11 +1326,25 @@ struct aml_vdec_hw *vdec_get_hw(void *priv)
 	return dev->dec_hw;
 }
 
+/*
+ * VDEC, VDEC2, HCODEC and HEVC are separate power domains, and HCODEC
+ * belongs to the JPEG encoder. Keep debugfs to the DOS-top registers.
+ */
+static const struct regmap_range dos_precious_ranges[] = {
+	regmap_reg_range(0, DOS_SW_RESET0 - 4),
+};
+
+static const struct regmap_access_table dos_precious_table = {
+	.yes_ranges = dos_precious_ranges,
+	.n_yes_ranges = ARRAY_SIZE(dos_precious_ranges),
+};
+
 static const struct regmap_config dos_regmap_conf = {
 	.reg_bits = 32,
 	.val_bits = 32,
 	.reg_stride = 4,
-	.max_register = 0x10000,
+	.max_register = 0xfffc,
+	.precious_table = &dos_precious_table,
 };
 
 static const struct regmap_config dmc_regmap_conf = {
@@ -1415,6 +1431,9 @@ int dev_request_hw_resources(void *priv)
 
 		if (IS_ERR(hw->map[i]))
 			return PTR_ERR(hw->map[i]);
+		/* T7 DOS-top is only accessible between t7_bus_on() and t7_power_off(). */
+		if (hw->has_dbus_ctrl)
+			regcache_cache_only(hw->map[i], true);
 
 		dev_dbg(&pdev->dev, "%s, res start %llx, end %llx, iomap: %p\n",
 			__func__, (unsigned long long)res.start,
