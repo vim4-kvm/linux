@@ -207,7 +207,7 @@ static int hevc_submit(struct aml_vdec_ctx *ctx, struct vb2_v4l2_buffer *src,
 			h265_dpb_end_sequence(&h->dpb);
 		h->have_au = false;
 	}
-	result->format_changed = ret == 1;
+	result->config_changed = ret == 1;
 	result->picture = h->have_picture;
 	result->slot = h->dpb.cur;
 	result->flags = h->dpb.slice_type == H265_I_SLICE ? V4L2_BUF_FLAG_KEYFRAME :
