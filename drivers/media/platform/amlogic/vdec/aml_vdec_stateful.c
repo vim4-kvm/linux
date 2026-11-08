@@ -153,6 +153,28 @@ static int stateful_get_selection(struct aml_vdec_ctx *ctx, struct v4l2_selectio
 	return ret;
 }
 
+static bool stateful_format_matches(const struct aml_vdec_stateful_ctx *s,
+				    const struct aml_vdec_stream_info *info)
+{
+	const struct v4l2_pix_format_mplane *old = &s->format;
+	const struct v4l2_pix_format_mplane *new = &info->format;
+	unsigned int i;
+
+	if (old->width != new->width || old->height != new->height ||
+	    old->pixelformat != new->pixelformat || old->field != new->field ||
+	    old->colorspace != new->colorspace || old->ycbcr_enc != new->ycbcr_enc ||
+	    old->quantization != new->quantization || old->xfer_func != new->xfer_func ||
+	    old->flags != new->flags || old->num_planes != new->num_planes)
+		return false;
+	for (i = 0; i < old->num_planes; i++)
+		if (old->plane_fmt[i].bytesperline != new->plane_fmt[i].bytesperline ||
+		    old->plane_fmt[i].sizeimage != new->plane_fmt[i].sizeimage)
+			return false;
+	return s->crop.left == info->crop.left && s->crop.top == info->crop.top &&
+		s->crop.width == info->crop.width && s->crop.height == info->crop.height &&
+		s->min_capture == info->min_capture;
+}
+
 static void stateful_config_change(struct aml_vdec_ctx *ctx)
 {
 	struct aml_vdec_stateful_ctx *s = aml_vdec_stateful(ctx);
@@ -164,6 +186,15 @@ static void stateful_config_change(struct aml_vdec_ctx *ctx)
 	bool end_capture = s->format_known && ctx->is_cap_streamon;
 
 	ctx->node->stateful_ops->get_format(ctx, &info);
+	if (end_capture && stateful_format_matches(s, &info)) {
+		/*
+		 * The codec has stopped DMA. Return its retained pictures before
+		 * prepare reconfigures private storage and replays this OUTPUT.
+		 * Unchanged queries let the existing CAPTURE stream continue.
+		 */
+		stateful_flush(ctx, VB2_BUF_STATE_DONE, false);
+		return;
+	}
 	s->format = info.format;
 	capture_matches = !s->format_known && ctx->is_cap_streamon &&
 		old->width == s->format.width && old->height == s->format.height &&
